@@ -29,6 +29,7 @@ type Blockchain_struct struct {
 	Network          *NetworkService   `json:"-"`
 	Mutex            sync.Mutex        `json:"-"`
 	BaseFee          uint64            `json:"base_fee"` // Add this field
+	VM               *VM               `json:"vm"`       // Add this line
 
 }
 
@@ -55,6 +56,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		newBlockchain.Accounts = make(map[string]uint64)
 		newBlockchain.MinStake = 100000 * float64(constantset.Decimals)
 		newBlockchain.SlashingPool = 0
+		newBlockchain.VM = NewVM()
 		newBlockchain.Validators = []*Validator{}
 		newBlockchain.Network = NewNetworkService(newBlockchain)
 		newBlockchain.Mutex = sync.Mutex{}
@@ -304,6 +306,23 @@ func (bc *Blockchain_struct) countTxsFrom(from string) int {
 
 func (bc *Blockchain_struct) CheckBalance(add string) uint64 {
 	return bc.Accounts[add]
+}
+
+func (bc *Blockchain_struct) FetchBalanceOfWallet(address string) uint64 {
+	sum := uint64(0)
+
+	for _, block := range bc.Blocks {
+		for _, txn := range block.Transactions {
+			if txn.Status == constantset.StatusSuccess {
+				if txn.To == address {
+					sum += txn.Value
+				} else if txn.From == address {
+					sum -= txn.Value
+				}
+			}
+		}
+	}
+	return sum
 }
 
 func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {

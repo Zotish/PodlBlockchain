@@ -11,7 +11,9 @@ import (
 	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
 	wallet "github.com/Zotish/DefenceProject/WalletComponent"
 	"github.com/gorilla/mux"
-	"github.com/rs/cors"
+
+	//"github.com/rs/cors"
+	"github.com/gorilla/handlers"
 )
 
 type BlockchainServer struct {
@@ -70,9 +72,54 @@ func (b *BlockchainServer) sendTransaction(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) {
+// 	log.Printf("fetchNBlocks called - Method: %s, Origin: %s", r.Method, r.Header.Get("Origin"))
+
+// 	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+// 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+// 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+// 	w.Header().Set("Content-Type", "application/json")
+
+// 	// Handle preflight requests
+// 	if r.Method == "OPTIONS" {
+// 		log.Println("Handling OPTIONS preflight request")
+// 		w.WriteHeader(http.StatusOK)
+// 		return
+// 	}
+
+// 	if r.Method != http.MethodGet {
+// 		log.Printf("Method not allowed: %s", r.Method)
+// 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// 		return
+// 	}
+
+// 	b.BlockchainPtr.Mutex.Lock()
+// 	defer b.BlockchainPtr.Mutex.Unlock()
+
+// 	blocks := b.BlockchainPtr.Blocks
+// 	var blocksToReturn []*blockchaincomponent.Block
+// 	if len(blocks) < 10 {
+// 		blocksToReturn = blocks
+// 	} else {
+// 		blocksToReturn = blocks[len(blocks)-10:]
+// 	}
+
+// 	log.Printf("Returning %d blocks", len(blocksToReturn))
+// 	json.NewEncoder(w).Encode(blocksToReturn)
+// }
+
 func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) {
-	//w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Content-Type", "application/json")
+
+	// Handle preflight requests
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	b.BlockchainPtr.Mutex.Lock()
 	defer b.BlockchainPtr.Mutex.Unlock()
 
@@ -89,6 +136,7 @@ func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) 
 	} else {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+
 }
 func (bcs *BlockchainServer) GetBlockchainHeight(w http.ResponseWriter, r *http.Request) {
 	height := uint64(len(bcs.BlockchainPtr.Blocks))
@@ -184,106 +232,119 @@ func (b *BlockchainServer) GetBlock(w http.ResponseWriter, r *http.Request) {
 // 	})
 // }
 
-func enableCORS1(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set headers
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+// func (b *BlockchainServer) Start() {
+// 	portStr := fmt.Sprintf("%d", b.Port)
+// 	router := mux.NewRouter()
+// 	//router.Use(enableCORS)
 
-		// Handle preflight requests
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+// 	http.HandleFunc("/", b.getBlockchain)
+// 	http.HandleFunc("/balance", b.GetBalance)
+// 	http.HandleFunc("/send_tx", b.sendTransaction)
+// 	http.HandleFunc("/fetch_last_n_block", b.fetchNBlocks)
+// 	http.HandleFunc("/account/{address}/nonce", b.GetAccountNonce)
+// 	http.HandleFunc("/getheight", b.GetBlockchainHeight)
+// 	http.HandleFunc("/validator/{address}", b.ValidatorStats)
+// 	http.HandleFunc("/network", b.NetworkStats)
+// 	http.HandleFunc("/faucet", b.Faucet)
 
-		next.ServeHTTP(w, r)
+// 	// You can also specify the allowed methods, headers, etc.
+
+// 	log.Println("Blockchain server is starting on port:", b.Port)
+// 	err := http.ListenAndServe("127.0.0.1:"+portStr, handlers.CORS(
+
+//			handlers.AllowedOrigins([]string{"http://localhost:3000"}),
+//			handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}),
+//			handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type", "Authorization"}),
+//		)(router))
+//		if err != nil {
+//			log.Fatalf("Failed to start blockchain server: %v", err)
+//		}
+//		log.Println("Blockchain server started successfully")
+//	}
+//
+// Deploy a contract
+// Add these endpoints to your server
+func (bcs *BlockchainServer) DeployContract(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Code  string `json:"code"`
+		Value uint64 `json:"value"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	address, err := bcs.BlockchainPtr.VM.DeployContract(request.Code, "sender", request.Value)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"contract_address": address,
 	})
 }
 
-func enableCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers
-		//Access to fetch at 'http://localhost:5000/fetch_last_n_block?n=10' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.
-		w.Header().Set("Access-Control-Allow-Origin", "*")                     // Allow all origins (or restrict to specific origin)
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000") // Allow specific origin
-		w.Header().Set("Access-Control-Allow-Credentials", "true")             // Allow credentials
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-		w.Header().Set("Content-Type", "application/json")
-		// Handle preflight requests
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+func (bcs *BlockchainServer) CallContract(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Address  string   `json:"address"`
+		Function string   `json:"function"`
+		Args     []string `json:"args"`
+		Value    uint64   `json:"value"`
+	}
 
-		next.ServeHTTP(w, r)
-	})
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	result, err := bcs.BlockchainPtr.VM.ExecuteContract(request.Address, "caller", request.Function, request.Args, request.Value)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(result)
 }
-
 func (b *BlockchainServer) Start() {
 	portStr := fmt.Sprintf("%d", b.Port)
 	router := mux.NewRouter()
-	//router.Use(enableCORS)
 
-	http.HandleFunc("/", b.getBlockchain)
-	http.HandleFunc("/balance", b.GetBalance)
-	http.HandleFunc("/send_tx", b.sendTransaction)
-	http.HandleFunc("/fetch_last_n_block", b.fetchNBlocks)
-	http.HandleFunc("/account/{address}/nonce", b.GetAccountNonce)
-	http.HandleFunc("/getheight", b.GetBlockchainHeight)
-	http.HandleFunc("/validator/{address}", b.ValidatorStats)
-	http.HandleFunc("/network", b.NetworkStats)
-	http.HandleFunc("/faucet", b.Faucet)
+	// Configure CORS properly
+	corsHandler := handlers.CORS(
+		handlers.AllowedOrigins([]string{"http://localhost:3000", "http://127.0.0.1:3000"}),
+		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}),
+		handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type", "Authorization", "Accept"}),
+		handlers.AllowCredentials(),
+	)
 
-	c := cors.New(cors.Options{
-		// The `AllowOrigin` field is crucial. It tells the browser that requests
-		// from 'http://localhost:3000' are allowed.
-		AllowedOrigins: []string{"http://localhost:3000"},
-		// You can also specify the allowed methods, headers, etc.
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"Content-Type", "Authorization"},
-		// Setting AllowCredentials to true is important if your frontend
-		// sends cookies or authorization headers.
-		AllowCredentials: true,
+	// Define your routes
+	router.HandleFunc("/", b.getBlockchain).Methods("GET")
+	router.HandleFunc("/balance", b.GetBalance).Methods("GET")
+	router.HandleFunc("/send_tx", b.sendTransaction).Methods("POST")
+	router.HandleFunc("/fetch_last_n_block", b.fetchNBlocks).Methods("GET")
+	router.HandleFunc("/account/{address}/nonce", b.GetAccountNonce).Methods("GET")
+	router.HandleFunc("/getheight", b.GetBlockchainHeight).Methods("GET")
+	router.HandleFunc("/validator/{address}", b.ValidatorStats).Methods("GET")
+	router.HandleFunc("/network", b.NetworkStats).Methods("GET")
+	router.HandleFunc("/faucet", b.Faucet).Methods("POST")
+	router.HandleFunc("/block/{id}", b.GetBlock).Methods("GET")
+
+	// Add OPTIONS handler for preflight requests
+	router.Methods("OPTIONS").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := c.Handler(router)
-
 	log.Println("Blockchain server is starting on port:", b.Port)
-	err := http.ListenAndServe(":"+portStr, handler)
+
+	// Use the CORS handler
+	err := http.ListenAndServe("127.0.0.1:"+portStr, corsHandler(router))
 	if err != nil {
 		log.Fatalf("Failed to start blockchain server: %v", err)
 	}
 	log.Println("Blockchain server started successfully")
 }
-
-// func (b *BlockchainServer) Start() {
-// 	portStr := fmt.Sprintf("%d", b.Port)
-
-// 	// Then wrap your router:
-// 	router := mux.NewRouter()
-// 	router.Use(enableCORS)
-
-// 	router.HandleFunc("/", b.getBlockchain)
-// 	router.HandleFunc("/balance", b.GetBalance)
-// 	router.HandleFunc("/send_tx", b.sendTransaction)
-// 	router.HandleFunc("/fetch_last_n_block", b.fetchNBlocks)
-// 	router.HandleFunc("/account/{address}/nonce", b.GetAccountNonce)
-// 	router.HandleFunc("/getheight", b.GetBlockchainHeight)
-// 	router.HandleFunc("/validator/{address}", b.ValidatorStats)
-// 	//router.HandleFunc("/network", b.NetworkStats)
-// 	//router.HandleFunc("/faucet", b.Faucet)
-// 	// Add new endpoints
-// 	router.HandleFunc("/block/{id}", b.GetBlock)
-// 	// router.HandleFunc("/tx/{hash}", b.GetTransaction)
-// 	// router.HandleFunc("/blocks", b.GetBlocks)
-// 	// router.HandleFunc("/transactions", b.GetTransactions)
-// 	// router.HandleFunc("/address/{address}/transactions", b.GetAddressTransactions)
-
-// 	log.Println("Blockchain server is starting on port:", b.Port)
-// 	err := http.ListenAndServe("127.0.0.1:"+portStr, nil)
-// 	if err != nil {
-// 		log.Fatalf("Failed to start blockchain server: %v", err)
-// 	}
-// }

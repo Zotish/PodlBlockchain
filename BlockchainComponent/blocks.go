@@ -80,8 +80,8 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 
 	baseFee := bc.CalculateBaseFee()
 
-	if len(bc.Transaction_pool) > 10000 { // Threshold for degraded mode
-		runtime.GOMAXPROCS(runtime.NumCPU() / 2) // Reduce CPU usage
+	if len(bc.Transaction_pool) > 10000 {
+		runtime.GOMAXPROCS(runtime.NumCPU() / 2)
 		defer runtime.GOMAXPROCS(runtime.NumCPU())
 	}
 	validator, err := bc.SelectValidator()

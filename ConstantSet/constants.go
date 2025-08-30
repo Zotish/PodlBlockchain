@@ -10,20 +10,23 @@ var (
 	MinGas                  = 21000
 	GasPerByte              = 68
 	GasContractCall         = 20000
-	BLOCKCHAIN_DB_PATH      = "5000/evodb"
+	BLOCKCHAIN_DB_PATH      = "5001/evodb"
 	BLOCKCHAIN_KEY          = "blockchain_key"
-	MaxBlockGas             = 8000000   // Adjust as needed
-	ChainID                 = uint(137) // Mainnet chain ID - change per network
+	MaxBlockGas             = 8000000
+	ChainID                 = uint(139)
 	MaxBlockSize            = 2 * 1024 * 1024
 	MaxTxPoolSize           = 10000
 	MaxTxsPerAccount        = 100
-	BaseFeeUpdateBlock      = 10             // Bl
-	InitialBaseFee          = 1_000_000_000  // 1 Gwei in wei
-	MinBaseFee              = 500_000_000    // 0.5 Gwei minimum
-	MaxBaseFee              = 10_000_000_000 // 10 Gwei cap
-	BaseFeeChangeDenom      = 8              // 1/8 = 12.5% max change
-	RecentBlocksForTxCount  = 5              // Blocks to consider for sender tx count
-	TransactionTTL          = 3600           // 1 hour in seconds
-	ReplacementFeeBump      = 10             // 10% fee bump required for replacement
-	GasLimitAdjustmentSpeed = 1024           // How quickly gas limit adjusts
+	BaseFeeUpdateBlock      = 10
+	InitialBaseFee          = 1_000_000_000
+	MinBaseFee              = 500_000_000
+	MaxBaseFee              = 10_000_000_000
+	BaseFeeChangeDenom      = 8
+	RecentBlocksForTxCount  = 5
+	TransactionTTL          = 3600
+	ReplacementFeeBump      = 10
+	GasLimitAdjustmentSpeed = 1024
+	ContractCallGas         = 50000       // Gas for contract calls
+	ContractDeployGas       = 100000      // Gas for contract deployment
+	MaxContractSize         = 1024 * 1024 // 1MB max contract size
 )

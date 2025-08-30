@@ -11,19 +11,22 @@ import (
 )
 
 type Transaction struct {
-	From        string `json:"from"`
-	To          string `json:"to"`
-	Value       uint64 `json:"value"`
-	Data        []byte `json:"data"`
-	TxHash      string `json:"tx_hash"`
-	Status      string `json:"status"`
-	Gas         uint64 `json:"gas"`
-	GasPrice    uint64 `json:"gas_price"`
-	Sig         []byte `json:"sig"`
-	Nonce       uint64 `json:"nonce"`    // Add nonce for replay protection
-	ChainID     uint64 `json:"chain_id"` // Add chain ID for replay protection across chains
-	Timestamp   uint64 `json:"timestamp"`
-	PriorityFee uint64 `json:"priority_fee"`
+	From        string   `json:"from"`
+	To          string   `json:"to"`
+	Value       uint64   `json:"value"`
+	Data        []byte   `json:"data"`
+	TxHash      string   `json:"tx_hash"`
+	Status      string   `json:"status"`
+	Gas         uint64   `json:"gas"`
+	GasPrice    uint64   `json:"gas_price"`
+	Sig         []byte   `json:"sig"`
+	Nonce       uint64   `json:"nonce"`    // Add nonce for replay protection
+	ChainID     uint64   `json:"chain_id"` // Add chain ID for replay protection across chains
+	Timestamp   uint64   `json:"timestamp"`
+	PriorityFee uint64   `json:"priority_fee"`
+	IsContract  bool     `json:"is_contract"` // Add this field
+	Function    string   `json:"function"`    // Add this field
+	Args        []string `json:"args"`        // Add this field
 }
 
 func NewTransaction(from string, to string, value uint64, data []byte, nonce uint64) *Transaction {
@@ -31,7 +34,7 @@ func NewTransaction(from string, to string, value uint64, data []byte, nonce uin
 	newTx.From = from
 	newTx.To = to
 	newTx.Data = data
-	newTx.Gas = uint64(constantset.MinGas) // Use proper gas value
+	newTx.Gas = uint64(constantset.MinGas)
 	newTx.GasPrice = 1
 	newTx.Value = value
 	newTx.Status = constantset.StatusPending
@@ -39,7 +42,13 @@ func NewTransaction(from string, to string, value uint64, data []byte, nonce uin
 	newTx.ChainID = uint64(constantset.ChainID)
 	newTx.Timestamp = uint64(time.Now().Unix())
 	newTx.Sig = []byte{}
+	// newTx.IsContract = isContract
+	// newTx.Args = args
+	// newTx.Function = function
 
+	// if isContract {
+	// 	newTx.Gas = uint64(constantset.ContractCallGas) // Higher gas for contracts
+	// }
 	newTx.TxHash = CalculateTransactionHash(*newTx)
 	return newTx
 }
