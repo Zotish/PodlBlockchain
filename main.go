@@ -59,22 +59,33 @@ func main() {
 			bc := blockchaincomponent.NewBlockchain(genesisBlock)
 			bc.MinStake = *minStake
 
-			// Add the validator
-			err := bc.AddNewValidators(*validatorAddress, *stakeAmount, time.Hour*24*30)
-			if err != nil {
-				log.Fatalf("Failed to add validator: %v", err)
-			}
-
 			// Start blockchain server
 			bcs := blockchainserver.NewBlockchainServer(uint(*chainPort), bc)
 			go bcs.Start()
 
 			// Start network service
+			// if *remoteNode != "" {
+			// 	// Parse remote node address and port
+			// 	host, portStr, err := net.SplitHostPort(*remoteNode)
+			// 	if err != nil {
+			// 		log.Fatalf("Invalid remote node address: %v", err)
+			// 	}
+			// 	port, err := strconv.Atoi(portStr)
+			// 	if err != nil {
+			// 		log.Fatalf("Invalid remote node port: %v", err)
+			// 	}
+			// 	bc.Network.AddPeer(host, port, true)
+
+			// }
+
 			if *remoteNode != "" {
-				// Parse remote node address and port
 				host, portStr, err := net.SplitHostPort(*remoteNode)
 				if err != nil {
 					log.Fatalf("Invalid remote node address: %v", err)
+				}
+				// normalize “localhost” -> 127.0.0.1 to avoid IPv6 ::1 issues
+				if host == "localhost" {
+					host = "127.0.0.1"
 				}
 				port, err := strconv.Atoi(portStr)
 				if err != nil {
@@ -83,21 +94,39 @@ func main() {
 				bc.Network.AddPeer(host, port, true)
 			}
 
+			// Add the validator
+			err := bc.AddNewValidators(*validatorAddress, *stakeAmount, time.Hour*24*30)
+			if err != nil {
+				log.Fatalf("Failed to add validator: %v", err)
+			}
+
+			for _, v := range bc.Validators {
+				bc.Network.BroadcastValidator(v)
+			}
+
 			// Start mining loop
 			for {
 				bc.CleanStaleTransactions()
+
+				// Trim memory every 100 blocks
+				if len(bc.Blocks)%100 == 0 {
+					bc.TrimInMemoryBlocks(100) // Keep only last 100 blocks in memory
+				}
+
+				// Clean pool every 10 blocks
+				if len(bc.Blocks)%10 == 0 {
+					bc.CleanTransactionPool()
+				}
+
 				bc.UpdateMinStake(float64(len(bc.Transaction_pool)))
 
-				// Select validator
 				validator, err := bc.SelectValidator()
 				if err != nil {
 					log.Printf("Validator selection error: %v", err)
-					time.Sleep(2 * time.Second)
+					time.Sleep(0 * time.Second)
 					continue
 				}
-				log.Printf("Selected validator: %s", validator.Address)
 
-				// Mine new block
 				newBlock := bc.MineNewBlock()
 				if newBlock != nil {
 					log.Printf("Mined block #%d", newBlock.BlockNumber)
@@ -107,6 +136,7 @@ func main() {
 						log.Printf("Failed to broadcast block: %v", err)
 					}
 				}
+				log.Printf("Selected validator: %s", validator.Address)
 
 				// Monitor validators
 				bc.MonitorValidators()
@@ -116,12 +146,50 @@ func main() {
 					log.Printf("Sync error: %v", err)
 				}
 
-				interval := 6 * time.Second
+				interval := 1 * time.Second
 				if len(bc.Transaction_pool) > 100 {
-					interval = 4 * time.Second // Faster blocks when busy
+					interval = 2 * time.Second
 				}
 				time.Sleep(interval)
 			}
+			// for {
+			// 	bc.CleanStaleTransactions()
+			// 	bc.UpdateMinStake(float64(len(bc.Transaction_pool)))
+
+			// 	// Select validator
+			// 	validator, err := bc.SelectValidator()
+			// 	if err != nil {
+			// 		log.Printf("Validator selection error: %v", err)
+			// 		time.Sleep(2 * time.Second)
+			// 		continue
+			// 	}
+			// 	log.Printf("Selected validator: %s", validator.Address)
+
+			// 	// Mine new block
+			// 	newBlock := bc.MineNewBlock()
+			// 	if newBlock != nil {
+			// 		log.Printf("Mined block #%d", newBlock.BlockNumber)
+
+			// 		// Broadcast the new block
+			// 		if err := bc.Network.BroadcastBlock(newBlock); err != nil {
+			// 			log.Printf("Failed to broadcast block: %v", err)
+			// 		}
+			// 	}
+
+			// 	// Monitor validators
+			// 	bc.MonitorValidators()
+
+			// 	// Sync with network periodically
+			// 	if err := bc.Network.SyncChain(); err != nil {
+			// 		log.Printf("Sync error: %v", err)
+			// 	}
+
+			// 	interval := 6 * time.Second
+			// 	if len(bc.Transaction_pool) > 100 {
+			// 		interval = 4 * time.Second // Faster blocks when busy
+			// 	}
+			// 	time.Sleep(interval)
+			// }
 		}
 
 	case "wallet":
