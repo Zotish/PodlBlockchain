@@ -17,41 +17,15 @@ func NewWalletAPIServer(bc *Blockchain_struct) *WalletAPIServer {
 }
 
 func (api *WalletAPIServer) RegisterRoutes(r *mux.Router) {
-	//r.HandleFunc("/wallet/nonce", api.GetNonce).Methods("GET")
-	r.HandleFunc("/wallet/tx-template", api.TxTemplate).Methods("POST")
-	r.HandleFunc("/wallet/contract-template", api.ContractTemplate).Methods("POST")
-	r.HandleFunc("/wallet/abi", api.GetABI).Methods("GET")
-	r.HandleFunc("/wallet/gas-estimate", api.GasEstimate).Methods("POST")
+	http.HandleFunc("/wallet/tx-template", api.TxTemplate)
+	http.HandleFunc("/wallet/contract-template", api.ContractTemplate)
+	http.HandleFunc("/wallet/abi", api.GetABI)
+	http.HandleFunc("/wallet/gas-estimate", api.GasEstimate)
 }
 
-///////////////////////////////////////////////////////////////////////////////
-//  GET NONCE
-//
-//  GET /wallet/nonce?address=0x123
-///////////////////////////////////////////////////////////////////////////////
-
-// func (api *WalletAPIServer) GetNonce(w http.ResponseWriter, r *http.Request) {
-// 	addr := r.URL.Query().Get("address")
-// 	if addr == "" {
-// 		http.Error(w, "address required", 400)
-// 		return
-// 	}
-
-// 	nonce := api.BlockchainPtr.GetNextNonce(addr)
-
-// 	json.NewEncoder(w).Encode(map[string]any{
-// 		"address": addr,
-// 		"nonce":   nonce,
-// 	})
-// }
-
-///////////////////////////////////////////////////////////////////////////////
-//  GAS ESTIMATE FOR NATIVE TRANSFER
-//
-//  POST /wallet/gas-estimate
-//  BODY: { "from": "...", "to": "...", "value": 100 }
-///////////////////////////////////////////////////////////////////////////////
-
+// GAS ESTIMATE FOR NATIVE TRANSFER
+// POST /wallet/gas-estimate
+// BODY: { "from": "...", "to": "...", "value": 100 }
 func (api *WalletAPIServer) GasEstimate(w http.ResponseWriter, r *http.Request) {
 	type Req struct {
 		From  string `json:"from"`
@@ -69,7 +43,6 @@ func (api *WalletAPIServer) GasEstimate(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-///////////////////////////////////////////////////////////////////////////////
 //  RAW TX TEMPLATE (UNSIGNED)
 //
 //  POST /wallet/tx-template
@@ -81,7 +54,6 @@ func (api *WalletAPIServer) GasEstimate(w http.ResponseWriter, r *http.Request) 
 //     "gas": 50000,
 //     "gasPrice": 1
 //  }
-///////////////////////////////////////////////////////////////////////////////
 
 func (api *WalletAPIServer) TxTemplate(w http.ResponseWriter, r *http.Request) {
 	type Req struct {
@@ -110,9 +82,8 @@ func (api *WalletAPIServer) TxTemplate(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(tx)
 }
 
-///////////////////////////////////////////////////////////////////////////////
 //  CONTRACT CALL TEMPLATE (UNSIGNED)
-//
+
 //  POST /wallet/contract-template
 //  BODY:
 //  {
@@ -124,7 +95,6 @@ func (api *WalletAPIServer) TxTemplate(w http.ResponseWriter, r *http.Request) {
 //     "gasPrice": 1,
 //     "value": 0
 //  }
-///////////////////////////////////////////////////////////////////////////////
 
 func (api *WalletAPIServer) ContractTemplate(w http.ResponseWriter, r *http.Request) {
 	type Req struct {
@@ -159,7 +129,6 @@ func (api *WalletAPIServer) ContractTemplate(w http.ResponseWriter, r *http.Requ
 
 	json.NewEncoder(w).Encode(tx)
 }
-
 func encodeArgs(args []string) [][]byte {
 	out := [][]byte{}
 	for _, a := range args {
@@ -168,12 +137,8 @@ func encodeArgs(args []string) [][]byte {
 	return out
 }
 
-///////////////////////////////////////////////////////////////////////////////
-//  GET CONTRACT ABI
-//
-//  GET /wallet/abi?address=0x123
-///////////////////////////////////////////////////////////////////////////////
-
+// GET CONTRACT ABI
+// GET /wallet/abi?address=0x123
 func (api *WalletAPIServer) GetABI(w http.ResponseWriter, r *http.Request) {
 	addr := r.URL.Query().Get("address")
 	abi, err := api.BlockchainPtr.ContractEngine.Registry.LoadABI(addr)

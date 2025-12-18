@@ -12,7 +12,7 @@ var (
 	MinGas                  = 21000
 	GasPerByte              = 68
 	GasContractCall         = 20000
-	BLOCKCHAIN_DB_PATH      = "5000/evodb"
+	BLOCKCHAIN_DB_PATH      = "5001/evodb"
 	BLOCKCHAIN_KEY          = "blockchain_key"
 	MaxBlockGas             = 8000000
 	ChainID                 = uint(139)
@@ -31,9 +31,10 @@ var (
 	ContractCallGas         = 50000
 	ContractDeployGas       = 100000
 	MaxContractSize         = 1024 * 1024
-	GasPrice                = 1              // Gas price (1 LQD per gas unit)
-	BaseDeployGas           = uint64(200000) // Base gas for deployment
-	DeployGasPerByte        = uint64(25)     // Gas per byte of contract payload
+	GasPrice                = 1
+	BaseDeployGas           = uint64(200000)
+	DeployGasPerByte        = uint64(25)
+	LiquidityPoolAddress    = "0x1111111111111111111111111111111111111111"
 
 	Leader             = 40
 	ValidatorReward    = 20

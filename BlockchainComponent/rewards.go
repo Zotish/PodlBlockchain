@@ -1,97 +1,3 @@
-// package blockchaincomponent
-
-// import (
-// 	"fmt"
-// 	"sync"
-// 	"time"
-
-// 	constantset "github.com/Zotish/DefenceProject/ConstantSet"
-// )
-
-// // LockLiquidity lets any address lock capital that contributes to LiquidityPower (via validators) and earns LP rewards.
-// func (bc *Blockchain_struct) LockLiquidity(address string, amount uint64, lockDuration time.Duration) error {
-// 	bc.Mutex.Lock()
-// 	defer bc.Mutex.Unlock()
-
-// 	// Require balance
-// 	if bc.Accounts[address] < amount {
-// 		return fmt.Errorf("insufficient balance")
-// 	}
-
-// 	bc.Accounts[address] -= amount
-// 	rec := LockRecord{
-// 		Amount:    amount,
-// 		CreatedAt: time.Now(),
-// 		UnlockAt:  time.Now().Add(lockDuration),
-// 	}
-// 	bc.LiquidityLocks[address] = append(bc.LiquidityLocks[address], rec)
-// 	bc.TotalLiquidity += amount
-
-// 	// Persist
-// 	snap := *bc
-// 	snap.Mutex = sync.Mutex{}
-// 	return PutIntoDB(snap)
-// }
-
-// // UnlockAvailable moves any matured locks back to the account.
-
-// // getLock returns currently locked (not yet matured) capital for address.
-// func (bc *Blockchain_struct) getLock(address string) uint64 {
-// 	var sum uint64
-// 	now := time.Now()
-// 	for _, r := range bc.LiquidityLocks[address] {
-// 		if now.Before(r.UnlockAt) {
-// 			sum += r.Amount
-// 		}
-// 	}
-// 	return sum
-// }
-
-// // CalculateRewardForLiquidity distributes the LP slice by proportional locked amounts.
-// func (bc *Blockchain_struct) CalculateRewardForLiquidity(totalRewards uint64) map[string]uint64 {
-// 	lpRewards := (totalRewards * uint64(constantset.Liquidity_provider)) / 100
-// 	if lpRewards == 0 || bc.TotalLiquidity == 0 {
-// 		return map[string]uint64{}
-// 	}
-// 	out := make(map[string]uint64)
-// 	for addr := range bc.LiquidityLocks {
-// 		locked := bc.getLock(addr)
-// 		if locked == 0 {
-// 			continue
-// 		}
-// 		out[addr] = (lpRewards * locked) / bc.TotalLiquidity
-// 	}
-// 	return out
-// }
-
-// // CalculateRewardForValidator distributes the validator slice by (LiquidityPower × (1 - PenaltyScore)).
-// func (bc *Blockchain_struct) CalculateRewardForValidator(totalRewards uint64) map[string]uint64 {
-// 	valRewards := (totalRewards * uint64(constantset.ValidatorReward)) / 100
-// 	if valRewards == 0 || len(bc.Validators) == 0 {
-// 		return map[string]uint64{}
-// 	}
-// 	// Compute weights
-// 	var sum float64
-// 	weights := make([]float64, len(bc.Validators))
-// 	for i, v := range bc.Validators {
-// 		w := v.LiquidityPower * (1.0 - v.PenaltyScore)
-// 		if w < 0 {
-// 			w = 0
-// 		}
-// 		weights[i] = w
-// 		sum += w
-// 	}
-// 	out := make(map[string]uint64)
-// 	if sum == 0 {
-// 		return out
-// 	}
-// 	for i, v := range bc.Validators {
-// 		out[v.Address] = uint64(float64(valRewards) * (weights[i] / sum))
-// 	}
-// 	return out
-// }
-
-// rewards.go
 package blockchaincomponent
 
 import (
@@ -333,4 +239,90 @@ func (bc *Blockchain_struct) UnlockAvailable(address string) (uint64, error) {
 		return 0, err
 	}
 	return released, nil
+}
+
+// FIXED PARAMETERS FROM YOUR CONFIG
+// ==========================================================
+// Fixed reward = 200 LQD
+// Split: Validator=40%, LP=40%, Participant=20%
+// GasMultiplier = 2×
+
+// ==========================================================
+// BLOCK REWARD CALCULATOR
+// ==========================================================
+
+// *** LP REWARD ADD START ***
+
+// This function distributes full block rewards:
+//  - Fixed reward split (200 LQD)
+//  - Gas reward (gasUsed * gasPrice * 2×)
+//  - LP distribution
+//  - Participant distribution
+//  - Block stores breakdown
+
+func (bc *Blockchain_struct) CalculateBlockRewards(
+	validator string,
+	txs []*Transaction,
+	gasUsed uint64,
+	gasPrice uint64,
+) BlockRewardBreakdown {
+	breakdown := BlockRewardBreakdown{
+		Validator:          validator,
+		ValidatorReward:    0,
+		LiquidityRewards:   make(map[string]uint64),
+		ParticipantRewards: make(map[string]uint64),
+	}
+	// -------------------------------
+	// 1. FIXED 200 LQD REWARD SPLIT
+	// -------------------------------
+	fixed := bc.FixedBlockReward       // 200
+	validatorShare := fixed * 40 / 100 // 80
+	lpShare := fixed * 40 / 100        // 80
+	//participantShare := fixed * 20 / 100 // 40
+	participantShare := fixed * 20 / 100 // 40
+	breakdown.ValidatorReward = validatorShare
+	// credit validator now
+	bc.Accounts[validator] += validatorShare
+	// -------------------------------
+	// 2. GAS FEE REWARDS (with multiplier)
+	// -------------------------------
+	gasReward := gasUsed * gasPrice * bc.GasRewardMultiplier // 2×
+	// gas reward also split 40/40/20
+	vGas := gasReward * 40 / 100
+	lpGas := gasReward * 40 / 100
+	pGas := gasReward * 20 / 100
+	// add to fixed reward
+	breakdown.ValidatorReward += vGas
+	bc.Accounts[validator] += vGas
+	lpShare += lpGas
+	participantShare += pGas
+	// -------------------------------
+	// 3. DISTRIBUTE LP SHARE BY LiquidityPower
+	// -------------------------------
+	totalPower := uint64(0)
+	for _, lp := range bc.LiquidityProviders {
+		totalPower += lp.LiquidityPower
+	}
+	if totalPower > 0 && lpShare > 0 {
+		for _, lp := range bc.LiquidityProviders {
+			share := lpShare * lp.LiquidityPower / totalPower
+			if share > 0 {
+				bc.AddLPReward(lp.Address, share)
+				breakdown.LiquidityRewards[lp.Address] = share
+			}
+		}
+	}
+	// -------------------------------
+	// 4. PARTICIPANT REWARD PER TX
+	// -------------------------------
+	if len(txs) > 0 && participantShare > 0 {
+		rewardPerTx := participantShare / uint64(len(txs))
+		for _, tx := range txs {
+			if rewardPerTx > 0 {
+				bc.AddParticipantReward(tx.From, rewardPerTx)
+				breakdown.ParticipantRewards[tx.TxHash] = rewardPerTx
+			}
+		}
+	}
+	return breakdown
 }
