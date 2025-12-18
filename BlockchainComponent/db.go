@@ -49,36 +49,6 @@ func SaveBlockToDB(block *Block) error {
 	return nil
 }
 
-// Add to db.go
-// func SaveBlockToDB(block *Block) error {
-// 	db, err := leveldb.OpenFile(constantset.BLOCKCHAIN_DB_PATH, &opt.Options{
-// 		WriteBuffer: 64 * opt.MiB,
-// 	})
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer db.Close()
-
-// 	// Save individual block
-// 	blockKey := fmt.Sprintf("block_%d", block.BlockNumber)
-// 	blockData, err := json.Marshal(block)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	// Save to individual block storage
-// 	if err := db.Put([]byte(blockKey), blockData, nil); err != nil {
-// 		return err
-// 	}
-
-// 	// Update latest block pointer
-// 	if err := db.Put([]byte("latest_block"), []byte(blockKey), nil); err != nil {
-// 		return err
-// 	}
-
-// 	return nil
-// }
-
 func GetBlockFromDB(blockNumber uint64) (*Block, error) {
 	db, err := leveldb.OpenFile(constantset.BLOCKCHAIN_DB_PATH, nil)
 	if err != nil {
@@ -99,63 +69,6 @@ func GetBlockFromDB(blockNumber uint64) (*Block, error) {
 
 	return &block, nil
 }
-
-// In DB.go, add directory creation:
-//
-//	func PutIntoDB(bs Blockchain_struct) error {
-//		// Ensure directory exists
-//		if err := os.MkdirAll(filepath.Dir(constantset.BLOCKCHAIN_DB_PATH), 0755); err != nil {
-//			return fmt.Errorf("failed to create DB directory: %v", err)
-//		}
-//		db, err := leveldb.OpenFile(constantset.BLOCKCHAIN_DB_PATH, nil)
-//		if err != nil {
-//			return fmt.Errorf("failed to open DB: %v", err)
-//		}
-//		defer db.Close()
-//		JsonFormat, err := json.Marshal(bs)
-//		if err != nil {
-//			return fmt.Errorf("failed to marshal blockchain: %v", err)
-//		}
-//		return db.Put([]byte(constantset.BLOCKCHAIN_KEY), JsonFormat, nil)
-//	}
-// func PutIntoDB(bs Blockchain_struct) error {
-// 	db, err := leveldb.OpenFile(constantset.BLOCKCHAIN_DB_PATH, nil)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer db.Close()
-// 	batch := new(leveldb.Batch)
-// 	data, err := json.Marshal(bs)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	batch.Put([]byte(constantset.BLOCKCHAIN_KEY), data)
-// 	return db.Write(batch, nil)
-// }
-
-// this is last one i have commented out
-// func PutIntoDB(bs Blockchain_struct) error {
-// 	db, err := leveldb.OpenFile(constantset.BLOCKCHAIN_DB_PATH, &opt.Options{
-// 		NoSync:      false,        // Faster writes
-// 		WriteBuffer: 64 * opt.MiB, // Larger buffer
-// 	})
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer db.Close()
-
-// 	// Batch writes
-// 	batch := new(leveldb.Batch)
-// 	dbCopy := bs
-// 	dbCopy.Mutex = sync.Mutex{}
-// 	data, err := json.Marshal(dbCopy)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	batch.Put([]byte(constantset.BLOCKCHAIN_KEY), data)
-// 	return db.Write(batch, &opt.WriteOptions{Sync: false})
-// }
 
 func PutIntoDB(bs Blockchain_struct) error {
 	// Ensure directory exists

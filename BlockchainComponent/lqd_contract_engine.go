@@ -11,12 +11,11 @@ import (
 	"strings"
 	"time"
 
+	constantset "github.com/Zotish/DefenceProject/ConstantSet"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
-// =================================================================================================
-// SECTION 1: CONTRACT ENGINE TOP-LEVEL STRUCT
-// =================================================================================================
+// CONTRACT   STRUCT
 
 type LQDContractEngine struct {
 	DB       *ContractDB
@@ -48,12 +47,45 @@ func NewLQDContractEngine() (*LQDContractEngine, error) {
 	}, nil
 }
 
-// =================================================================================================
-// SECTION 2: DB LAYER
-// =================================================================================================
+// DB LAYER
 
 type ContractDB struct {
 	db *leveldb.DB
+}
+type Contract struct {
+	Address    string
+	Type       string
+	ABI        []ABIEntry
+	InitParams []string
+	SourceCode string
+	Bytecode   string
+	PluginPath string
+	State      map[string]interface{}
+}
+
+func (db *EventDB) GetEventsFromDB(address string) []ContractEvent {
+	iter := db.db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	out := []ContractEvent{}
+	//prefix := "event:"
+
+	for iter.Next() {
+		val := iter.Value()
+		var ev ContractEvent
+		json.Unmarshal(val, &ev)
+
+		if ev.Address == address {
+			out = append(out, ev)
+		}
+	}
+
+	return out
+}
+func (db *EventDB) SaveEventToDB(event ContractEvent) error {
+	key := fmt.Sprintf("event:%s:%d", event.Address, event.Timestamp)
+	b, _ := json.Marshal(event)
+	return db.db.Put([]byte(key), b, nil)
 }
 
 func ensureDir(path string) error {
@@ -134,9 +166,7 @@ func (c *ContractDB) LoadAllStorage(addr string) (map[string]string, error) {
 	return out, nil
 }
 
-// =================================================================================================
-// SECTION 3: CORE TYPES
-// =================================================================================================
+//  CORE TYPES
 
 type ContractMetadata struct {
 	Address     string `json:"address"`
@@ -177,9 +207,7 @@ type ContractExecutionResult struct {
 	Events  []ContractEvent   `json:"events"`
 }
 
-// =================================================================================================
-// SECTION 4: CONTEXT — SANDBOXED EXECUTION ENVIRONMENT
-// =================================================================================================
+//  CONTEXT — SANDBOXED EXECUTION ENVIRONMENT
 
 type Context struct {
 	ContractAddr string
@@ -208,7 +236,6 @@ func NewContext(addr, caller, owner string, db *ContractDB, gas uint64) *Context
 	}
 }
 
-// Storage
 func (ctx *Context) Get(key string) string {
 	if v, ok := ctx.tempStorage[key]; ok {
 		return v
@@ -222,7 +249,6 @@ func (ctx *Context) Set(key, value string) {
 	ctx.tempStorage[key] = value
 }
 
-// Balances
 func (ctx *Context) balanceOf(addr string) uint64 {
 	key := "__bal:" + addr
 	if v, ok := ctx.tempStorage[key]; ok {
@@ -248,7 +274,6 @@ func (ctx *Context) SubBalance(addr string, amt uint64) {
 	ctx.tempStorage["__bal:"+addr] = fmt.Sprintf("%d", b-amt)
 }
 
-// Events
 func (ctx *Context) Emit(ev string, data map[string]interface{}) {
 	ctx.consumeGas(500)
 	ctx.events = append(ctx.events, ContractEvent{
@@ -259,7 +284,6 @@ func (ctx *Context) Emit(ev string, data map[string]interface{}) {
 	})
 }
 
-// Cross-contract call
 func (ctx *Context) Call(target, fn string, args []string) (*ContractExecutionResult, error) {
 	ctx.consumeGas(10000)
 	if ctx.callFunc == nil {
@@ -268,7 +292,6 @@ func (ctx *Context) Call(target, fn string, args []string) (*ContractExecutionRe
 	return ctx.callFunc(target, fn, args)
 }
 
-// Gas / revert
 func (ctx *Context) consumeGas(n uint64) {
 	ctx.GasUsed += n
 	if ctx.GasUsed > ctx.GasLimit {
@@ -280,7 +303,6 @@ func (ctx *Context) Revert(reason string) {
 	panic("REVERT: " + reason)
 }
 
-// Commit
 func (ctx *Context) Commit() error {
 	for k, v := range ctx.tempStorage {
 		if err := ctx.DB.SaveStorage(ctx.ContractAddr, k, v); err != nil {
@@ -294,9 +316,7 @@ func (ctx *Context) Events() []ContractEvent {
 	return ctx.events
 }
 
-// =================================================================================================
-// SECTION 5: GO PLUGIN VM
-// =================================================================================================
+//  GO PLUGIN VM
 
 type PluginContract struct {
 	Instance any
@@ -368,9 +388,7 @@ func (p *PluginVM) CallPlugin(addr, fn string, ctx *Context, args []string) (*Co
 	}, nil
 }
 
-// =================================================================================================
-// SECTION 6: INTERPRETER VM
-// =================================================================================================
+//  INTERPRETER VM
 
 type OpCode byte
 
@@ -542,9 +560,7 @@ func parseUint(s string) uint64 {
 	return v
 }
 
-// =================================================================================================
 // SECTION 7: DSL VM
-// =================================================================================================
 
 type DSLVM struct{}
 
@@ -613,9 +629,7 @@ func (d *DSLVM) ExecuteDSL(addr string, lines []string, ctx *Context) (*Contract
 	}, nil
 }
 
-// =================================================================================================
 // SECTION 8: ABI GENERATOR
-// =================================================================================================
 
 type ABIEntry struct {
 	Name    string   `json:"name"`
@@ -668,9 +682,7 @@ func GenerateABIForDSL() ([]byte, error) {
 	return json.Marshal(abi)
 }
 
-// =================================================================================================
-// SECTION 9: EVENT DB
-// =================================================================================================
+// EVENT DB
 
 type EventDB struct {
 	db *leveldb.DB
@@ -724,25 +736,25 @@ func (e *EventDB) GetEventsByBlock(block uint64) ([]ContractEvent, error) {
 	return out, nil
 }
 
-// =================================================================================================
-// SECTION 10: CONTRACT REGISTRY
-// =================================================================================================
+// CONTRACT REGISTRY
 
 type ContractRegistry struct {
-	DB       *ContractDB
-	EventDB  *EventDB
-	PluginVM *PluginVM
-	IVM      *InterpreterVM
-	DSL      *DSLVM
+	DB         *ContractDB
+	EventDB    *EventDB
+	PluginVM   *PluginVM
+	IVM        *InterpreterVM
+	DSL        *DSLVM
+	Blockchain *Blockchain_struct
 }
 
 func NewContractRegistry(cdb *ContractDB, edb *EventDB) *ContractRegistry {
 	return &ContractRegistry{
-		DB:       cdb,
-		EventDB:  edb,
-		PluginVM: NewPluginVM(),
-		IVM:      NewInterpreterVM(),
-		DSL:      NewDSLVM(),
+		DB:         cdb,
+		EventDB:    edb,
+		PluginVM:   NewPluginVM(),
+		IVM:        NewInterpreterVM(),
+		DSL:        NewDSLVM(),
+		Blockchain: &Blockchain_struct{},
 	}
 }
 
@@ -803,9 +815,7 @@ func (r *ContractRegistry) EnsurePluginLoaded(addr string, meta *ContractMetadat
 	return r.PluginVM.LoadPlugin(addr, meta.PluginPath)
 }
 
-// =================================================================================================
-// SECTION 11: EXECUTION PIPELINE
-// =================================================================================================
+// EXECUTION PIPELINE
 
 type ExecutionPipeline struct {
 	Registry *ContractRegistry
@@ -857,11 +867,7 @@ func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas
 	return nil, fmt.Errorf("invalid contract type")
 }
 
-// =================================================================================================
 // SECTION 12: BLOCKCHAIN INTEGRATION
-// =================================================================================================
-
-// Your blockchain Transaction type MUST have a `Data [][]byte` field.
 
 func (ep *ExecutionPipeline) ExecuteContractTx(tx *Transaction, block uint64) (*ContractExecutionResult, error) {
 
@@ -877,18 +883,55 @@ func (ep *ExecutionPipeline) ExecuteContractTx(tx *Transaction, block uint64) (*
 		}
 	}
 
+	// Execute contract
 	res, err := ep.Execute(tx.To, tx.From, fn, args, 5_000_000)
 	if err != nil {
 		return nil, err
 	}
 
+	// Process emitted events
 	for i, ev := range res.Events {
+
+		// Save to event DB
 		ep.Registry.EventDB.SaveEvent(block, tx.TxHash, i, ev)
+
+		//-----------------------------------------------
+		// 🔥 CREATE A CONTRACT EVENT TRANSACTION
+		//-----------------------------------------------
+		eventTx := &Transaction{
+			From:      ev.Address,
+			To:        ev.Address,
+			Type:      "contract_event",
+			Function:  ev.EventName,
+			Args:      mapToArgs(ev.Data),
+			Timestamp: uint64(time.Now().Unix()),
+			Status:    constantset.StatusPending,
+			IsSystem:  true,
+			Gas:       0,
+			GasPrice:  0,
+			ChainID:   uint64(constantset.ChainID),
+		}
+
+		eventTx.TxHash = CalculateTransactionHash(*eventTx)
+
+		//-----------------------------------------------
+		// 🔥 Push event transaction into mempool
+		//-----------------------------------------------
+		ep.Registry.Blockchain.Transaction_pool = append(
+			ep.Registry.Blockchain.Transaction_pool,
+			eventTx,
+		)
+
+		ep.Registry.Blockchain.RecordRecentTx(eventTx)
 	}
 
 	return res, nil
 }
 
-// =================================================================================================
-// DONE — NO API CODE INCLUDED (YOU ADD THAT IN blockchain_server.go)
-// =================================================================================================
+func mapToArgs(m map[string]interface{}) []string {
+	out := []string{}
+	for k, v := range m {
+		out = append(out, fmt.Sprintf("%s=%v", k, v))
+	}
+	return out
+}
