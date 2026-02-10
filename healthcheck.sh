@@ -4,10 +4,10 @@ set -euo pipefail
 NODE_URL="http://127.0.0.1:5000"
 WALLET_URL="http://127.0.0.1:8080"
 
-WALLET_COUNT=100
-PARALLEL_LIMIT=100  # Reduced concurrency
+WALLET_COUNT=50
+PARALLEL_LIMIT=50 # Reduced concurrency
 TEST_PASS="Test@123"
-TEST_VALUE=100
+TEST_VALUE=10000000000  
 GAS=21000
 BASEFEE_FALLBACK=10  # Adjusted fallback base fee
 LOG_FILE="node.log"

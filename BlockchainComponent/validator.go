@@ -1,12 +1,10 @@
 package blockchaincomponent
 
 import (
-	"crypto/rand"
 	"fmt"
 	"log"
-	"math/big"
+	"sort"
 	"sync"
-
 	"time"
 
 	constantset "github.com/Zotish/DefenceProject/ConstantSet"
@@ -38,7 +36,9 @@ func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lo
 	// Check if validator already exists
 	for _, v := range bc.Validators {
 		if v.Address == address {
-			return fmt.Errorf("validator %s already exists", address)
+			// Allow restart with existing validator without failing.
+			log.Printf("Validator %s already exists; continuing with existing entry", address)
+			return nil
 		}
 	}
 
@@ -180,41 +180,36 @@ func (bc *Blockchain_struct) SelectValidator() (Validator, error) {
 	}
 
 	bc.UpdateLiquidityPower()
+	type weightedValidator struct {
+		v      *Validator
+		weight float64
+	}
 
-	totalWeight := 0.0
-	validators := make([]Validator, len(bc.Validators))
-	weights := make([]float64, len(bc.Validators))
-
-	for i, v := range bc.Validators {
+	eligible := make([]weightedValidator, 0, len(bc.Validators))
+	for _, v := range bc.Validators {
 		weight := v.LiquidityPower * (1.0 - v.PenaltyScore)
 		if weight < 0 {
 			weight = 0
 		}
-		validators[i] = *v
-		weights[i] = weight
-		totalWeight += weight
+		if weight == 0 {
+			continue
+		}
+		eligible = append(eligible, weightedValidator{v: v, weight: weight})
 	}
 
-	if totalWeight <= 0 {
+	if len(eligible) == 0 {
 		return Validator{}, fmt.Errorf("no validators with positive weight")
 	}
 
-	// Cryptographically secure random selection
-	randVal, err := rand.Int(rand.Reader, big.NewInt(1<<62))
-	if err != nil {
-		return Validator{}, fmt.Errorf("random selection failed: %v", err)
-	}
-	r := float64(randVal.Int64()) / float64(1<<62) * totalWeight
-
-	cumulative := 0.0
-	for i, weight := range weights {
-		cumulative += weight
-		if r <= cumulative {
-			bc.Validators[i].BlocksProposed++
-			bc.Validators[i].LastActive = time.Now()
-			return validators[i], nil
+	sort.Slice(eligible, func(i, j int) bool {
+		if eligible[i].weight == eligible[j].weight {
+			return eligible[i].v.Address < eligible[j].v.Address
 		}
-	}
+		return eligible[i].weight > eligible[j].weight
+	})
 
-	return Validator{}, fmt.Errorf("selection failed")
+	selected := eligible[0].v
+	selected.BlocksProposed++
+	selected.LastActive = time.Now()
+	return *selected, nil
 }

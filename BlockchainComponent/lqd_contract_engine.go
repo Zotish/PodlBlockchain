@@ -3,6 +3,7 @@ package blockchaincomponent
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"plugin"
@@ -174,6 +175,8 @@ type ContractMetadata struct {
 	Owner       string `json:"owner"`
 	ABI         []byte `json:"abi"`
 	Timestamp   int64  `json:"timestamp"`
+	Pool        bool   `json:"pool"`
+	PoolType    string `json:"pool_type,omitempty"`
 	PluginPath  string `json:"plugin_path,omitempty"`
 	Code        []byte `json:"code,omitempty"`
 	BuiltinName string `json:"builtin_name,omitempty"`
@@ -181,7 +184,7 @@ type ContractMetadata struct {
 
 type SmartContractState struct {
 	Address   string            `json:"address"`
-	Balance   uint64            `json:"balance"`
+	Balance   string            `json:"balance"`
 	Storage   map[string]string `json:"storage"`
 	IsActive  bool              `json:"is_active"`
 	CreatedAt int64             `json:"created_at"`
@@ -249,29 +252,28 @@ func (ctx *Context) Set(key, value string) {
 	ctx.tempStorage[key] = value
 }
 
-func (ctx *Context) balanceOf(addr string) uint64 {
+func (ctx *Context) balanceOf(addr string) *big.Int {
 	key := "__bal:" + addr
 	if v, ok := ctx.tempStorage[key]; ok {
-		x, _ := strconv.ParseUint(v, 10, 64)
-		return x
+		return parseBig(v)
 	}
 	raw, _ := ctx.DB.LoadStorage(ctx.ContractAddr, key)
-	out, _ := strconv.ParseUint(raw, 10, 64)
-	return out
+	return parseBig(raw)
 }
 
-func (ctx *Context) AddBalance(addr string, amt uint64) {
+func (ctx *Context) AddBalance(addr string, amt *big.Int) {
 	ctx.consumeGas(150)
-	ctx.tempStorage["__bal:"+addr] = fmt.Sprintf("%d", ctx.balanceOf(addr)+amt)
+	sum := new(big.Int).Add(ctx.balanceOf(addr), amt)
+	ctx.tempStorage["__bal:"+addr] = sum.String()
 }
 
-func (ctx *Context) SubBalance(addr string, amt uint64) {
+func (ctx *Context) SubBalance(addr string, amt *big.Int) {
 	ctx.consumeGas(150)
 	b := ctx.balanceOf(addr)
-	if b < amt {
+	if b.Cmp(amt) < 0 {
 		ctx.Revert("insufficient balance")
 	}
-	ctx.tempStorage["__bal:"+addr] = fmt.Sprintf("%d", b-amt)
+	ctx.tempStorage["__bal:"+addr] = new(big.Int).Sub(b, amt).String()
 }
 
 func (ctx *Context) Emit(ev string, data map[string]interface{}) {
@@ -325,16 +327,42 @@ type PluginContract struct {
 
 type PluginVM struct {
 	plugins map[string]*PluginContract
+	byPath  map[string]*PluginContract
 }
 
 func NewPluginVM() *PluginVM {
-	return &PluginVM{plugins: make(map[string]*PluginContract)}
+	return &PluginVM{
+		plugins: make(map[string]*PluginContract),
+		byPath:  make(map[string]*PluginContract),
+	}
 }
 
 func (p *PluginVM) LoadPlugin(addr, path string) error {
 
+	if path == "" {
+		return fmt.Errorf("plugin path required")
+	}
+	if existing := p.byPath[path]; existing != nil {
+		p.plugins[addr] = existing
+		return nil
+	}
+
 	pl, err := plugin.Open(path)
 	if err != nil {
+		// Go plugins can only be loaded once per process
+		if strings.Contains(err.Error(), "plugin already loaded") {
+			if existing := p.byPath[path]; existing != nil {
+				p.plugins[addr] = existing
+				return nil
+			}
+			// Fallback: reuse any already-loaded plugin (single-plugin limitation)
+			for _, existing := range p.plugins {
+				if existing != nil {
+					p.plugins[addr] = existing
+					return nil
+				}
+			}
+		}
 		return err
 	}
 
@@ -350,9 +378,12 @@ func (p *PluginVM) LoadPlugin(addr, path string) error {
 	for i := 0; i < t.NumMethod(); i++ {
 		m := t.Method(i)
 		methods[m.Name] = m
+		methods[strings.ToLower(m.Name)] = m
 	}
 
-	p.plugins[addr] = &PluginContract{Instance: inst, Methods: methods}
+	pc := &PluginContract{Instance: inst, Methods: methods}
+	p.plugins[addr] = pc
+	p.byPath[path] = pc
 	return nil
 }
 
@@ -363,6 +394,22 @@ func (p *PluginVM) CallPlugin(addr, fn string, ctx *Context, args []string) (*Co
 	}
 
 	m, ok := pc.Methods[fn]
+	if !ok {
+		// try lowercase key
+		if mm, ok2 := pc.Methods[strings.ToLower(fn)]; ok2 {
+			m = mm
+			ok = true
+		} else {
+			// case-insensitive scan
+			for name, cand := range pc.Methods {
+				if strings.EqualFold(name, fn) {
+					m = cand
+					ok = true
+					break
+				}
+			}
+		}
+	}
 	if !ok {
 		return nil, fmt.Errorf("method not found: %s", fn)
 	}
@@ -380,12 +427,24 @@ func (p *PluginVM) CallPlugin(addr, fn string, ctx *Context, args []string) (*Co
 
 	m.Func.Call(argv)
 
+	_ = ctx.Commit()
+
+	out := ""
+	if v, ok := ctx.tempStorage["output"]; ok {
+		out = v
+	}
+
 	return &ContractExecutionResult{
 		Success: true,
 		GasUsed: ctx.GasUsed,
+		Output:  out,
 		Storage: ctx.tempStorage,
 		Events:  ctx.events,
 	}, nil
+}
+
+func (p *PluginVM) GetPlugin(addr string) *PluginContract {
+	return p.plugins[addr]
 }
 
 //  INTERPRETER VM
@@ -495,14 +554,14 @@ func (ivm *InterpreterVM) ExecuteBytecode(addr string, bc *Bytecode, ctx *Contex
 			_ = ctx.Get(bc.Args[pc])
 
 		case OP_ADD:
-			a := parseUint(ctx.Get(bc.Args[pc*2]))
-			b := parseUint(ctx.Get(bc.Args[pc*2+1]))
-			ctx.Set(bc.Args[pc*2], fmt.Sprintf("%d", a+b))
+			a := parseBig(ctx.Get(bc.Args[pc*2]))
+			b := parseBig(ctx.Get(bc.Args[pc*2+1]))
+			ctx.Set(bc.Args[pc*2], new(big.Int).Add(a, b).String())
 
 		case OP_SUB:
-			a := parseUint(ctx.Get(bc.Args[pc*2]))
-			b := parseUint(ctx.Get(bc.Args[pc*2+1]))
-			ctx.Set(bc.Args[pc*2], fmt.Sprintf("%d", a-b))
+			a := parseBig(ctx.Get(bc.Args[pc*2]))
+			b := parseBig(ctx.Get(bc.Args[pc*2+1]))
+			ctx.Set(bc.Args[pc*2], new(big.Int).Sub(a, b).String())
 
 		case OP_EQ:
 			if ctx.Get(bc.Args[pc*2]) == ctx.Get(bc.Args[pc*2+1]) {
@@ -555,9 +614,16 @@ func (ivm *InterpreterVM) ExecuteBytecode(addr string, bc *Bytecode, ctx *Contex
 	}, nil
 }
 
-func parseUint(s string) uint64 {
-	v, _ := strconv.ParseUint(s, 10, 64)
-	return v
+func parseBig(s string) *big.Int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return big.NewInt(0)
+	}
+	z := new(big.Int)
+	if _, ok := z.SetString(s, 10); !ok {
+		return big.NewInt(0)
+	}
+	return z
 }
 
 // SECTION 7: DSL VM
@@ -592,9 +658,9 @@ func (d *DSLVM) ExecuteDSL(addr string, lines []string, ctx *Context) (*Contract
 		// key+=N
 		if strings.Contains(ln, "+=") {
 			kv := strings.SplitN(ln, "+=", 2)
-			cur := parseUint(ctx.Get(kv[0]))
-			add := parseUint(kv[1])
-			ctx.Set(kv[0], fmt.Sprintf("%d", cur+add))
+			cur := parseBig(ctx.Get(kv[0]))
+			add := parseBig(kv[1])
+			ctx.Set(kv[0], new(big.Int).Add(cur, add).String())
 			continue
 		}
 
@@ -763,7 +829,7 @@ func (r *ContractRegistry) RegisterContract(meta *ContractMetadata, st *SmartCon
 	if err := r.DB.SaveContractMetadata(meta.Address, meta); err != nil {
 		return err
 	}
-	if err := r.DB.SaveStorage(meta.Address, "__bal:"+meta.Owner, fmt.Sprintf("%d", st.Balance)); err != nil {
+	if err := r.DB.SaveStorage(meta.Address, "__bal:"+meta.Owner, st.Balance); err != nil {
 		return err
 	}
 
@@ -782,11 +848,11 @@ func (r *ContractRegistry) LoadContract(addr string) (*ContractRecord, error) {
 	}
 
 	storage, _ := r.DB.LoadAllStorage(addr)
-	bal := parseUint(storage["__bal:"+meta.Owner])
+	bal := parseBig(storage["__bal:"+meta.Owner])
 
 	state := &SmartContractState{
 		Address:   addr,
-		Balance:   bal,
+		Balance:   bal.String(),
 		Storage:   storage,
 		IsActive:  true,
 		CreatedAt: time.Now().Unix(),
@@ -871,16 +937,23 @@ func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas
 
 func (ep *ExecutionPipeline) ExecuteContractTx(tx *Transaction, block uint64) (*ContractExecutionResult, error) {
 
-	if len(tx.Data) < 1 {
-		return nil, fmt.Errorf("tx missing function selector")
+	if tx.Type == "contract_create" {
+		return &ContractExecutionResult{Success: true, Output: "contract created"}, nil
 	}
 
-	fn := string(tx.Data[0])
-	args := []string{}
-	if len(tx.Data) > 1 {
-		for _, b := range tx.Data[1:] {
-			args = append(args, string(b))
+	fn := tx.Function
+	args := tx.Args
+
+	if fn == "" {
+		parsedFn, parsedArgs, err := parseContractCallData(tx.Data)
+		if err != nil {
+			return nil, err
 		}
+		fn = parsedFn
+		args = parsedArgs
+	}
+	if fn == "" {
+		return nil, fmt.Errorf("tx missing function selector")
 	}
 
 	// Execute contract
@@ -923,9 +996,52 @@ func (ep *ExecutionPipeline) ExecuteContractTx(tx *Transaction, block uint64) (*
 		)
 
 		ep.Registry.Blockchain.RecordRecentTx(eventTx)
+
+		// Bridge burn detection (LQD -> BSC)
+		if ev.EventName == "Burn" {
+			toBsc, _ := ev.Data["to_bsc"].(string)
+			bscToken, _ := ev.Data["bsc"].(string)
+			amountStr, _ := ev.Data["amount"].(string)
+			if toBsc != "" && bscToken != "" && amountStr != "" {
+				amt, err := NewAmountFromString(amountStr)
+				if err == nil && amt.Sign() > 0 {
+					ep.Registry.Blockchain.AddBridgeRequestBurn(tx.TxHash, bscToken, tx.From, toBsc, amt)
+				}
+			}
+		}
 	}
 
 	return res, nil
+}
+
+func parseContractCallData(data []byte) (string, []string, error) {
+	if len(data) == 0 {
+		return "", nil, nil
+	}
+
+	// JSON form: {"fn":"transfer","args":["a","b"]}
+	var payload struct {
+		Fn   string   `json:"fn"`
+		Args []string `json:"args"`
+	}
+	if data[0] == '{' {
+		if err := json.Unmarshal(data, &payload); err == nil {
+			return payload.Fn, payload.Args, nil
+		}
+	}
+
+	// Fallback: fn|arg1|arg2
+	raw := strings.TrimSpace(string(data))
+	parts := strings.Split(raw, "|")
+	if len(parts) == 0 {
+		return "", nil, fmt.Errorf("invalid contract call data")
+	}
+	fn := parts[0]
+	args := []string{}
+	if len(parts) > 1 {
+		args = parts[1:]
+	}
+	return fn, args, nil
 }
 
 func mapToArgs(m map[string]interface{}) []string {

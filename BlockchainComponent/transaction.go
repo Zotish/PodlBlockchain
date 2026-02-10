@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"math/big"
 	"time"
 
 	constantset "github.com/Zotish/DefenceProject/ConstantSet"
@@ -13,7 +14,7 @@ import (
 type Transaction struct {
 	From        string   `json:"from"`
 	To          string   `json:"to"`
-	Value       uint64   `json:"value"`
+	Value       *big.Int `json:"value"`
 	Data        []byte   `json:"data"`
 	TxHash      string   `json:"tx_hash"`
 	Status      string   `json:"status"`
@@ -32,14 +33,14 @@ type Transaction struct {
 	IsSystem    bool     `json:"is_system"`
 }
 
-func NewTransaction(from string, to string, value uint64, data []byte) *Transaction {
+func NewTransaction(from string, to string, value *big.Int, data []byte) *Transaction {
 	newTx := new(Transaction)
 	newTx.From = from
 	newTx.To = to
 	newTx.Data = data
 	newTx.Gas = uint64(constantset.MinGas)
 	newTx.GasPrice = 1
-	newTx.Value = value
+	newTx.Value = CopyAmount(value)
 	newTx.Status = constantset.StatusPending
 	//newTx.Nonce = nonce + 1
 	newTx.ChainID = uint64(constantset.ChainID)

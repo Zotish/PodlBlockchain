@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"math/big"
 	"runtime"
 	"sync"
 	"time"
@@ -39,6 +40,9 @@ func NewBlock(blockNumber uint64, prevHash string) Block {
 	newBlock.Transactions = []*Transaction{}
 	newBlock.GasLimit = uint64(constantset.MaxBlockGas)
 	newBlock.BaseFee = 0
+	newBlock.RewardBreakdown.ValidatorReward = AmountString(new(big.Int).Mul(big.NewInt(200), big.NewInt(1e8)))
+	newBlock.RewardBreakdown.ParticipantRewards = make(map[string]string)
+	newBlock.RewardBreakdown.LiquidityRewards = make(map[string]string)
 	return *newBlock
 }
 func (bc *Blockchain_struct) CalculateNextGasLimit() uint64 {
@@ -107,14 +111,26 @@ func (bc *Blockchain_struct) verifyTxWorker(
 			continue
 		}
 
+		if tx.IsSystem {
+			out <- VerifiedTx{
+				Tx:      tx,
+				GasUsed: gasUnits,
+				Fee:     0,
+				Valid:   true,
+			}
+			continue
+		}
+
 		// Read sender balance from in-memory map.
-		// Concurrency-safe as long as ONLY main goroutine writes.
-		senderBal := bc.Accounts[tx.From]
+		senderBal, _ := bc.getAccountBalance(tx.From)
+		if senderBal == nil {
+			senderBal = big.NewInt(0)
+		}
 
 		feeTokens := gasUnits * tx.GasPrice
-		totalCost := tx.Value + feeTokens
+		totalCost := new(big.Int).Add(CopyAmount(tx.Value), NewAmountFromUint64(feeTokens))
 
-		if senderBal < totalCost {
+		if senderBal.Cmp(totalCost) < 0 {
 			out <- VerifiedTx{Tx: tx, Valid: false}
 			continue
 		}
@@ -186,30 +202,15 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 
 	for res := range resultChan {
 
-		isContractTx := res.Tx.Type == "contract_create" ||
-			res.Tx.Type == "contract_call" ||
-			res.Tx.Type == "contract_event"
-
-		if isContractTx {
-			res.Tx.Status = constantset.StatusSuccess
-			finalTxs = append(finalTxs, res.Tx)
-			bc.RecordRecentTx(res.Tx)
-			continue
-		}
-
-		// 🔥 FAST-PATH: FORCE SUCCESS FOR ALL SYSTEM/LP TX
+		// FAST-PATH: FORCE SUCCESS FOR SYSTEM/LP TX (but NOT contract calls)
 		isSystem := res.Tx != nil && (res.Tx.IsSystem ||
 			res.Tx.Type == "stake" ||
 			res.Tx.Type == "unstake" ||
 			res.Tx.Type == "lp_reward")
-
-		if isSystem {
+		if isSystem && res.Tx.Type != "contract_call" && res.Tx.Type != "contract_create" {
 			res.Tx.Status = constantset.StatusSuccess
-
 			finalTxs = append(finalTxs, res.Tx)
 			bc.RecordRecentTx(res.Tx)
-
-			// DO NOT re-create tx, do NOT deduct balances again
 			continue
 		}
 
@@ -225,27 +226,42 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		}
 
 		if res.Tx.IsContract {
-			_, err := bc.ContractEngine.Pipeline.ExecuteContractTx(
-				res.Tx,
-				newBlock.BlockNumber,
-			)
-			if err != nil {
-				res.Tx.Status = constantset.StatusFailed
-				continue
+			if res.Tx.Type == "contract_call" {
+				_, err := bc.ContractEngine.Pipeline.ExecuteContractTx(
+					res.Tx,
+					newBlock.BlockNumber,
+				)
+				if err != nil {
+					res.Tx.Status = constantset.StatusFailed
+					continue
+				}
 			}
+			// contract_create is a state registration already done at deploy time
 		}
 
-		totalTxCost := res.Tx.Value + res.Fee
+		totalTxCost := new(big.Int).Add(CopyAmount(res.Tx.Value), NewAmountFromUint64(res.Fee))
 
-		if bc.Accounts[res.Tx.From] < totalTxCost {
+		senderBal, _ := bc.getAccountBalance(res.Tx.From)
+		if senderBal == nil {
+			senderBal = big.NewInt(0)
+		}
+		if senderBal.Cmp(totalTxCost) < 0 {
 			res.Tx.Status = constantset.StatusFailed
 			continue
 		}
 
-		bc.Accounts[res.Tx.From] -= totalTxCost
-		bc.Accounts[res.Tx.To] += res.Tx.Value
+		_ = bc.subAccountBalance(res.Tx.From, totalTxCost)
+		bc.addAccountBalance(res.Tx.To, CopyAmount(res.Tx.Value))
 
 		res.Tx.Status = constantset.StatusSuccess
+
+		if res.Tx.Type == "bridge_lock" {
+			toBSC := ""
+			if len(res.Tx.Args) > 0 {
+				toBSC = res.Tx.Args[0]
+			}
+			bc.AddBridgeRequest(res.Tx, toBSC)
+		}
 
 		finalTxs = append(finalTxs, res.Tx)
 
@@ -261,15 +277,18 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	breakdown := bc.CalculateBlockRewards(
 		validator.Address,
 		finalTxs,
-		totalGasUsed,
-		1,
+		totalGasCost,
 	)
 	newBlock.RewardBreakdown = breakdown
+	// newBlock.RewardBreakdown.ValidatorReward=CalculateRewardForValidator(totalGasCost)[validator.Address]
+	// newBlock.RewardBreakdown.ParticipantRewards=make(map[string]uint64)
+	// newBlock.RewardBreakdown.LiquidityRewards=make(map[string]uint64)
+	bc.RebalancePoolsEqual()
 
 	rewardTx := &Transaction{
 		From:       "0x0000000000000000000000000000000000000000",
 		To:         validator.Address,
-		Value:      breakdown.ValidatorReward,
+		Value:      NewAmountFromStringOrZero(breakdown.ValidatorReward),
 		GasPrice:   0,
 		Timestamp:  uint64(time.Now().Unix()),
 		Status:     constantset.StatusSuccess,
@@ -283,6 +302,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	bc.RecordRecentTx(rewardTx)
 
 	newBlock.CurrentHash = CalculateHash(&newBlock)
+	bc.AddBlockVote(newBlock.CurrentHash, validator.Address)
 	bc.Blocks = append(bc.Blocks, &newBlock)
 
 	used := make(map[string]struct{})
@@ -311,13 +331,20 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		newBlock.GasUsed,
 		newBlock.RewardBreakdown,
 	)
+	log.Printf("Winner %s | validator_participants=%d | participant_txs=%d",
+		newBlock.RewardBreakdown.Validator,
+		len(newBlock.RewardBreakdown.ValidatorPartRewards),
+		len(newBlock.RewardBreakdown.ParticipantRewards),
+	)
 
 	return &newBlock
 }
 
 func CalculateHash(newBlock *Block) string {
 
-	data, _ := json.Marshal(newBlock)
+	blockCopy := *newBlock
+	blockCopy.RewardBreakdown = BlockRewardBreakdown{}
+	data, _ := json.Marshal(blockCopy)
 	hash := sha256.Sum256(data)
 	HexRePresent := hex.EncodeToString(hash[:32])
 	formatedToHex := constantset.BlockHexPrefix + HexRePresent

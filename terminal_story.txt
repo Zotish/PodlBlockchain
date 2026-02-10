@@ -1,0 +1,429 @@
+  700  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  701  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  702  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  703  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  704  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  705  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  706  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  707  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  708  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  709  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  710  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  711  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  712  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  713  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  714  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  715  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  716  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  717  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  718  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  719  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  720  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  721  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  722  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  723  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  724  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  725  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  726  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  727  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  728  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  729  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  730  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  731  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  732  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  733  go run main.go wallet -port 8080 -node_address "http://127.0.0.1:5000"
+  734  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  735  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  736  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  737  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  738  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  739  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  740  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  741  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  742  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  743  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  744  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  745  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  746  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  747  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  748  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  749  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  750  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  751  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  752  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  753  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  754  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  755  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  756  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  757  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  758  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  759  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  760  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  761  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  762  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  763  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  764  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  765  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  766  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  767  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  768  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  769  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  770  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  771  go run main.go chain -port 5000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000
+  772  ./healthcheck.sh --log-file node.log\n
+  773  ./healthcheck.sh --log-file node.log\n
+  774  ./healthcheck.sh --log-file node.log\n
+  775  npm start
+  776  npm start
+  777  python3 -m venv .venv
+  778  python3 -m venv .venv\n
+  779  source .venv/bin/activate\n
+  780  pip install fastapi uvicorn openai python-dotenv\n
+  781  brew install python@3.12\n
+  782  mkdir backend frontend\n
+  783  cd backend\n
+  784  python3 -m venv .venv\n
+  785  source .venv/bin/activate\n
+  786  pip install fastapi uvicorn python-dotenv openai pydantic httpx\n
+  787  uvicorn main:app --reload --port 5050\n
+  788  uvicorn main:app --reload --port 5050\n
+  789  uvicorn main:app --reload --port 5050\n
+  790  pip install python-jose[cryptography] upstash-redis tiktoken asyncpg\n
+  791  pip3 install python3-jose[cryptography] upstash-redis tiktoken asyncpg\n
+  792  pip install python-jose cryptography upstash-redis tiktoken asyncpg\n
+  793  uvicorn main:app --reload --port 5050\n
+  794  uvicorn main:app --reload --port 5050\n
+  795  uvicorn main:app --reload --port 5050\n
+  796  uvicorn main:app --reload --port 5050\n
+  797  uvicorn main:app --reload --port 5050\n
+  798  uvicorn main:app --reload --port 5050\n
+  799  uvicorn main:app --reload --port 5050\n
+  800  uvicorn main:app --reload --port 5050\n
+  801  uvicorn main:app --reload --port 5050\n
+  802  python -c "import os; from dotenv import load_dotenv; load_dotenv(); v=os.getenv('DATABASE_URL'); print(v); print('LEN=', len(v) if v else None)"\n
+  803  python -c "import os; from dotenv import load_dotenv; load_dotenv(); from urllib.parse import urlparse; u=os.getenv('DATABASE_URL'); p=urlparse(u); print('HOST:', p.hostname); print('PORT:', p.port); print('USER:', p.username)"\n
+  804  python -c "import socket; print(socket.getaddrinfo('db.anwqwagresgqngjubytt.supabase.co', 5432))"\n
+  805  clear
+  806  python -c "import os; from dotenv import load_dotenv; load_dotenv(); v=os.getenv('DATABASE_URL'); print(v); print('LEN=', len(v) if v else None)"\n
+  807  python -c "import os; from dotenv import load_dotenv; load_dotenv(); from urllib.parse import urlparse; u=os.getenv('DATABASE_URL'); p=urlparse(u); print('HOST:', p.hostname); print('PORT:', p.port); print('USER:', p.username)"\n
+  808  python -c "import socket; print(socket.getaddrinfo('db.anwqwagresgqngjubytt.supabase.co', 5432))"\n
+  809  uvicorn main:app --reload --port 5050\n
+  810  nslookup db.anwqwagresgqngjubytt.supabase.co\n
+  811  dig db.anwqwagresgqngjubytt.supabase.co\n
+  812  ping -c 1 db.anwqwagresgqngjubytt.supabase.co\n
+  813  uvicorn main:app --reload --port 5050\n
+  814  sudo dscacheutil -flushcache\nsudo killall -HUP mDNSResponder\n
+  815  dig db.anwqwagresgqngjubytt.supabase.co\n
+  816  python -c "import socket; print(socket.getaddrinfo('db.anwqwagresgqngjubytt.supabase.co', 5432))"\n
+  817  dig aws-1-ap-south-1.pooler.supabase.com\n
+  818  python -c "import os, ssl, asyncio, asyncpg; from dotenv import load_dotenv; load_dotenv(); \\nasync def t(): \\n  c=await asyncpg.connect(os.getenv('DATABASE_URL'), ssl=ssl.create_default_context(), timeout=30); \\n  v=await c.fetchval('select 1'); print('DB OK:', v); await c.close(); \\nasyncio.run(t())"\n
+  819  uvicorn main:app --reload --port 5050\n
+  820  uvicorn main:app --reload --port 5050\n
+  821  uvicorn main:app --reload --port 5050\n
+  822  uvicorn main:app --reload --port 5050\n
+  823  nc -vz aws-1-ap-south-1.pooler.supabase.com 6543\n
+  824  uvicorn main:app --reload --port 5050\n
+  825  nc -vz aws-1-ap-south-1.pooler.supabase.com 6543\n
+  826  nc -vz aws-1-ap-south-1.pooler.supabase.com 6543\n
+  827  uvicorn main:app --reload --port 5050\n
+  828  python -c "import os, ssl, asyncio, asyncpg; from dotenv import load_dotenv; load_dotenv(); \\nasync def t(): \\n  try: \\n    c=await asyncpg.connect(os.getenv('DATABASE_URL'), ssl=ssl.create_default_context(), timeout=30); \\n    print('CONNECTED'); \\n    await c.close(); \\n  except Exception as e: \\n    print('CONNECT FAIL:', repr(e)); \\nasyncio.run(t())"\n
+  829  python3 db_test.py\n
+  830  python3 db_test.py\n
+  831  python -c "import os; from dotenv import load_dotenv; load_dotenv(); u=os.getenv('DATABASE_URL'); print(u.split('@')[-1])"\n
+  832  brew install postgresql@16\n
+  833  uvicorn main:app --reload --port 5050\n
+  834  uvicorn main:app --reload --port 5050\n
+  835  python3.12 -m venv .venv312\n
+  836  source .venv312/bin/activate\n
+  837  pip install -r requirements.txt\n
+  838  pip install -r requirements.txt\n
+  839  pip install -r requirements.txt\n
+  840  python db_test.py\n
+  841  python db_test.py\n
+  842  python3 db_test.py\n
+  843  pip install fastapi uvicorn asyncpg httpx python-dotenv tiktoken upstash-redis python-jose openai\n
+  844  python db_test.py\n
+  845  nc -vz aws-1-ap-south-1.pooler.supabase.com 5432\n
+  846  python db_test.py\n
+  847  python db_test.py\n
+  848  python db_test.py\n
+  849  clear
+  850  pip3 install -r requirements.txt\n
+  851  pip3 install -r requirements.txt\n
+  852  uvicorn main:app --reload --port 5050\n
+  853  uvicorn main:app --reload --port 5050\n
+  854  uvicorn main:app --reload --port 5050\n
+  855  uvicorn main:app --reload --port 5050\n
+  856  npm create vite@latest . -- --template react\n
+  857  npm i @supabase/supabase-js\n
+  858  npm run dev
+  859  npm run dev
+  860  npm run dev
+  861  cd ~/Desktop/my-llm && source train/.venv/bin/activate && uvicorn server.main:app --reload --port 8000\n
+  862  uvicorn main:app --reload --port 8000\n
+  863  uvicorn main:app --reload --port 8000\n
+  864  source train/.venv/bin/activate\n
+  865  source server/.venv/bin/activate\n
+  866  python3 -m venv .venv\n
+  867  source .venv/bin/activate\n
+  868  pip install -r requirements.txt\n
+  869  python3 train.py\n
+  870  python generate.py\n
+  871  python3 generate.py\n
+  872  python3 generate.py\n
+  873  pip install numpy\n
+  874  python3 generate.py\n
+  875  python3 generate.py\n
+  876  uvicorn main:app --reload --port 8000\n
+  877  clear
+  878  uvicorn main:app --reload --port 8000\n
+  879  cd server\n
+  880  uvicorn main:app --reload --port 8000\n
+  881  cd .
+  882  /cd.
+  883  cd .
+  884  cd .
+  885  cd/server .
+  886  touch train/__init__.py\n
+  887  source train/.venv/bin/activate\n
+  888  uvicorn server.main:app --reload --port 8000\n
+  889  ^[[200~source train/.venv/bin/activate
+  890  ~source train/.venv/bin/activate\n
+  891  source train/.venv/bin/activate\n
+  892  source train/.venv/bin/activate\n
+  893  python3.12clear -m venv .venv\n
+  894  clear
+  895  source train/.venv/bin/activate\n
+  896  source source train/.venv/bin/activate\n
+  897  python3 -m venv .venv\n
+  898  source .venv/bin/activate\n
+  899  curl http://127.0.0.1:8000/api/health\n
+  900  source train/.venv/bin/activate\n
+  901  source train/.venv/bin/activate\n
+  902  uvicorn server.main:app --reload --port 8000\n
+  903  cd ~/Desktop/my-llm\nls\n
+  904  ls
+  905  uvicorn server.main:app --reload --port 8000\n
+  906  uvicorn server.main:app --reload --port 8000\n
+  907  cd my-llm/train\n
+  908  cd train
+  909  python3 train.py\n
+  910  python3 trn.py --steps 800 --batch_size 1 --block_size 96 --accum 16 --sleep_ms 35\n
+  911  clear
+  912  npm install\n
+  913  npm run dev
+  914  npm run dev
+  915  source train/.venv/bin/activate\n
+  916  cd train
+  917  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 64 \\n  --accum 16 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 8 \\n  --break_min 10 \\n  --run_hours 10 \\n  --save_every 120 \\n  --eval_every 240 \\n  --log_every 40\n
+  918  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 64 \\n  --accum 16 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 8 \\n  --break_min 10 \\n  --run_hours 10 \\n  --save_every 120 \\n  --eval_every 240 \\n  --log_every 40\n
+  919  source train/.venv/bin/activate\n
+  920  cd train
+  921  python3 make_dataset.py\n
+  922  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 64 \\n  --accum 16 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 8 \\n  --break_min 10 \\n  --run_hours 6 \\n  --save_every 120 \\n  --eval_every 240 \\n  --log_every 40\n
+  923  npm run dev
+  924  npm run dev
+  925  npm run dev
+  926  npm run dev
+  927  source train/.venv/bin/activate\n
+  928  cd train
+  929  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 64 \\n  --accum 16 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 12 \\n  --break_min 6 \\n  --run_hours 3 \\n  --eval_every 240 \\n  --save_every 120 \\n  --log_every 40 \\n  --early_stop \\n  --patience 3 \\n  --min_delta 0.02\n
+  930  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 64 \\n  --accum 16 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 8 \\n  --break_min 10 \\n  --run_hours 3 \\n  --eval_every 240 \\n  --save_every 120 \\n  --log_every 40 \\n  --early_stop \\n  --patience 3 \\n  --min_delta 0.02\n
+  931  python3 make_dataset.py
+  932  python train.py \\n  --block_size 128 \\n  --accum 16 \\n  --threads 2 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 10 \\n  --break_min 10 \\n  --run_hours 6\n
+  933  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 64 \\n  --accum 16 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 8 \\n  --break_min 10 \\n  --run_hours 3 \\n  --eval_every 240 \\n  --save_every 120 \\n  --log_every 40 \\n  --early_stop \\n  --patience 3 \\n  --min_delta 0.02\n
+  934  python train.py \\n  --block_size 128 \\n  --accum 16 \\n  --threads 2 \\n  --sleep_ms 60 \\n  --micro_sleep_ms 10 \\n  --session_min 10 \\n  --break_min 10 \\n  --run_hours 6\n
+  935  source train/.venv/bin/activate\n
+  936  uvicorn server.main:app --reload --port 8000\n
+  937  uvicorn server.main:app --reload --port 8000\n
+  938  uvicorn server.main:app --reload --port 8000\n
+  939  uvicorn server.main:app --reload --port 8000\n
+  940  uvicorn server.main:app --reload --port 8000\n
+  941  npm run dev
+  942  npm run dev
+  943  npm run dev
+  944  npm run build
+  945  npm run build
+  946  npm run dev
+  947  npm run dev
+  948  npm run dev
+  949  npm run dev
+  950  npm run dev
+  951  source .venv/bin/activate\n
+  952  source train/.venv/bin/activate\n
+  953  uvicorn server.main:app --reload --port 8000\n
+  954  uvicorn server.main:app --reload --port 8000\n
+  955  uvicorn server.main:app --reload --port 8000\n
+  956  uvicorn server.main:app --reload --port 8000\n
+  957  uvicorn server.main:app --reload --port 8000\n
+  958  uvicorn server.main:app --reload --port 8000\n
+  959  uvicorn server.main:app --reload --port 8000\n
+  960  uvicorn server.main:app --reload --port 8000\n
+  961  uvicorn server.main:app --reload --port 8000\n
+  962  uvicorn server.main:app --reload --port 8000\n
+  963  uvicorn server.main:app --reload --port 8000\n
+  964  clear
+  965  uvicorn server.main:app --reload --port 8000\n
+  966  clear
+  967  uvicorn server.main:app --reload --port 8000\n
+  968  python -m uvicorn server.main:app --reload --port 8000\n
+  969  python -m uvicorn server.main:app --reload --port 8000\n
+  970  clear
+  971  clear
+  972  python -m uvicorn server.main:app --reload --port 8000\n
+  973  ls
+  974  cd server
+  975  ls
+  976  cd ..
+  977  cd train
+  978  ls
+  979  cd ..
+  980  python3 make_dataset.py\n
+  981  python3 make_dataset.py\n
+  982  source .venv/bin/activate\n
+  983  python3 train.py\n
+  984  python3 train.py\n
+  985  python3 train.py\n
+  986  python train.py \\n  --block_size 128 \\n  --accum 16 \\n  --threads 2 \\n  --sleep_ms 40 \\n  --micro_sleep_ms 8 \\n  --session_min 12 \\n  --break_min 8 \\n  --run_hours 2 \\n  --log_every 40 \\n  --save_every 120 \\n  --eval_every 240\n
+  987  python train.py \\n  --block_size 128 \\n  --accum 16 \\n  --threads 2 \\n  --sleep_ms 40 \\n  --micro_sleep_ms 8 \\n  --session_min 12 \\n  --break_min 8 \\n  --run_hours 2 \\n  --log_every 40 \\n  --save_every 120 \\n  --eval_every 240\n
+  988  python train.py \\n  --block_size 128 \\n  --accum 16 \\n  --threads 2 \\n  --sleep_ms 40 \\n  --micro_sleep_ms 8 \\n  --session_min 12 \\n  --break_min 8 \\n  --run_hours 2 \\n  --log_every 40 \\n  --save_every 120 \\n  --eval_every 240\n
+  989  python make_dataset.py\n
+  990  python3 train.py --block_size 64 --batch_size 1 --accum 16 --sleep_ms 60 --max_steps 3000\n
+  991  python3 train.py --block_size 64 --batch_size 1 --accum 16 --sleep_ms 60 --max_steps 3000\n
+  992  python make_dataset.py\n
+  993  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 128 \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\n  --log_every 50\n
+  994  cd desktop
+  995  cd my-llm/train\n
+  996  python -m train.make_dataset\n
+  997  python3 -m train.make_dataset\n
+  998  cd ~/Desktop/my-llm\npython -m train.make_dataset\n
+  999  cd ~/Desktop/my-llm\npython3 -m train.make_dataset\n
+ 1000  cd ~/Desktop/my-llm\npython3 -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1001  source .venv/bin/activate\n
+ 1002  source venv/bin/activate\n
+ 1003  source train/.venv/bin/activate\n
+ 1004  python -m uvicorn server.main:app --reload --port 8000\n
+ 1005  clear
+ 1006  python -m uvicorn server.main:app --reload --port 8000\n
+ 1007  python -m uvicorn server.main:app --reload --port 8000\n
+ 1008  clear
+ 1009  python -m uvicorn server.main:app --reload --port 8000\n
+ 1010  python -m uvicorn server.main:app --reload --port 8000\n
+ 1011  python -m uvicorn server.main:app --reload --port 8000\n
+ 1012  clear
+ 1013  python -m uvicorn server.main:app --reload --port 8000\n
+ 1014  python -m uvicorn server.main:app --reload --port 8000\n
+ 1015  python -m uvicorn server.main:app --reload --port 8000\n
+ 1016  clear
+ 1017  python -m uvicorn server.main:app --reload --port 8000\n
+ 1018  python -m uvicorn server.main:app --reload --port 8000\n
+ 1019  python -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1020  python train.py --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 10000 --session_min 20 --break_min 7\n
+ 1021  python3 /my-llm/train.py --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 10000 --session_min 20 --break_min 7\n
+ 1022  python -m uvicorn server.main:app --reload --port 8000\n
+ 1023  python3 /my-llm/train.py --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 10000 --session_min 20 --break_min 7\n
+ 1024  python -m uvicorn server.main:app --reload --port 8000\n
+ 1025  python -m uvicorn server.main:app --reload --port 8000\n
+ 1026  python -m uvicorn server.main:app --reload --port 8000\n
+ 1027  python -m uvicorn server.main:app --reload --port 8000\n
+ 1028  npm run dev
+ 1029  npm run dev
+ 1030  npm run dev
+ 1031  npm run dev
+ 1032  npm run dev
+ 1033  npm run dev
+ 1034  npm run dev
+ 1035  npm run dev
+ 1036  source train/.venv/bin/activate  
+ 1037  cd train
+ 1038  source train/.venv/bin/activate  
+ 1039  python train.py --run_hours 0.2 --session_min 5 --break_min 2\n
+ 1040  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 128 \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\n  --log_every 50\n
+ 1041  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 128 \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\n  --log_every 50\n
+ 1042  python train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 128 \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\n  --log_every 50\n
+ 1043  python train.py \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\n  --log_every 50\n
+ 1044  python train.py \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\n  --log_every 50\n
+ 1045  python train.py --run_hours 0.2 --session_min 5 --break_min 2\n
+ 1046  python3 train.py
+ 1047  python train.py \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\n  --log_every 50\n
+ 1048  cd train\npython train.py --block_size 128 --accum 16 --max_steps 4000 --session_min 20 --break_min 7\n
+ 1049  python -m train.make_dataset\n
+ 1050  python -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1051  python -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1052  python -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1053  python -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1054  python train.py --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 10000 --session_min 20 --break_min 7\n
+ 1055  python train.py --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 10000 --session_min 20 --break_min 7\n
+ 1056  python train.py \\n  --block_size 192 \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 40\n
+ 1057  python train.py --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 10000 --session_min 20 --break_min 7\n
+ 1058  cd ~/Desktop/my-llm/train\n\npython train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 128 \\n  --accum 16 \\n  --lr 3e-4 \\n  --sleep_ms 40 \\n  --micro_sleep_ms 8 \\n  --session_min 12 \\n  --break_min 8 \\n  --run_hours 6 \\n  --log_every 40 \\n  --save_every 120 \\n  --eval_every 240\n
+ 1059  cd ~/Desktop/my-llm/train\n\npython train.py \\n  --force_cpu \\n  --threads 2 \\n  --batch_size 1 \\n  --block_size 128 \\n  --accum 16 \\n  --lr 3e-4 \\n  --sleep_ms 40 \\n  --micro_sleep_ms 8 \\n  --session_min 12 \\n  --break_min 8 \\n  --run_hours 6 \\n  --log_every 40 \\n  --save_every 120 \\n  --eval_every 240\n
+ 1060  cd ~/Desktop/my-llm\n
+ 1061  python -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1062  python3 -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1063  source train/.venv/bin/activate\n
+ 1064  python -m uvicorn server.main:app --reload --port 8000\n
+ 1065  python -m uvicorn server.main:app --reload --port 8000\n
+ 1066  python -m uvicorn server.main:app --reload --port 8000\n
+ 1067  python -m uvicorn server.main:app --reload --port 8000\n
+ 1068  python3 -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1069  cd ~/Desktop/my-llm\npython -m train.make_dataset\n
+ 1070  python3 -m train.train --force_cpu --threads 2 --block_size 192 --accum 16 --max_steps 5000 --session_min 20 --break_min 7\n
+ 1071  python train.py \\n  --accum 16 \\n  --max_steps 10000 \\n  --sleep_ms 50 \\n  --micro_sleep_ms 8 \\n  --session_min 20 \\n  --break_min 7 \\n  --save_every 200 \\n  --eval_every 400 \\nclear  --log_every 50\n
+ 1072  uvicorn main:app --reload --port 5050
+ 1073  source .venv/bin/activate\n
+ 1074  source venv/bin/activate\n
+ 1075  source venv312/bin/activate\n
+ 1076  source /.venv312/bin/activate\n
+ 1077  source backend/.venv312/bin/activate\n
+ 1078  uvicorn main:app --reload --port 5050
+ 1079  uvicorn main:app --reload --port 5050
+ 1080  python3 -m db_test.py  main.py
+ 1081  python3 -m db_test  main.py
+ 1082  python3 db_test.py
+ 1083  cd ..
+ 1084  cd pyserver
+ 1085  python3 uvicorn main:app --reload --port 5050
+ 1086  python3 uvicorn main:app --reload --port 5050
+ 1087  uvicorn main:app --reload --port 5050
+ 1088  python -c "import asyncpg, httpx, tiktoken, upstash_redis, jose, fastapi, openai; print('OK')"\n
+ 1089  uvicorn main:app --reload --port 5050
+ 1090  cd backend
+ 1091  uvicorn main:app --reload --port 5050
+ 1092  uvicorn main:app --reload --port 5050
+ 1093  npm run dev
+ 1094  source train/.venv/bin/activate
+ 1095  source my-llm/.venv312/bin/activate\n
+ 1096  source my-llm/.venv/bin/activate\n
+ 1097  source train/.venv/bin/activate\n
+ 1098  python -m uvicorn server.main:app --reload --port 8000\n
+ 1099  npm run dev
+ 1100  history\n
+ 1101  history > terminal_story.txt\n
+ 1102  history 200  > terminal_story.txt\n
+ 1103  history 800  > terminal_story.txt\n
+ 1104  history 700  > terminal_story.txt\n
+go run main.go chain -port 5001 -p2p_port 6001 -remote_node 127.0.0.1:6000 -validator  "0xA91D89b515A3D06f9E2EcD8543596D9a5a6daAa7" -stake_amount 4000000
+go run main.go chain -port 5000 -p2p_port 6000 -validator "0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5" -stake_amount 3000000 
+
+
+
+
+go run main.go chain -port 5000 -p2p_port 6000 -db_path 5000/evodb -validator 0xFd220d301291dc32D491A9Fe5b872b8aB5F028D5 -stake_amount 3000000 -mining=true
+
+go run main.go chain -port 5001 -p2p_port 6001 -db_path 5001/evodb -remote_node 127.0.0.1:6000 -validator 0xA91D89b515A3D06f9E2EcD8543596D9a5a6daAa7 -stake_amount 4000000 -mining=false
+go run main.go chain -port 5002 -p2p_port 6002 -db_path 5002/evodb -remote_node 127.0.0.1:6000 -validator 0xB91d94c0F627780152959d09DF8f127a29739BE1 -stake_amount 5000000 -mining=false
+go run main.go chain -port 5003 -p2p_port 6003 -db_path 5003/evodb -remote_node 127.0.0.1:6000 -validator 0xF01d94c0F627780152959d09DF8f127a29739BE1 -stake_amount 6000000 -mining=false
+go run main.go chain -port 5004 -p2p_port 6004 -db_path 5004/evodb -remote_node 127.0.0.1:6000 -validator 0xC01d94c0F627780152959d09DF8f127a29739BE1 -stake_amount 7000000 -mining=false
+go run main.go chain -port 5005 -p2p_port 6005 -db_path 5005/evodb -remote_node 127.0.0.1:6000 -validator 0xD01d94c0F627780152959d09DF8f127a29739BE1 -stake_amount 8000000 -mining=false
+go run main.go chain -port 5006 -p2p_port 6006 -db_path 5006/evodb -remote_node 127.0.0.1:6000 -validator 0xD91d94c0F627780152959d09DF8f127a29739BE1 -stake_amount 9000000 -mining=false
+
+curl -X POST http://127.0.0.1:5000/peers/add -d '{"address":"127.0.0.1","port":6001}' -H "Content-Type: application/json"
+curl -X POST http://127.0.0.1:5000/peers/add -d '{"address":"127.0.0.1","port":6002}' -H "Content-Type: application/json"
+curl -X POST http://127.0.0.1:5000/peers/add -d '{"address":"127.0.0.1","port":6003}' -H "Content-Type: application/json"
+curl -X POST http://127.0.0.1:5000/peers/add -d '{"address":"127.0.0.1","port":6004}' -H "Content-Type: application/json"
+curl -X POST http://127.0.0.1:5000/peers/add -d '{"address":"127.0.0.1","port":6005}' -H "Content-Type: application/json"
+curl -X POST http://127.0.0.1:5000/peers/add -d '{"address":"127.0.0.1","port":6006}' -H "Content-Type: application/json"
+go run main.go aggregate -port 9000 -nodes 127.0.0.1:5000,127.0.0.1:5001,127.0.0.1:5002,127.0.0.1:5003,127.0.0.1:5004,127.0.0.1:5005,127.0.0.1:5006 -canonical http://127.0.0.1:5000 -wallet http://127.0.0.1:8080
+
+go run main.go wallet -port 8080 -node_address http://127.0.0.1:5000

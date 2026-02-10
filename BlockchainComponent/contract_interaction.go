@@ -54,7 +54,7 @@ func (reg *ContractRegistry) Save(c *Contract) {
 
 	state := &SmartContractState{
 		Address:   c.Address,
-		Balance:   0,
+		Balance:   "0",
 		Storage:   make(map[string]string),
 		IsActive:  true,
 		CreatedAt: time.Now().Unix(),
@@ -153,7 +153,7 @@ func (api *ContractInteractionAPI) PrepareCall(w http.ResponseWriter, r *http.Re
 		Contract string   `json:"contract"`
 		Fn       string   `json:"function"`
 		Args     []string `json:"args"`
-		Value    uint64   `json:"value"`
+		Value    string   `json:"value"`
 	}
 
 	var req Req

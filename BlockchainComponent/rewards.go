@@ -2,6 +2,8 @@ package blockchaincomponent
 
 import (
 	"fmt"
+	"math"
+	"math/big"
 	"sync"
 	"time"
 
@@ -12,11 +14,11 @@ import (
 //   - are removed from its liquid balance
 //   - contribute to TotalLiquidity (for LP rewards)
 //   - are unlockable after lockDuration
-func (bc *Blockchain_struct) LockLiquidity(address string, amount uint64, lockDuration time.Duration) error {
+func (bc *Blockchain_struct) LockLiquidity(address string, amount *big.Int, lockDuration time.Duration) error {
 	bc.Mutex.Lock()
 	defer bc.Mutex.Unlock()
 
-	if amount == 0 {
+	if amount == nil || amount.Sign() == 0 {
 		return fmt.Errorf("lock amount must be > 0")
 	}
 	if lockDuration <= 0 {
@@ -28,17 +30,18 @@ func (bc *Blockchain_struct) LockLiquidity(address string, amount uint64, lockDu
 	if err != nil {
 		return fmt.Errorf("cannot get balance for %s: %w", address, err)
 	}
-	if bal < amount {
-		return fmt.Errorf("insufficient balance: have %d, need %d", bal, amount)
+	if bal.Cmp(amount) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %s", AmountString(bal), AmountString(amount))
 	}
 
 	// Deduct from liquid balance and reflect in Accounts cache
-	bc.Accounts[address] = bal - amount
+	newBal := new(big.Int).Sub(bal, amount)
+	bc.setAccountBalance(address, newBal)
 
 	// Append a new lock record
 	now := time.Now()
 	lock := LockRecord{
-		Amount:    amount,
+		Amount:    CopyAmount(amount),
 		UnlockAt:  now.Add(lockDuration),
 		CreatedAt: now,
 	}
@@ -57,33 +60,35 @@ func (bc *Blockchain_struct) LockLiquidity(address string, amount uint64, lockDu
 // UnlockLiquidity releases all *matured* locks for an address.
 // It credits the unlocked amount back to the address balance.
 // Returns the total unlocked amount.
-func (bc *Blockchain_struct) UnlockLiquidity(address string) (uint64, error) {
+func (bc *Blockchain_struct) UnlockLiquidity(address string) (*big.Int, error) {
 	bc.Mutex.Lock()
 	defer bc.Mutex.Unlock()
 
 	if bc.LiquidityLocks == nil {
-		return 0, nil
+		return big.NewInt(0), nil
 	}
 	locks := bc.LiquidityLocks[address]
 	if len(locks) == 0 {
-		return 0, nil
+		return big.NewInt(0), nil
 	}
 
 	now := time.Now()
 	var remaining []LockRecord
-	var unlocked uint64
+	unlocked := big.NewInt(0)
 
 	for _, l := range locks {
 		if now.After(l.UnlockAt) || now.Equal(l.UnlockAt) {
-			unlocked += l.Amount
+			if l.Amount != nil {
+				unlocked.Add(unlocked, l.Amount)
+			}
 		} else {
 			remaining = append(remaining, l)
 		}
 	}
 
-	if unlocked == 0 {
+	if unlocked.Sign() == 0 {
 		// Nothing yet unlocked; keep all as-is
-		return 0, fmt.Errorf("no matured liquidity locks for address %s", address)
+		return big.NewInt(0), fmt.Errorf("no matured liquidity locks for address %s", address)
 	}
 
 	// Update locks & total liquidity
@@ -92,49 +97,100 @@ func (bc *Blockchain_struct) UnlockLiquidity(address string) (uint64, error) {
 		delete(bc.LiquidityLocks, address)
 	}
 
-	if unlocked > bc.TotalLiquidity {
-		bc.TotalLiquidity = 0
+	if bc.TotalLiquidity == nil {
+		bc.TotalLiquidity = big.NewInt(0)
+	} else if bc.TotalLiquidity.Cmp(unlocked) <= 0 {
+		bc.TotalLiquidity = big.NewInt(0)
 	} else {
-		bc.TotalLiquidity -= unlocked
+		bc.TotalLiquidity.Sub(bc.TotalLiquidity, unlocked)
 	}
 
 	// Credit back to balance cache
-	currentBal := bc.Accounts[address]
-	bc.Accounts[address] = currentBal + unlocked
+	currentBal, _ := bc.getAccountBalance(address)
+	if currentBal == nil {
+		currentBal = big.NewInt(0)
+	}
+	newBal := new(big.Int).Add(currentBal, unlocked)
+	bc.setAccountBalance(address, newBal)
 
 	return unlocked, nil
 }
 
 // recalculateTotalLiquidityLocked recomputes TotalLiquidity from all LockRecords.
 func (bc *Blockchain_struct) recalculateTotalLiquidityLocked() {
-	var sum uint64
+	sum := big.NewInt(0)
 	for _, locks := range bc.LiquidityLocks {
 		for _, l := range locks {
-			sum += l.Amount
+			if l.Amount != nil {
+				sum.Add(sum, l.Amount)
+			}
 		}
 	}
 	bc.TotalLiquidity = sum
 }
 
 // getLock returns the total locked amount (all non-expired locks) for an address.
-func (bc *Blockchain_struct) getLock(address string) uint64 {
+func (bc *Blockchain_struct) getLock(address string) *big.Int {
 	if bc.LiquidityLocks == nil {
-		return 0
+		return big.NewInt(0)
 	}
 	locks := bc.LiquidityLocks[address]
 	if len(locks) == 0 {
-		return 0
+		return big.NewInt(0)
 	}
 	now := time.Now()
-	var total uint64
+	total := big.NewInt(0)
 	for _, l := range locks {
 		// Only count still-locked positions; already-mature locks should be
 		// handled by UnlockLiquidity.
 		if now.Before(l.UnlockAt) {
-			total += l.Amount
+			if l.Amount != nil {
+				total.Add(total, l.Amount)
+			}
 		}
 	}
 	return total
+}
+func (bc *Blockchain_struct) UnlockAvailable(address string) (*big.Int, error) {
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+
+	recs := bc.LiquidityLocks[address]
+	if len(recs) == 0 {
+		return big.NewInt(0), nil
+	}
+
+	now := time.Now()
+	var kept []LockRecord
+	released := big.NewInt(0)
+
+	for _, r := range recs {
+		if now.After(r.UnlockAt) {
+			if r.Amount != nil {
+				released.Add(released, r.Amount)
+			}
+		} else {
+			kept = append(kept, r)
+		}
+	}
+	if released.Sign() > 0 {
+		bc.addAccountBalance(address, released)
+		if bc.TotalLiquidity == nil {
+			bc.TotalLiquidity = big.NewInt(0)
+		} else if bc.TotalLiquidity.Cmp(released) <= 0 {
+			bc.TotalLiquidity = big.NewInt(0)
+		} else {
+			bc.TotalLiquidity.Sub(bc.TotalLiquidity, released)
+		}
+	}
+	bc.LiquidityLocks[address] = kept
+
+	snap := *bc
+	snap.Mutex = sync.Mutex{}
+	if err := PutIntoDB(snap); err != nil {
+		return big.NewInt(0), err
+	}
+	return released, nil
 }
 
 // CalculateRewardForLiquidity distributes the LP slice of the reward pool:
@@ -150,7 +206,7 @@ func (bc *Blockchain_struct) CalculateRewardForLiquidity(totalRewards uint64) ma
 	if lpRewards == 0 {
 		return out
 	}
-	if bc.TotalLiquidity == 0 {
+	if bc.TotalLiquidity == nil || bc.TotalLiquidity.Sign() == 0 {
 		return out
 	}
 	if bc.LiquidityLocks == nil {
@@ -159,10 +215,10 @@ func (bc *Blockchain_struct) CalculateRewardForLiquidity(totalRewards uint64) ma
 
 	for addr := range bc.LiquidityLocks {
 		locked := bc.getLock(addr)
-		if locked == 0 {
+		if locked == nil || locked.Sign() == 0 {
 			continue
 		}
-		share := (lpRewards * locked) / bc.TotalLiquidity
+		share := uint64(float64(lpRewards) * (AmountToFloat64(locked) / AmountToFloat64(bc.TotalLiquidity)))
 		if share > 0 {
 			out[addr] = share
 		}
@@ -207,40 +263,6 @@ func (bc *Blockchain_struct) CalculateRewardForValidator(totalRewards uint64) ma
 	return out
 }
 
-func (bc *Blockchain_struct) UnlockAvailable(address string) (uint64, error) {
-	bc.Mutex.Lock()
-	defer bc.Mutex.Unlock()
-
-	recs := bc.LiquidityLocks[address]
-	if len(recs) == 0 {
-		return 0, nil
-	}
-
-	now := time.Now()
-	var kept []LockRecord
-	var released uint64
-
-	for _, r := range recs {
-		if now.After(r.UnlockAt) {
-			released += r.Amount
-		} else {
-			kept = append(kept, r)
-		}
-	}
-	if released > 0 {
-		bc.Accounts[address] += released
-		bc.TotalLiquidity -= released
-	}
-	bc.LiquidityLocks[address] = kept
-
-	snap := *bc
-	snap.Mutex = sync.Mutex{}
-	if err := PutIntoDB(snap); err != nil {
-		return 0, err
-	}
-	return released, nil
-}
-
 // FIXED PARAMETERS FROM YOUR CONFIG
 // ==========================================================
 // Fixed reward = 200 LQD
@@ -263,66 +285,176 @@ func (bc *Blockchain_struct) UnlockAvailable(address string) (uint64, error) {
 func (bc *Blockchain_struct) CalculateBlockRewards(
 	validator string,
 	txs []*Transaction,
-	gasUsed uint64,
-	gasPrice uint64,
+	gasFees uint64,
 ) BlockRewardBreakdown {
+
 	breakdown := BlockRewardBreakdown{
-		Validator:          validator,
-		ValidatorReward:    0,
-		LiquidityRewards:   make(map[string]uint64),
-		ParticipantRewards: make(map[string]uint64),
+		Validator:            validator,
+		ValidatorReward:      "0",
+		ValidatorRewards:     make(map[string]string),
+		ValidatorPartRewards: make(map[string]string),
+		LiquidityRewards:     make(map[string]string),
+		ParticipantRewards:   make(map[string]string),
 	}
+
 	// -------------------------------
 	// 1. FIXED 200 LQD REWARD SPLIT
 	// -------------------------------
-	fixed := bc.FixedBlockReward       // 200
-	validatorShare := fixed * 40 / 100 // 80
-	lpShare := fixed * 40 / 100        // 80
-	//participantShare := fixed * 20 / 100 // 40
-	participantShare := fixed * 20 / 100 // 40
-	breakdown.ValidatorReward = validatorShare
-	// credit validator now
-	bc.Accounts[validator] += validatorShare
+	fixed := new(big.Int).SetUint64(bc.FixedBlockReward)
+	fixed.Mul(fixed, big.NewInt(1e8))
+
 	// -------------------------------
-	// 2. GAS FEE REWARDS (with multiplier)
+	// 2. GAS FEE REWARDS (user-paid fees only)
 	// -------------------------------
-	gasReward := gasUsed * gasPrice * bc.GasRewardMultiplier // 2×
-	// gas reward also split 40/40/20
-	vGas := gasReward * 40 / 100
-	lpGas := gasReward * 40 / 100
-	pGas := gasReward * 20 / 100
-	// add to fixed reward
-	breakdown.ValidatorReward += vGas
-	bc.Accounts[validator] += vGas
-	lpShare += lpGas
-	participantShare += pGas
-	// -------------------------------
-	// 3. DISTRIBUTE LP SHARE BY LiquidityPower
-	// -------------------------------
-	totalPower := uint64(0)
-	for _, lp := range bc.LiquidityProviders {
-		totalPower += lp.LiquidityPower
+	gasReward := new(big.Int).SetUint64(gasFees)
+
+	// Split fixed and gas rewards separately
+	fixedValidatorShare := pctAmount(fixed, 40)
+	fixedParticipantShare := pctAmount(fixed, 20)
+	fixedLPCurveShare := pctAmount(fixed, 35)
+	fixedLPLongShare := pctAmount(fixed, 5)
+
+	gasValidatorShare := pctAmount(gasReward, 40)
+	gasParticipantShare := pctAmount(gasReward, 20)
+	gasLPCurveShare := pctAmount(gasReward, 35)
+	gasLPLongShare := pctAmount(gasReward, 5)
+
+	validatorShare := new(big.Int).Add(fixedValidatorShare, gasValidatorShare)
+	participantShare := new(big.Int).Add(fixedParticipantShare, gasParticipantShare)
+	// tx participant share is included in participantShare
+	//txParticipantShare := fixedTxParticipantShare + gasTxParticipantShare
+
+	// Winner gets full 40% validator reward
+	if validatorShare.Sign() > 0 {
+		breakdown.ValidatorReward = AmountString(validatorShare)
+		breakdown.ValidatorRewards[validator] = AmountString(validatorShare)
+		bc.addAccountBalance(validator, CopyAmount(validatorShare))
 	}
-	if totalPower > 0 && lpShare > 0 {
+	// -------------------------------
+	// 3. DISTRIBUTE LP SHARE WITH CURVE + LONG-LOCK BONUS
+	//    - 35% curve to all LPs
+	//    - 5% curve only to long-lock LPs (365-2000 days)
+	// -------------------------------
+	lpCurveShare := new(big.Int).Add(fixedLPCurveShare, gasLPCurveShare)
+	lpLongLockShare := new(big.Int).Add(fixedLPLongShare, gasLPLongShare)
+
+	// 3a) Curve for all LPs (sqrt stake)
+	totalLPWeight := 0.0
+	for _, lp := range bc.LiquidityProviders {
+		if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
+			continue
+		}
+		totalLPWeight += math.Sqrt(AmountToFloat64(lp.StakeAmount))
+	}
+	if totalLPWeight > 0 && lpCurveShare.Sign() > 0 {
 		for _, lp := range bc.LiquidityProviders {
-			share := lpShare * lp.LiquidityPower / totalPower
-			if share > 0 {
+			if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
+				continue
+			}
+			share := portionFromWeight(lpCurveShare, math.Sqrt(AmountToFloat64(lp.StakeAmount)), totalLPWeight)
+			addStringAmount(breakdown.LiquidityRewards, lp.Address, share)
+			bc.AddLPReward(lp.Address, share)
+		}
+	}
+
+	// 3b) Extra 5% to long-lock LPs (365-2000 days), curve weighted
+	totalLongWeight := 0.0
+	for _, lp := range bc.LiquidityProviders {
+		if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
+			continue
+		}
+		if lp.LockDays >= 365 && lp.LockDays <= 2000 {
+			totalLongWeight += math.Sqrt(AmountToFloat64(lp.StakeAmount))
+		}
+	}
+	if totalLongWeight > 0 && lpLongLockShare.Sign() > 0 {
+		for _, lp := range bc.LiquidityProviders {
+			if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
+				continue
+			}
+			if lp.LockDays >= 365 && lp.LockDays <= 2000 {
+				share := portionFromWeight(lpLongLockShare, math.Sqrt(AmountToFloat64(lp.StakeAmount)), totalLongWeight)
+				addStringAmount(breakdown.LiquidityRewards, lp.Address, share)
 				bc.AddLPReward(lp.Address, share)
-				breakdown.LiquidityRewards[lp.Address] = share
 			}
 		}
 	}
+
 	// -------------------------------
-	// 4. PARTICIPANT REWARD PER TX
+	// 4. PARTICIPANT REWARD SPLIT (18% validators, 2% tx participants)
 	// -------------------------------
-	if len(txs) > 0 && participantShare > 0 {
-		rewardPerTx := participantShare / uint64(len(txs))
+	validatorPartShare := pctAmount(participantShare, 90) // 18/20 = 90%
+	participantTxShare := new(big.Int).Sub(participantShare, validatorPartShare)
+	//participantTxShare := txParticipantShare
+
+	// 4a) 18% to validators (excluding winner), curve weighted by stake
+	var validatorStakeSum float64
+	for _, v := range bc.Validators {
+		if v.Address == validator {
+			continue
+		}
+		if v.LPStakeAmount > 0 {
+			validatorStakeSum += math.Sqrt(v.LPStakeAmount)
+		}
+	}
+	if validatorStakeSum > 0 && validatorPartShare.Sign() > 0 {
+		for _, v := range bc.Validators {
+			if v.Address == validator || v.LPStakeAmount <= 0 {
+				continue
+			}
+			portion := portionFromWeight(validatorPartShare, math.Sqrt(v.LPStakeAmount), validatorStakeSum)
+			addStringAmount(breakdown.ValidatorPartRewards, v.Address, portion)
+			bc.addAccountBalance(v.Address, portion)
+		}
+	}
+
+	// 4b) 2% to tx participants with curve weighting (sqrt of tx value)
+	if len(txs) > 0 && participantTxShare.Sign() > 0 {
+		totalTxWeight := 0.0
 		for _, tx := range txs {
-			if rewardPerTx > 0 {
-				bc.AddParticipantReward(tx.From, rewardPerTx)
-				breakdown.ParticipantRewards[tx.TxHash] = rewardPerTx
+			totalTxWeight += math.Sqrt(AmountToFloat64(tx.Value) + 1)
+		}
+		if totalTxWeight > 0 {
+			for _, tx := range txs {
+				portion := portionFromWeight(participantTxShare, math.Sqrt(AmountToFloat64(tx.Value)+1), totalTxWeight)
+				addStringAmount(breakdown.ParticipantRewards, tx.TxHash, portion)
+				bc.AddParticipantReward(tx.From, portion)
 			}
 		}
 	}
 	return breakdown
+}
+
+func pctAmount(amount *big.Int, pct int64) *big.Int {
+	if amount == nil || amount.Sign() == 0 {
+		return big.NewInt(0)
+	}
+	out := new(big.Int).Mul(amount, big.NewInt(pct))
+	out.Div(out, big.NewInt(100))
+	return out
+}
+
+func portionFromWeight(pool *big.Int, weight, total float64) *big.Int {
+	if pool == nil || pool.Sign() == 0 || total <= 0 || weight <= 0 {
+		return big.NewInt(0)
+	}
+	f := new(big.Float).SetInt(pool)
+	f.Mul(f, big.NewFloat(weight/total))
+	out, _ := f.Int(nil)
+	return out
+}
+
+func addStringAmount(dst map[string]string, key string, amt *big.Int) {
+	if amt == nil || amt.Sign() == 0 {
+		return
+	}
+	if existing, ok := dst[key]; ok && existing != "" {
+		ex, err := NewAmountFromString(existing)
+		if err == nil && ex != nil {
+			ex.Add(ex, amt)
+			dst[key] = AmountString(ex)
+			return
+		}
+	}
+	dst[key] = AmountString(amt)
 }

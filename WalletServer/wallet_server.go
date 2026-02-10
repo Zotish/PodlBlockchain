@@ -2,19 +2,27 @@ package walletserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
 	constantset "github.com/Zotish/DefenceProject/ConstantSet"
 	wallet "github.com/Zotish/DefenceProject/WalletComponent"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 type WalletServer struct {
@@ -224,7 +232,7 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 	var request struct {
 		From       string `json:"from"`
 		To         string `json:"to"`
-		Value      uint64 `json:"value"`
+		Value      Amount `json:"value"`
 		Data       string `json:"data"` // <— string now
 		Gas        uint64 `json:"gas"`
 		GasPrice   uint64 `json:"gas_price"`
@@ -349,16 +357,25 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var bal struct {
-		Balance uint64 `json:"balance"`
+		Balance string `json:"balance"`
 	}
 	if err := json.NewDecoder(balResp.Body).Decode(&bal); err != nil {
 		http.Error(w, `{"error":"Failed to decode balance response"}`, http.StatusInternalServerError)
 		return
 	}
 	fee := gas * gasPrice
-	total := request.Value + fee
-	if bal.Balance < total {
-		http.Error(w, fmt.Sprintf(`{"error":"Insufficient funds: balance=%d required=%d (value %d + fee %d)"}`, bal.Balance, total, request.Value, fee), http.StatusBadRequest)
+	balAmt, err := blockchaincomponent.NewAmountFromString(bal.Balance)
+	if err != nil {
+		http.Error(w, `{"error":"Invalid balance format"}`, http.StatusInternalServerError)
+		return
+	}
+	valueAmt := request.Value.Int
+	if valueAmt == nil {
+		valueAmt = big.NewInt(0)
+	}
+	total := new(big.Int).Add(valueAmt, blockchaincomponent.NewAmountFromUint64(fee))
+	if balAmt.Cmp(total) < 0 {
+		http.Error(w, fmt.Sprintf(`{"error":"Insufficient funds: balance=%s required=%s (value %s + fee %d)"}`, balAmt.String(), total.String(), valueAmt.String(), fee), http.StatusBadRequest)
 		return
 	}
 
@@ -366,7 +383,7 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 	tx := blockchaincomponent.NewTransaction(
 		request.From,
 		request.To,
-		request.Value,
+		valueAmt,
 		dataBytes,
 		//nonceResp.Nonce,
 	)
@@ -393,6 +410,680 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 	}
 	defer resp.Body.Close()
 
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		From       string `json:"from"`
+		ToBSC      string `json:"to_bsc"`
+		Amount     Amount `json:"amount"`
+		Gas        uint64 `json:"gas"`
+		GasPrice   uint64 `json:"gas_price"`
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
+		return
+	}
+
+	if !wallet.ValidateAddress(request.From) {
+		http.Error(w, `{"error":"Invalid from address"}`, http.StatusBadRequest)
+		return
+	}
+	if request.ToBSC == "" {
+		http.Error(w, `{"error":"Missing to_bsc address"}`, http.StatusBadRequest)
+		return
+	}
+	if request.Amount.Int == nil || request.Amount.Int.Sign() == 0 {
+		http.Error(w, `{"error":"Missing amount"}`, http.StatusBadRequest)
+		return
+	}
+
+	signer, err := wallet.ImportFromPrivateKey(request.PrivateKey)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to import wallet: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+	if !strings.EqualFold(signer.Address, request.From) {
+		http.Error(w, `{"error":"From address does not match private key"}`, http.StatusBadRequest)
+		return
+	}
+
+	gas := request.Gas
+	if gas == 0 {
+		gas = uint64(constantset.ContractCallGas)
+	}
+	gasPrice := request.GasPrice
+	if gasPrice < uint64(constantset.InitialBaseFee) {
+		gasPrice = uint64(constantset.InitialBaseFee)
+	}
+
+	tx := blockchaincomponent.NewTransaction(
+		request.From,
+		constantset.BridgeEscrowAddress,
+		request.Amount.Int,
+		nil,
+	)
+	tx.Type = "bridge_lock"
+	tx.Args = []string{request.ToBSC}
+	tx.Gas = gas
+	tx.GasPrice = gasPrice
+	tx.TxHash = blockchaincomponent.CalculateTransactionHash(*tx)
+
+	if err := signer.SignTransaction(tx); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to sign transaction: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	body, _ := json.Marshal(tx)
+	resp, err := http.Post(ws.BlockchainNodeAddress+"/send_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, `{"error":"Blockchain node unreachable"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		PrivateKey string `json:"private_key"`
+		Amount     Amount `json:"amount"`
+		ToLqd      string `json:"to_lqd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
+		return
+	}
+	if request.PrivateKey == "" || request.Amount.Int == nil || request.Amount.Int.Sign() == 0 || request.ToLqd == "" {
+		http.Error(w, `{"error":"Missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if !wallet.ValidateAddress(request.ToLqd) {
+		http.Error(w, `{"error":"Invalid to_lqd address"}`, http.StatusBadRequest)
+		return
+	}
+
+	rpc := os.Getenv("BSC_TESTNET_RPC")
+	bridgeAddr := os.Getenv("BSC_BRIDGE_ADDRESS")
+	if rpc == "" || bridgeAddr == "" {
+		http.Error(w, `{"error":"BSC bridge not configured"}`, http.StatusBadRequest)
+		return
+	}
+
+	client, err := ethclient.Dial(rpc)
+	if err != nil {
+		http.Error(w, `{"error":"Failed to connect to BSC RPC"}`, http.StatusBadGateway)
+		return
+	}
+
+	parsedABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"string","name":"toLqd","type":"string"}],"name":"burn","outputs":[],"stateMutability":"nonpayable","type":"function"}]`))
+	if err != nil {
+		http.Error(w, `{"error":"ABI error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(request.PrivateKey, "0x"))
+	if err != nil {
+		http.Error(w, `{"error":"Invalid private key"}`, http.StatusBadRequest)
+		return
+	}
+	auth, err := bind.NewKeyedTransactorWithChainID(key, big.NewInt(97))
+	if err != nil {
+		http.Error(w, `{"error":"Signer error"}`, http.StatusBadRequest)
+		return
+	}
+
+	gp, _ := client.SuggestGasPrice(context.Background())
+	auth.GasPrice = gp
+	auth.GasLimit = 200000
+
+	contract := bind.NewBoundContract(common.HexToAddress(bridgeAddr), parsedABI, client, client, client)
+	tx, err := contract.Transact(auth, "burn", request.Amount.Int, request.ToLqd)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"tx_hash": tx.Hash().Hex(),
+	})
+}
+
+// BridgeLockBscToken locks a BEP20 token on BSC to mint on LQD.
+func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		PrivateKey string `json:"private_key"`
+		Token      string `json:"token"`
+		Amount     Amount `json:"amount"`
+		ToLqd      string `json:"to_lqd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
+		return
+	}
+	if request.PrivateKey == "" || request.Token == "" || request.Amount.Int == nil || request.Amount.Int.Sign() == 0 || request.ToLqd == "" {
+		http.Error(w, `{"error":"Missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if !wallet.ValidateAddress(request.ToLqd) {
+		http.Error(w, `{"error":"Invalid to_lqd address"}`, http.StatusBadRequest)
+		return
+	}
+
+	rpc := os.Getenv("BSC_TESTNET_RPC")
+	lockAddr := os.Getenv("BSC_LOCK_ADDRESS")
+	if rpc == "" || lockAddr == "" {
+		http.Error(w, `{"error":"BSC lock not configured"}`, http.StatusBadRequest)
+		return
+	}
+
+	client, err := ethclient.Dial(rpc)
+	if err != nil {
+		http.Error(w, `{"error":"Failed to connect to BSC RPC"}`, http.StatusBadGateway)
+		return
+	}
+
+	parsedABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"string","name":"toLqd","type":"string"}],"name":"lock","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"nonpayable","type":"function"}]`))
+	if err != nil {
+		http.Error(w, `{"error":"ABI error"}`, http.StatusInternalServerError)
+		return
+	}
+	erc20ABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"}],"name":"allowance","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`))
+	if err != nil {
+		http.Error(w, `{"error":"ERC20 ABI error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(request.PrivateKey, "0x"))
+	if err != nil {
+		http.Error(w, `{"error":"Invalid private key"}`, http.StatusBadRequest)
+		return
+	}
+	auth, err := bind.NewKeyedTransactorWithChainID(key, big.NewInt(97))
+	if err != nil {
+		http.Error(w, `{"error":"Signer error"}`, http.StatusBadRequest)
+		return
+	}
+
+	gp, _ := client.SuggestGasPrice(context.Background())
+	auth.GasPrice = gp
+	auth.GasLimit = 300000
+
+	// Auto-approve if allowance < amount
+	tokenAddr := common.HexToAddress(request.Token)
+	ownerAddr := crypto.PubkeyToAddress(key.PublicKey)
+	lockContract := common.HexToAddress(lockAddr)
+	erc20 := bind.NewBoundContract(tokenAddr, erc20ABI, client, client, client)
+	var allowanceRes []interface{}
+	if err := erc20.Call(&bind.CallOpts{Context: context.Background()}, &allowanceRes, "allowance", ownerAddr, lockContract); err == nil {
+		allowance := big.NewInt(0)
+		if len(allowanceRes) > 0 {
+			if v, ok := allowanceRes[0].(*big.Int); ok {
+				allowance = v
+			}
+		}
+		if allowance.Cmp(request.Amount.Int) < 0 {
+			approveTx, err := erc20.Transact(auth, "approve", lockContract, request.Amount.Int)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"approve failed: %v"}`, err), http.StatusBadRequest)
+				return
+			}
+			log.Printf("BSC approve tx: %s", approveTx.Hash().Hex())
+			// wait a moment for approve to be mined
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	contract := bind.NewBoundContract(common.HexToAddress(lockAddr), parsedABI, client, client, client)
+	tx, err := contract.Transact(auth, "lock", common.HexToAddress(request.Token), request.Amount.Int, request.ToLqd)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	// Register the BSC lock on LQD immediately (fallback if RPC log scan misses)
+	go func() {
+		payload := map[string]interface{}{
+			"bsc_tx": tx.Hash().Hex(),
+			"token":  request.Token,
+			"from":   ownerAddr.Hex(),
+			"to_lqd": request.ToLqd,
+			"amount": request.Amount.Int.String(),
+		}
+		body, _ := json.Marshal(payload)
+		_, _ = http.Post(ws.BlockchainNodeAddress+"/bridge/lock_bsc", "application/json", bytes.NewReader(body))
+	}()
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"tx_hash": tx.Hash().Hex(),
+	})
+}
+
+// BridgeBscLockTxData prepares calldata for BSC lock() so frontend can send via injected wallet.
+func (ws *WalletServer) BridgeBscLockTxData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		Token  string `json:"token"`
+		Amount string `json:"amount"` // raw amount (uint256) as string
+		ToLqd  string `json:"to_lqd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
+		return
+	}
+	if request.Token == "" || request.Amount == "" || request.ToLqd == "" {
+		http.Error(w, `{"error":"Missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if !wallet.ValidateAddress(request.Token) {
+		http.Error(w, `{"error":"Invalid token address"}`, http.StatusBadRequest)
+		return
+	}
+
+	lockAddr := os.Getenv("BSC_LOCK_ADDRESS")
+	if lockAddr == "" {
+		http.Error(w, `{"error":"BSC_LOCK_ADDRESS not set"}`, http.StatusInternalServerError)
+		return
+	}
+	if !wallet.ValidateAddress(lockAddr) {
+		http.Error(w, `{"error":"Invalid lock contract address"}`, http.StatusInternalServerError)
+		return
+	}
+
+	parsedABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"string","name":"toLqd","type":"string"}],"name":"lock","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"nonpayable","type":"function"}]`))
+	if err != nil {
+		http.Error(w, `{"error":"ABI parse failed"}`, http.StatusInternalServerError)
+		return
+	}
+
+	amount := new(big.Int)
+	if _, ok := amount.SetString(request.Amount, 10); !ok {
+		http.Error(w, `{"error":"Invalid amount"}`, http.StatusBadRequest)
+		return
+	}
+
+	data, err := parsedABI.Pack(
+		"lock",
+		common.HexToAddress(request.Token),
+		amount,
+		request.ToLqd,
+	)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"pack failed: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"to":   lockAddr,
+		"data": "0x" + hex.EncodeToString(data),
+		"gas":  300000,
+	})
+}
+
+// BridgeBurnLqdToken burns a LQD bridge token to release on BSC.
+func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		PrivateKey string `json:"private_key"`
+		Token      string `json:"token"`
+		Amount     Amount `json:"amount"`
+		ToBsc      string `json:"to_bsc"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
+		return
+	}
+	if request.PrivateKey == "" || request.Token == "" || request.Amount.Int == nil || request.Amount.Int.Sign() == 0 || request.ToBsc == "" {
+		http.Error(w, `{"error":"Missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if !wallet.ValidateAddress(request.Token) {
+		http.Error(w, `{"error":"Invalid token address"}`, http.StatusBadRequest)
+		return
+	}
+
+	signer, err := wallet.ImportFromPrivateKey(request.PrivateKey)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to import wallet: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	// Execute burn directly on the node and register a bridge request.
+	payload := map[string]any{
+		"token":  request.Token,
+		"from":   signer.Address,
+		"to_bsc": request.ToBsc,
+		"amount": request.Amount.Int.String(),
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(ws.BlockchainNodeAddress+"/bridge/burn_lqd", "application/json", bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, `{"error":"Blockchain node unreachable"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func (ws *WalletServer) SendTransactionBatch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		From       string `json:"from"`
+		To         string `json:"to"`
+		Value      Amount `json:"value"`
+		Data       string `json:"data"`
+		Gas        uint64 `json:"gas"`
+		GasPrice   uint64 `json:"gas_price"`
+		PrivateKey string `json:"private_key"`
+		Count      int    `json:"count"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
+		return
+	}
+	if request.Count <= 0 {
+		http.Error(w, `{"error":"count must be > 0"}`, http.StatusBadRequest)
+		return
+	}
+
+	if !wallet.ValidateAddress(request.From) || !wallet.ValidateAddress(request.To) {
+		http.Error(w, `{"error":"Invalid address format"}`, http.StatusBadRequest)
+		return
+	}
+
+	signer, err := wallet.ImportFromPrivateKey(request.PrivateKey)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to import wallet: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+	if !strings.EqualFold(signer.Address, request.From) {
+		http.Error(w, `{"error":"From address does not match private key"}`, http.StatusBadRequest)
+		return
+	}
+
+	var baseData []byte
+	if request.Data != "" {
+		if strings.HasPrefix(request.Data, "0x") || strings.HasPrefix(request.Data, "0X") {
+			db, derr := hex.DecodeString(request.Data[2:])
+			if derr != nil {
+				http.Error(w, `{"error":"Invalid hex in 'data'"}`, http.StatusBadRequest)
+				return
+			}
+			baseData = db
+		} else {
+			baseData = []byte(request.Data)
+		}
+	}
+
+	minBaseFee := uint64(constantset.InitialBaseFee)
+	gas := request.Gas
+	if gas == 0 {
+		gas = uint64(constantset.MinGas)
+	}
+	gasPrice := request.GasPrice
+	if gasPrice < minBaseFee {
+		gasPrice = minBaseFee
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	balResp, err := client.Get(fmt.Sprintf("%s/balance?address=%s", ws.BlockchainNodeAddress, url.QueryEscape(request.From)))
+	if err != nil {
+		http.Error(w, `{"error":"Failed to get balance from blockchain"}`, http.StatusBadGateway)
+		return
+	}
+	defer balResp.Body.Close()
+	if balResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(balResp.Body)
+		http.Error(w, string(body), balResp.StatusCode)
+		return
+	}
+	var bal struct {
+		Balance string `json:"balance"`
+	}
+	if err := json.NewDecoder(balResp.Body).Decode(&bal); err != nil {
+		http.Error(w, `{"error":"Failed to decode balance response"}`, http.StatusInternalServerError)
+		return
+	}
+	balInt, err := blockchaincomponent.NewAmountFromString(bal.Balance)
+	if err != nil {
+		http.Error(w, `{"error":"Failed to parse balance"}`, http.StatusInternalServerError)
+		return
+	}
+	fee := new(big.Int).SetUint64(gas * gasPrice)
+	valueAmt := request.Value.Int
+	if valueAmt == nil {
+		valueAmt = new(big.Int)
+	}
+	total := new(big.Int).Add(valueAmt, fee)
+	totalNeeded := new(big.Int).Mul(total, new(big.Int).SetInt64(int64(request.Count)))
+	if balInt.Cmp(totalNeeded) < 0 {
+		http.Error(w, fmt.Sprintf(`{"error":"Insufficient funds: balance=%s required=%s"}`, balInt.String(), totalNeeded.String()), http.StatusBadRequest)
+		return
+	}
+
+	txs := make([]blockchaincomponent.Transaction, 0, request.Count)
+	for i := 0; i < request.Count; i++ {
+		dataBytes := make([]byte, 0, len(baseData)+16)
+		dataBytes = append(dataBytes, baseData...)
+		dataBytes = append(dataBytes, []byte(fmt.Sprintf("|%d", i))...)
+
+		tx := blockchaincomponent.NewTransaction(
+			request.From,
+			request.To,
+			valueAmt,
+			dataBytes,
+		)
+		tx.Gas = gas
+		tx.GasPrice = gasPrice
+		tx.ChainID = uint64(constantset.ChainID)
+
+		if err := signer.SignTransaction(tx); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"Failed to sign transaction: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		txs = append(txs, *tx)
+	}
+
+	txJSON, err := json.Marshal(txs)
+	if err != nil {
+		http.Error(w, `{"error":"Failed to marshal transactions"}`, http.StatusInternalServerError)
+		return
+	}
+	resp, err := client.Post(ws.BlockchainNodeAddress+"/send_tx/batch", "application/json", bytes.NewBuffer(txJSON))
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to send batch: %v"}`, err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func (ws *WalletServer) ContractTemplate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Address         string   `json:"address"`
+		ContractAddress string   `json:"contract_address"`
+		Function        string   `json:"function"`
+		Args            []string `json:"args"`
+		Value           Amount   `json:"value"`
+		Gas             uint64   `json:"gas"`
+		GasPrice        uint64   `json:"gas_price"`
+		PrivateKey      string   `json:"private_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
+		return
+	}
+
+	if !wallet.ValidateAddress(req.Address) || !wallet.ValidateAddress(req.ContractAddress) {
+		http.Error(w, `{"error":"Invalid address format"}`, http.StatusBadRequest)
+		return
+	}
+	if req.Function == "" {
+		http.Error(w, `{"error":"Function name is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	signer, err := wallet.ImportFromPrivateKey(req.PrivateKey)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to import wallet: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+	if !strings.EqualFold(signer.Address, req.Address) {
+		http.Error(w, `{"error":"Address does not match private key"}`, http.StatusBadRequest)
+		return
+	}
+
+	payload := map[string]any{
+		"fn":   req.Function,
+		"args": req.Args,
+	}
+	dataBytes, _ := json.Marshal(payload)
+
+	valueAmt := req.Value.Int
+	if valueAmt == nil {
+		valueAmt = new(big.Int)
+	}
+	tx := &blockchaincomponent.Transaction{
+		From:       req.Address,
+		To:         req.ContractAddress,
+		Value:      valueAmt,
+		Data:       dataBytes,
+		Type:       "contract_call",
+		Function:   req.Function,
+		Args:       req.Args,
+		IsContract: true,
+		ChainID:    uint64(constantset.ChainID),
+		Gas:        uint64(constantset.ContractCallGas),
+		GasPrice:   1,
+		Timestamp:  uint64(time.Now().Unix()),
+		Status:     constantset.StatusPending,
+	}
+	if req.Gas > 0 {
+		tx.Gas = req.Gas
+	}
+	if req.GasPrice > 0 {
+		tx.GasPrice = req.GasPrice
+	} else {
+		feeURL := ws.BlockchainNodeAddress + "/basefee"
+		if resp, err := http.Get(feeURL); err == nil {
+			defer resp.Body.Close()
+			var feeResp struct {
+				BaseFee uint64 `json:"base_fee"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&feeResp) == nil && feeResp.BaseFee > 0 {
+				tx.GasPrice = feeResp.BaseFee + 1
+			}
+		}
+	}
+
+	if err := signer.SignTransaction(tx); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to sign tx: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+	tx.TxHash = blockchaincomponent.CalculateTransactionHash(*tx)
+
+	body, _ := json.Marshal(tx)
+	resp, err := http.Post(ws.BlockchainNodeAddress+"/send_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, `{"error":"Blockchain node unreachable"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
@@ -424,7 +1115,7 @@ func (ws *WalletServer) GetTokenBalance(w http.ResponseWriter, r *http.Request) 
 	payload := map[string]interface{}{
 		"address":  contract,
 		"caller":   holder,
-		"function": "balanceOf",
+		"fn":       "balanceOf",
 		"args":     []string{holder},
 		"value":    0,
 	}
@@ -462,6 +1153,13 @@ func (ws *WalletServer) Start() {
 	http.HandleFunc("/wallet/import/private-key", ws.ImportFromPrivateKey)
 	http.HandleFunc("/wallet/balance", ws.GetBalance)
 	http.HandleFunc("/wallet/send", ws.SendTransaction)
+	http.HandleFunc("/wallet/send_batch", ws.SendTransactionBatch)
+	http.HandleFunc("/wallet/contract-template", ws.ContractTemplate)
+	http.HandleFunc("/wallet/bridge/lock", ws.BridgeLock)
+	http.HandleFunc("/wallet/bridge/burn", ws.BridgeBurn)
+	http.HandleFunc("/wallet/bridge/lock_bsc_token", ws.BridgeLockBscToken)
+	http.HandleFunc("/wallet/bridge/burn_lqd_token", ws.BridgeBurnLqdToken)
+	http.HandleFunc("/wallet/bridge/bsc_lock_tx", ws.BridgeBscLockTxData)
 	http.HandleFunc("/wallet/token-balance", ws.GetTokenBalance)
 
 	log.Printf("Starting wallet server on port %d\n", ws.Port)

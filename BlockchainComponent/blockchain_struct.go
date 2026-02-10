@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"math/big"
 	"net/http"
 	"net/url"
 	"sort"
@@ -28,27 +30,30 @@ const (
 )
 
 type LiquidityProvider struct {
-	Address        string `json:"address"`
-	StakeAmount    uint64 `json:"stake_amount"`
-	LiquidityPower uint64 `json:"liquidity_power"`
-	LockTime       int64  `json:"lock_time"`
-	TotalRewards   uint64 `json:"total_rewards"`
-	PendingRewards uint64 `json:"pending_rewards"`
+	Address        string   `json:"address"`
+	StakeAmount    *big.Int `json:"stake_amount"`
+	LiquidityPower float64  `json:"liquidity_power"`
+	LockTime       int64    `json:"lock_time"`
+	LockDays       int64    `json:"lock_days"`
+	TotalRewards   *big.Int `json:"total_rewards"`
+	PendingRewards *big.Int `json:"pending_rewards"`
 
-	IsUnstaking      bool   `json:"is_unstaking"`
-	UnstakeStartTime int64  `json:"unstake_start_time"`
-	UnstakeAmount    uint64 `json:"unstake_amount"`
-	ReleasedSoFar    uint64 `json:"released_so_far"`
+	IsUnstaking      bool     `json:"is_unstaking"`
+	UnstakeStartTime int64    `json:"unstake_start_time"`
+	UnstakeAmount    *big.Int `json:"unstake_amount"`
+	ReleasedSoFar    *big.Int `json:"released_so_far"`
 }
 
 type BlockRewardBreakdown struct {
-	Validator          string            `json:"validator"`
-	ValidatorReward    uint64            `json:"validator_reward"`
-	LiquidityRewards   map[string]uint64 `json:"liquidity_rewards"`
-	ParticipantRewards map[string]uint64 `json:"participant_rewards"`
+	Validator            string            `json:"validator"`
+	ValidatorReward      string            `json:"validator_reward"`
+	ValidatorRewards     map[string]string `json:"validator_rewards"`
+	ValidatorPartRewards map[string]string `json:"validator_part_rewards"`
+	LiquidityRewards     map[string]string `json:"liquidity_rewards"`
+	ParticipantRewards   map[string]string `json:"participant_rewards"`
 }
 type LockRecord struct {
-	Amount    uint64    `json:"amount"`
+	Amount    *big.Int `json:"amount"`
 	UnlockAt  time.Time `json:"unlock_at"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -57,33 +62,42 @@ type RewardSnapshot struct {
 	BlockNumber uint64            `json:"block_number"`
 	BaseFee     uint64            `json:"base_fee"`
 	GasUsed     uint64            `json:"gas_used"`
-	Dist        map[string]uint64 `json:"dist"`
+	Dist        map[string]string `json:"dist"`
 }
 
 type Blockchain_struct struct {
-	Blocks           []*Block          `json:"blocks"`
-	Transaction_pool []*Transaction    `json:"transaction_pool"`
-	Validators       []*Validator      `json:"validator"`
-	Accounts         map[string]uint64 `json:"accounts"`
-	MinStake         float64           `json:"min_stake"`
-	SlashingPool     float64           `json:"slashing_pool"`
-	Network          *NetworkService   `json:"-"`
-	Mutex            sync.Mutex        `json:"-"`
-	BaseFee          uint64            `json:"base_fee"`
+	Blocks           []*Block            `json:"blocks"`
+	Transaction_pool []*Transaction      `json:"transaction_pool"`
+	Validators       []*Validator        `json:"validator"`
+	Accounts         map[string]*big.Int `json:"accounts"`
+	AccountsMu       sync.RWMutex        `json:"-"`
+	MinStake         float64             `json:"min_stake"`
+	SlashingPool     float64             `json:"slashing_pool"`
+	Network          *NetworkService     `json:"-"`
+	Mutex            sync.Mutex          `json:"-"`
+	BaseFee          uint64              `json:"base_fee"`
 	//VM                  *VM                     `json:"vm"`
-	LiquidityLocks      map[string][]LockRecord `json:"liquidity_locks"`
-	TotalLiquidity      uint64                  `json:"total_liquidity"`
-	RewardHistory       []RewardSnapshot        `json:"reward_history"`
-	RecentTxs           []*Transaction          `json:"recent_txs"`
-	PendingFeePool      map[string]uint64       `json:"pending_fee_pool"`
-	ContractEngine      *LQDContractEngine      `json:"-"`
-	LastBlockMiningTime time.Duration           `json:"last_block_mining_time"`
-	LiquidityProviders  map[string]*LiquidityProvider
+	LiquidityLocks       map[string][]LockRecord `json:"liquidity_locks"`
+	TotalLiquidity       *big.Int                `json:"total_liquidity"`
+	RewardHistory        []RewardSnapshot        `json:"reward_history"`
+	RecentTxs            []*Transaction          `json:"recent_txs"`
+	PendingFeePool       map[string]*big.Int     `json:"pending_fee_pool"`
+	ContractEngine       *LQDContractEngine      `json:"-"`
+	LastBlockMiningTime  time.Duration           `json:"last_block_mining_time"`
+	LiquidityProviders   map[string]*LiquidityProvider
+	RecentTxCounter      uint64
+	PoolLiquidity        map[string]*big.Int         `json:"pool_liquidity"`
+	UnallocatedLiquidity *big.Int                    `json:"unallocated_liquidity"`
+	BridgeRequests       map[string]*BridgeRequest   `json:"bridge_requests"`
+	BridgeTokenMap       map[string]*BridgeTokenInfo `json:"bridge_token_map"`
 
 	FixedBlockReward    uint64
 	GasRewardMultiplier uint64
 
-	MinLiquidityStake uint64
+	MinLiquidityStake *big.Int
+	LocalValidator    string
+	BlockVotes        map[string]map[string]bool
+	PendingBlocks     map[string]*Block
 }
 
 func (bc *Blockchain_struct) SaveBlockToDB(block *Block) error {
@@ -118,8 +132,63 @@ func (bc *Blockchain_struct) RecordRecentTx(tx *Transaction) {
 	bc.RecentTxs = filtered
 }
 
+func (bc *Blockchain_struct) AddBlockVote(blockHash string, validator string) {
+	if blockHash == "" || validator == "" {
+		return
+	}
+	if bc.BlockVotes == nil {
+		bc.BlockVotes = make(map[string]map[string]bool)
+	}
+	if bc.BlockVotes[blockHash] == nil {
+		bc.BlockVotes[blockHash] = make(map[string]bool)
+	}
+	bc.BlockVotes[blockHash][validator] = true
+}
+
+func (bc *Blockchain_struct) AddPendingBlock(block *Block) {
+	if block == nil || block.CurrentHash == "" {
+		return
+	}
+	if bc.PendingBlocks == nil {
+		bc.PendingBlocks = make(map[string]*Block)
+	}
+	if _, exists := bc.PendingBlocks[block.CurrentHash]; exists {
+		return
+	}
+	bc.PendingBlocks[block.CurrentHash] = block
+}
+
+func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent float64) bool {
+	block, ok := bc.PendingBlocks[blockHash]
+	if !ok || block == nil {
+		return false
+	}
+	if len(bc.Validators) == 0 {
+		return false
+	}
+
+	required := int(math.Ceil(float64(len(bc.Validators)) * quorumPercent))
+	if required < 1 {
+		required = 1
+	}
+	votes := bc.BlockVotes[blockHash]
+	if len(votes) < required {
+		return false
+	}
+
+	last := bc.Blocks[len(bc.Blocks)-1]
+	if block.BlockNumber <= last.BlockNumber {
+		delete(bc.PendingBlocks, blockHash)
+		return false
+	}
+
+	bc.Blocks = append(bc.Blocks, block)
+	delete(bc.PendingBlocks, blockHash)
+	return true
+}
+
 // GetLock is the exported wrapper so other packages can read active locked amount.
-func (bc *Blockchain_struct) GetLock(address string) uint64 {
+func (bc *Blockchain_struct) GetLock(address string) *big.Int {
 	return bc.getLock(address)
 }
 
@@ -168,8 +237,11 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		}
 		// Restart network service for loaded blockchain
 		blockchainStruct.Network = NewNetworkService(blockchainStruct)
-		if err := blockchainStruct.Network.Start(); err != nil {
-			log.Printf("Failed to restart network service: %v", err)
+		if blockchainStruct.BridgeRequests == nil {
+			blockchainStruct.BridgeRequests = make(map[string]*BridgeRequest)
+		}
+		if blockchainStruct.BridgeTokenMap == nil {
+			blockchainStruct.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
 		}
 		return blockchainStruct
 	} else {
@@ -183,29 +255,33 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 			newBlockchain.Blocks = append(newBlockchain.Blocks, &genesisBlock)
 		}
 		newBlockchain.Transaction_pool = []*Transaction{}
-		newBlockchain.Accounts = make(map[string]uint64)
+		newBlockchain.Accounts = make(map[string]*big.Int)
 		newBlockchain.LiquidityProviders = make(map[string]*LiquidityProvider)
-		newBlockchain.MinStake = 100000 * float64(constantset.Decimals)
+		newBlockchain.MinStake = 1000000 * 1e8
 		newBlockchain.SlashingPool = 0
-		newBlockchain.Accounts[constantset.LiquidityPoolAddress] = 0
+		newBlockchain.FixedBlockReward = 200
+		newBlockchain.setAccountBalance(constantset.LiquidityPoolAddress, NewAmountFromUint64(0))
 
 		//newBlockchain.VM = NewVM()
 		newBlockchain.Validators = []*Validator{}
 		newBlockchain.Network = NewNetworkService(newBlockchain)
 		newBlockchain.Mutex = sync.Mutex{}
 		newBlockchain.LiquidityLocks = make(map[string][]LockRecord)
-		newBlockchain.TotalLiquidity = 0
+		newBlockchain.TotalLiquidity = big.NewInt(0)
 		newBlockchain.RewardHistory = []RewardSnapshot{}
 		newBlockchain.RecentTxs = []*Transaction{}
-		newBlockchain.PendingFeePool = make(map[string]uint64)
+		newBlockchain.PendingFeePool = make(map[string]*big.Int)
+		newBlockchain.BlockVotes = make(map[string]map[string]bool)
+		newBlockchain.PendingBlocks = make(map[string]*Block)
+		newBlockchain.BridgeRequests = make(map[string]*BridgeRequest)
+		newBlockchain.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
 		engine, _ := NewLQDContractEngine()
 
 		newBlockchain.ContractEngine = engine
-
-		// Start network service
-		if err := newBlockchain.Network.Start(); err != nil {
-			log.Printf("Failed to start network service: %v", err)
+		if newBlockchain.ContractEngine != nil && newBlockchain.ContractEngine.Registry != nil {
+			newBlockchain.ContractEngine.Registry.Blockchain = newBlockchain
 		}
+
 		// Save to DB
 		blockchainCopy := *newBlockchain
 		blockchainCopy.Mutex = sync.Mutex{}
@@ -381,9 +457,159 @@ func (bc *Blockchain_struct) AddNewTxToTheTransaction_pool(tx *Transaction) erro
 	return nil
 }
 
-func (bc *Blockchain_struct) GetWalletBalance(address string) (uint64, error) {
+func (bc *Blockchain_struct) AddNewTxBatch(txs []*Transaction) (int, int) {
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+
+	if bc.BaseFee == 0 {
+		bc.BaseFee = bc.CalculateBaseFee()
+	}
+
+	accepted := 0
+	failed := 0
+	changed := false
+
+	for _, tx := range txs {
+		if tx == nil {
+			failed++
+			continue
+		}
+
+		// TTL check first – if expired, mark failed and store in recent story
+		if uint64(time.Now().Unix())-tx.Timestamp > uint64(TransactionTTL.Seconds()) {
+			tx.Status = constantset.StatusFailed
+			if tx.TxHash == "" {
+				tx.TxHash = CalculateTransactionHash(*tx)
+			}
+			bc.RecordRecentTx(tx)
+			failed++
+			continue
+		}
+
+		// Effective priority fee used for replacement logic
+		eff := bc.BaseFee + tx.PriorityFee
+		replaced := false
+		replacementChecked := false
+
+		if tx.Nonce != 0 {
+			for i, existing := range bc.Transaction_pool {
+				if strings.EqualFold(existing.From, tx.From) && existing.Nonce == tx.Nonce {
+					replacementChecked = true
+					oldEff := bc.BaseFee + existing.PriorityFee
+					if eff*100 >= oldEff*110 {
+						bc.Transaction_pool[i] = tx
+						replaced = true
+						changed = true
+					} else {
+						failed++
+					}
+					break
+				}
+			}
+
+			if replacementChecked {
+				if replaced {
+					tx.Status = constantset.StatusPending
+					tx.TxHash = CalculateTransactionHash(*tx)
+					bc.RecordRecentTx(tx)
+					accepted++
+				}
+				continue
+			}
+		}
+
+		if bc.countTxsFrom(tx.From) >= constantset.MaxTxsPerAccount {
+			failed++
+			continue
+		}
+
+		bc.Transaction_pool = append(bc.Transaction_pool, tx)
+		tx.Status = constantset.StatusPending
+		tx.TxHash = CalculateTransactionHash(*tx)
+		bc.RecordRecentTx(tx)
+		accepted++
+		changed = true
+	}
+
+	if changed {
+		sort.Slice(bc.Transaction_pool, func(i, j int) bool {
+			ip := bc.BaseFee + bc.Transaction_pool[i].PriorityFee
+			jp := bc.BaseFee + bc.Transaction_pool[j].PriorityFee
+			return ip > jp
+		})
+
+		if len(bc.Transaction_pool) > constantset.MaxTxPoolSize {
+			overflow := len(bc.Transaction_pool) - constantset.MaxTxPoolSize
+			if overflow > 0 {
+				failed += overflow
+				bc.Transaction_pool = bc.Transaction_pool[:constantset.MaxTxPoolSize]
+			}
+		}
+
+		dbCopy := *bc
+		dbCopy.Mutex = sync.Mutex{}
+		_ = PutIntoDB(dbCopy)
+	}
+
+	return accepted, failed
+}
+
+func (bc *Blockchain_struct) getAccountBalance(address string) (*big.Int, bool) {
+	bc.AccountsMu.RLock()
+	defer bc.AccountsMu.RUnlock()
+	bal, ok := bc.Accounts[address]
+	if !ok || bal == nil {
+		return nil, false
+	}
+	return CopyAmount(bal), true
+}
+
+func (bc *Blockchain_struct) setAccountBalance(address string, value *big.Int) {
+	bc.AccountsMu.Lock()
+	if bc.Accounts == nil {
+		bc.Accounts = make(map[string]*big.Int)
+	}
+	bc.Accounts[address] = CopyAmount(value)
+	bc.AccountsMu.Unlock()
+}
+
+func (bc *Blockchain_struct) addAccountBalance(address string, delta *big.Int) {
+	bc.AccountsMu.Lock()
+	if bc.Accounts == nil {
+		bc.Accounts = make(map[string]*big.Int)
+	}
+	cur := bc.Accounts[address]
+	if cur == nil {
+		cur = big.NewInt(0)
+	}
+	cur.Add(cur, delta)
+	bc.Accounts[address] = cur
+	bc.AccountsMu.Unlock()
+}
+
+// AddAccountBalance is an exported wrapper for crediting balances.
+func (bc *Blockchain_struct) AddAccountBalance(address string, delta *big.Int) {
+	bc.addAccountBalance(address, delta)
+}
+
+func (bc *Blockchain_struct) subAccountBalance(address string, delta *big.Int) bool {
+	bc.AccountsMu.Lock()
+	defer bc.AccountsMu.Unlock()
+	bal := bc.Accounts[address]
+	if bal == nil {
+		return false
+	}
+	if bal.Cmp(delta) < 0 {
+		return false
+	}
+	bal.Sub(bal, delta)
+	bc.Accounts[address] = bal
+	return true
+}
+
+func (bc *Blockchain_struct) GetWalletBalance(address string) (*big.Int, error) {
 	// First, try the in-memory cache if it’s fresh enough
-	if bal, ok := bc.Accounts[address]; ok {
+	if bal, ok := bc.getAccountBalance(address); ok {
 		return bal, nil
 	}
 
@@ -391,25 +617,29 @@ func (bc *Blockchain_struct) GetWalletBalance(address string) (uint64, error) {
 	walletNode := "http://127.0.0.1:8080" // or use os.Getenv("WALLET_NODE")
 	resp, err := http.Get(fmt.Sprintf("%s/wallet/balance?address=%s", walletNode, url.QueryEscape(address)))
 	if err != nil {
-		return 0, fmt.Errorf("wallet node unreachable: %v", err)
+		return big.NewInt(0), fmt.Errorf("wallet node unreachable: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("wallet node error: %s", string(body))
+		return big.NewInt(0), fmt.Errorf("wallet node error: %s", string(body))
 	}
 
 	var result struct {
-		Balance uint64 `json:"balance"`
+		Balance string `json:"balance"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, fmt.Errorf("decode error: %v", err)
+		return nil, fmt.Errorf("decode error: %v", err)
 	}
 
 	// Optionally update the local cache
-	bc.Accounts[address] = result.Balance
-	return result.Balance, nil
+	amt, err := NewAmountFromString(result.Balance)
+	if err != nil {
+		return nil, err
+	}
+	bc.setAccountBalance(address, amt)
+	return amt, nil
 }
 
 func (bc *Blockchain_struct) CalculateBaseFee() uint64 {
@@ -479,20 +709,24 @@ func (bc *Blockchain_struct) countTxsFrom(from string) int {
 	return count
 }
 
-func (bc *Blockchain_struct) CheckBalance(add string) uint64 {
-	return bc.Accounts[add]
+func (bc *Blockchain_struct) CheckBalance(add string) *big.Int {
+	bal, _ := bc.getAccountBalance(add)
+	if bal == nil {
+		return big.NewInt(0)
+	}
+	return bal
 }
 
-func (bc *Blockchain_struct) FetchBalanceOfWallet(address string) uint64 {
-	sum := uint64(0)
+func (bc *Blockchain_struct) FetchBalanceOfWallet(address string) *big.Int {
+	sum := big.NewInt(0)
 
 	for _, block := range bc.Blocks {
 		for _, txn := range block.Transactions {
 			if txn.Status == constantset.StatusSuccess {
 				if txn.To == address {
-					sum += txn.Value
+					sum.Add(sum, CopyAmount(txn.Value))
 				} else if txn.From == address {
-					sum -= txn.Value
+					sum.Sub(sum, CopyAmount(txn.Value))
 				}
 			}
 		}
@@ -542,10 +776,19 @@ func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {
 
 	// 3. Check validator is active
 	validatorActive := false
-	for _, v := range bc.Validators {
-		if strings.HasPrefix(block.CurrentHash, v.Address) {
-			validatorActive = true
-			break
+	if block.RewardBreakdown.Validator != "" {
+		for _, v := range bc.Validators {
+			if strings.EqualFold(v.Address, block.RewardBreakdown.Validator) {
+				validatorActive = true
+				break
+			}
+		}
+	} else {
+		for _, v := range bc.Validators {
+			if strings.HasPrefix(block.CurrentHash, v.Address) {
+				validatorActive = true
+				break
+			}
 		}
 	}
 
@@ -616,7 +859,8 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	isSystem := tx.IsSystem ||
 		tx.Type == "stake" ||
 		tx.Type == "unstake" ||
-		tx.Type == "lp_reward"
+		tx.Type == "lp_reward" ||
+		tx.Type == "reward"
 
 	if isSystem {
 		// Ensure ChainID is correct, even if not set
@@ -632,6 +876,11 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	if tx.From == "" || tx.To == "" {
 		tx.Status = constantset.StatusFailed
 		fmt.Printf("TX %s failed: missing from/to", tx.TxHash)
+		return false
+	}
+	if tx.Type == "bridge_lock" && tx.To != constantset.BridgeEscrowAddress {
+		tx.Status = constantset.StatusFailed
+		log.Printf("TX %s failed: bridge_lock must go to escrow", tx.TxHash)
 		return false
 	}
 
@@ -691,16 +940,16 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 
 	// 6) Balance (live wallet) — light precheck to avoid junk in pool
 	// NOTE: final authoritative debit happens in MineNewBlock().
-	totalCost := tx.Value + (tx.GasPrice * tx.CalculateGasCost())
+	totalCost := new(big.Int).Add(CopyAmount(tx.Value), NewAmountFromUint64(tx.GasPrice*tx.CalculateGasCost()))
 	bal, err := bc.GetWalletBalance(tx.From)
 	if err != nil {
 		tx.Status = constantset.StatusFailed
 		log.Printf("TX %s failed: balance lookup error: %v", tx.TxHash, err)
 		return false
 	}
-	if bal < totalCost {
+	if bal.Cmp(totalCost) < 0 {
 		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: insufficient funds (have %d need %d)", tx.TxHash, bal, totalCost)
+		log.Printf("TX %s failed: insufficient funds (have %s need %s)", tx.TxHash, AmountString(bal), AmountString(totalCost))
 		return false
 	}
 
@@ -768,20 +1017,27 @@ func (bc *Blockchain_struct) VerifyTransactionSignature(tx *Transaction) bool {
 		return false
 	}
 
-	// 2) Rebuild EXACT signing payload (keep nonce commented out to match wallet right now)
-	signingData := map[string]interface{}{
-		"from":      tx.From,
-		"to":        tx.To,
-		"value":     tx.Value,
-		"data":      hex.EncodeToString(tx.Data),
-		"gas":       tx.Gas,
-		"gas_price": tx.GasPrice,
-		// "nonce":  tx.Nonce,          // keep commented if wallet also omits
-		"chain_id":  tx.ChainID,
-		"timestamp": tx.Timestamp,
+	// 2) Rebuild EXACT signing payload (keep nonce omitted to match wallet right now)
+	type signingPayload struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Value     string `json:"value"`
+		Data      string `json:"data"`
+		Gas       uint64 `json:"gas"`
+		GasPrice  uint64 `json:"gas_price"`
+		ChainID   uint64 `json:"chain_id"`
+		Timestamp uint64 `json:"timestamp"`
 	}
-
-	b, err := json.Marshal(signingData)
+	b, err := json.Marshal(signingPayload{
+		From:      tx.From,
+		To:        tx.To,
+		Value:     AmountString(tx.Value),
+		Data:      hex.EncodeToString(tx.Data),
+		Gas:       tx.Gas,
+		GasPrice:  tx.GasPrice,
+		ChainID:   tx.ChainID,
+		Timestamp: tx.Timestamp,
+	})
 	if err != nil {
 		log.Printf("marshal signing data: %v", err)
 		return false
@@ -885,7 +1141,7 @@ func (bc *Blockchain_struct) VerifyChain(chain []*Block) bool {
 
 func (bc *Blockchain_struct) RecordSystemTx(
 	from, to string,
-	value, gasUsed, gasPrice uint64,
+	value *big.Int, gasUsed, gasPrice uint64,
 	status string,
 	isContract bool,
 	function string,
@@ -918,24 +1174,30 @@ func (bc *Blockchain_struct) InitLiquiditySystem() {
 	if bc.LiquidityProviders == nil {
 		bc.LiquidityProviders = make(map[string]*LiquidityProvider)
 	}
+	if bc.PoolLiquidity == nil {
+		bc.PoolLiquidity = make(map[string]*big.Int)
+	}
+	if bc.UnallocatedLiquidity == nil {
+		bc.UnallocatedLiquidity = big.NewInt(0)
+	}
 
 	// set your fixed reward for block
-	bc.FixedBlockReward = 100
+	bc.FixedBlockReward = 200
 
 	// gas reward = gasFees * multiplier
-	bc.GasRewardMultiplier = 1
+	bc.GasRewardMultiplier = 2
 
 	// min liquidity stake
-	bc.MinLiquidityStake = 100
+	bc.MinLiquidityStake = NewAmountFromUint64(100)
 }
 
 // Liquidity Functions (ADD-ONLY)
 
-func (bc *Blockchain_struct) NewSystemTx(txType, from, to string, value uint64) *Transaction {
+func (bc *Blockchain_struct) NewSystemTx(txType, from, to string, value *big.Int) *Transaction {
 	tx := &Transaction{
 		From:      from,
 		To:        to,
-		Value:     value,
+		Value:     CopyAmount(value),
 		Gas:       21000,
 		GasPrice:  1,
 		ChainID:   uint64(constantset.ChainID),
@@ -949,19 +1211,172 @@ func (bc *Blockchain_struct) NewSystemTx(txType, from, to string, value uint64) 
 	return tx
 }
 
-func (bc *Blockchain_struct) ProvideLiquidity(address string, amount uint64, lockDays int64) error {
+// -----------------------------
+// PoDL: Dynamic Liquidity Routing
+// Pools are identified by smart contract address.
+// -----------------------------
+
+func (bc *Blockchain_struct) RegisterPool(contractAddr string) {
+	if contractAddr == "" {
+		return
+	}
+	if bc.PoolLiquidity == nil {
+		bc.PoolLiquidity = make(map[string]*big.Int)
+	}
+	if _, ok := bc.PoolLiquidity[contractAddr]; !ok {
+		bc.PoolLiquidity[contractAddr] = big.NewInt(0)
+	}
+}
+
+func (bc *Blockchain_struct) addLiquidityUnallocated(amount *big.Int) {
+	if amount == nil {
+		return
+	}
+	if bc.UnallocatedLiquidity == nil {
+		bc.UnallocatedLiquidity = big.NewInt(0)
+	}
+	bc.UnallocatedLiquidity.Add(bc.UnallocatedLiquidity, amount)
+}
+
+func (bc *Blockchain_struct) reducePoolLiquidity(amount *big.Int) {
+	if amount == nil || amount.Sign() == 0 || len(bc.PoolLiquidity) == 0 {
+		return
+	}
+	remaining := CopyAmount(amount)
+	for remaining.Sign() > 0 {
+		richest := ""
+		var max *big.Int
+		for addr, bal := range bc.PoolLiquidity {
+			if bal == nil {
+				continue
+			}
+			if max == nil || bal.Cmp(max) > 0 {
+				max = bal
+				richest = addr
+			}
+		}
+		if richest == "" || max == nil || max.Sign() == 0 {
+			break
+		}
+		if max.Cmp(remaining) <= 0 {
+			bc.PoolLiquidity[richest] = big.NewInt(0)
+			remaining.Sub(remaining, max)
+		} else {
+			bc.PoolLiquidity[richest] = new(big.Int).Sub(max, remaining)
+			remaining = big.NewInt(0)
+		}
+	}
+}
+
+func (bc *Blockchain_struct) RebalancePoolsEqual() {
+	if len(bc.PoolLiquidity) == 0 {
+		return
+	}
+
+	// Add any unallocated liquidity to the richest pool first
+	if bc.UnallocatedLiquidity != nil && bc.UnallocatedLiquidity.Sign() > 0 {
+		richest := ""
+		var max *big.Int
+		for addr, bal := range bc.PoolLiquidity {
+			if bal == nil {
+				continue
+			}
+			if max == nil || bal.Cmp(max) > 0 {
+				max = bal
+				richest = addr
+			}
+		}
+		if richest == "" {
+			for addr := range bc.PoolLiquidity {
+				richest = addr
+				break
+			}
+		}
+		if richest != "" {
+			if bc.PoolLiquidity[richest] == nil {
+				bc.PoolLiquidity[richest] = big.NewInt(0)
+			}
+			bc.PoolLiquidity[richest].Add(bc.PoolLiquidity[richest], bc.UnallocatedLiquidity)
+			bc.UnallocatedLiquidity = big.NewInt(0)
+		}
+	}
+
+	// Equalize across all pools
+	total := big.NewInt(0)
+	for _, bal := range bc.PoolLiquidity {
+		if bal == nil {
+			continue
+		}
+		total.Add(total, bal)
+	}
+	if total.Sign() == 0 {
+		return
+	}
+
+	target := new(big.Int).Div(total, big.NewInt(int64(len(bc.PoolLiquidity))))
+	if target.Sign() == 0 {
+		return
+	}
+
+	// Two-pointer balancing: richest -> poorest
+	type entry struct {
+		addr string
+		bal  *big.Int
+	}
+	entries := make([]entry, 0, len(bc.PoolLiquidity))
+	for addr, bal := range bc.PoolLiquidity {
+		entries = append(entries, entry{addr: addr, bal: CopyAmount(bal)})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].bal.Cmp(entries[j].bal) < 0 })
+
+	i, j := 0, len(entries)-1
+	for i < j {
+		low := entries[i]
+		high := entries[j]
+		if low.bal.Cmp(target) >= 0 {
+			i++
+			continue
+		}
+		if high.bal.Cmp(target) <= 0 {
+			j--
+			continue
+		}
+
+		need := new(big.Int).Sub(target, low.bal)
+		excess := new(big.Int).Sub(high.bal, target)
+		move := need
+		if excess.Cmp(move) < 0 {
+			move = excess
+		}
+		if move.Sign() == 0 {
+			break
+		}
+		entries[i].bal.Add(entries[i].bal, move)
+		entries[j].bal.Sub(entries[j].bal, move)
+	}
+
+	for _, e := range entries {
+		bc.PoolLiquidity[e.addr] = e.bal
+	}
+}
+
+func (bc *Blockchain_struct) ProvideLiquidity(address string, amount *big.Int, lockDays int64) error {
 	bc.Mutex.Lock()
 	defer bc.Mutex.Unlock()
 
-	if amount < bc.MinLiquidityStake {
-		return fmt.Errorf("minimum liquidity stake is %d LQD", bc.MinLiquidityStake)
+	if amount == nil || amount.Sign() <= 0 {
+		return fmt.Errorf("amount must be greater than 0")
+	}
+	amt := CopyAmount(amount)
+	if bc.MinLiquidityStake != nil && amt.Cmp(bc.MinLiquidityStake) < 0 {
+		return fmt.Errorf("minimum liquidity stake is %s LQD", bc.MinLiquidityStake.String())
 	}
 
-	if bc.Accounts[address] < amount {
+	if bal, ok := bc.getAccountBalance(address); !ok || bal.Cmp(amt) < 0 {
 		return fmt.Errorf("insufficient balance to stake")
 	}
 
-	bc.Accounts[address] -= amount
+	_ = bc.subAccountBalance(address, amt)
 
 	lockTime := time.Now().Add(time.Hour * 24 * time.Duration(lockDays)).Unix()
 
@@ -969,16 +1384,26 @@ func (bc *Blockchain_struct) ProvideLiquidity(address string, amount uint64, loc
 	if !exists {
 		lp = &LiquidityProvider{
 			Address: address,
+			StakeAmount: big.NewInt(0),
+			TotalRewards: big.NewInt(0),
+			PendingRewards: big.NewInt(0),
+			UnstakeAmount: big.NewInt(0),
+			ReleasedSoFar: big.NewInt(0),
 		}
 	}
 
-	lp.StakeAmount += amount
-	lp.LiquidityPower = lp.StakeAmount * uint64(lockDays)
+	if lp.StakeAmount == nil {
+		lp.StakeAmount = big.NewInt(0)
+	}
+	lp.StakeAmount.Add(lp.StakeAmount, amt)
+	lp.LiquidityPower = AmountToFloat64(lp.StakeAmount) * float64(lockDays)
 	lp.LockTime = lockTime
+	lp.LockDays = lockDays
 
 	bc.LiquidityProviders[address] = lp
-	stakeTx := bc.NewSystemTx("stake", address, constantset.LiquidityPoolAddress, amount)
+	stakeTx := bc.NewSystemTx("stake", address, constantset.LiquidityPoolAddress, amt)
 	bc.Transaction_pool = append(bc.Transaction_pool, stakeTx)
+	bc.addLiquidityUnallocated(amt)
 
 	return nil
 }
@@ -1002,26 +1427,27 @@ func (bc *Blockchain_struct) StartUnstake(address string) error {
 		return fmt.Errorf("already unstaking")
 	}
 
-	if lp.PendingRewards > 0 {
-		bc.Accounts[address] += lp.PendingRewards
-		rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, lp.PendingRewards)
+	if lp.PendingRewards != nil && lp.PendingRewards.Sign() > 0 {
+		bc.addAccountBalance(address, lp.PendingRewards)
+		rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, CopyAmount(lp.PendingRewards))
 
 		//rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, address, lp.PendingRewards)
 
 		bc.Transaction_pool = append(bc.Transaction_pool, rewardTx)
-		lp.PendingRewards = 0
+		lp.PendingRewards = big.NewInt(0)
 	}
 
 	lp.IsUnstaking = true
 	lp.UnstakeStartTime = now
-	lp.UnstakeAmount = lp.StakeAmount
-	lp.ReleasedSoFar = 0
+	lp.UnstakeAmount = CopyAmount(lp.StakeAmount)
+	lp.ReleasedSoFar = big.NewInt(0)
 
 	// LP stops earning new rewards
 	lp.LiquidityPower = 0
-	lp.StakeAmount = 0
+	lp.StakeAmount = big.NewInt(0)
+	bc.reducePoolLiquidity(lp.UnstakeAmount)
 
-	unstakeTx := bc.NewSystemTx("unstake", address, constantset.LiquidityPoolAddress, lp.UnstakeAmount)
+	unstakeTx := bc.NewSystemTx("unstake", address, constantset.LiquidityPoolAddress, CopyAmount(lp.UnstakeAmount))
 	bc.Transaction_pool = append(bc.Transaction_pool, unstakeTx)
 
 	return nil
@@ -1042,16 +1468,23 @@ func (bc *Blockchain_struct) ProcessUnstakeReleases() {
 			continue
 		}
 
-		maxReleasable := lp.UnstakeAmount * uint64(daysPassed) / 100
-		if maxReleasable > lp.UnstakeAmount {
-			maxReleasable = lp.UnstakeAmount
+		if lp.UnstakeAmount == nil || lp.UnstakeAmount.Sign() == 0 {
+			continue
+		}
+		maxReleasable := new(big.Int).Mul(lp.UnstakeAmount, big.NewInt(int64(daysPassed)))
+		maxReleasable.Div(maxReleasable, big.NewInt(100))
+		if maxReleasable.Cmp(lp.UnstakeAmount) > 0 {
+			maxReleasable = CopyAmount(lp.UnstakeAmount)
 		}
 
-		if maxReleasable > lp.ReleasedSoFar {
-			delta := maxReleasable - lp.ReleasedSoFar
+		if lp.ReleasedSoFar == nil {
+			lp.ReleasedSoFar = big.NewInt(0)
+		}
+		if maxReleasable.Cmp(lp.ReleasedSoFar) > 0 {
+			delta := new(big.Int).Sub(maxReleasable, lp.ReleasedSoFar)
 			lp.ReleasedSoFar = maxReleasable
-			bc.Accounts[lp.Address] += delta
-			rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, delta)
+			bc.addAccountBalance(lp.Address, delta)
+			rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, CopyAmount(delta))
 
 			bc.Transaction_pool = append(bc.Transaction_pool, rewardTx)
 		}
@@ -1059,16 +1492,28 @@ func (bc *Blockchain_struct) ProcessUnstakeReleases() {
 }
 
 // Add LP reward
-func (bc *Blockchain_struct) AddLPReward(address string, reward uint64) {
+func (bc *Blockchain_struct) AddLPReward(address string, reward *big.Int) {
 	lp := bc.LiquidityProviders[address]
 	if lp == nil {
 		return
 	}
-	lp.PendingRewards += reward
-	lp.TotalRewards += reward
+	if lp.PendingRewards == nil {
+		lp.PendingRewards = big.NewInt(0)
+	}
+	if lp.TotalRewards == nil {
+		lp.TotalRewards = big.NewInt(0)
+	}
+	if reward == nil {
+		return
+	}
+	lp.PendingRewards.Add(lp.PendingRewards, reward)
+	lp.TotalRewards.Add(lp.TotalRewards, reward)
 }
 
 // Add participant reward
-func (bc *Blockchain_struct) AddParticipantReward(address string, reward uint64) {
-	bc.Accounts[address] += reward
+func (bc *Blockchain_struct) AddParticipantReward(address string, reward *big.Int) {
+	if reward == nil {
+		return
+	}
+	bc.addAccountBalance(address, reward)
 }

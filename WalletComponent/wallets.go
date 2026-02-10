@@ -70,6 +70,10 @@ func ImportFromPrivateKey(privakey string) (*Wallet, error) {
 	if len(privakey) == 0 {
 		return nil, errors.New("private key cannot be empty")
 	}
+	privakey = strings.TrimSpace(privakey)
+	if strings.HasPrefix(privakey, "0x") || strings.HasPrefix(privakey, "0X") {
+		privakey = privakey[2:]
+	}
 	bytes, err := hex.DecodeString(privakey)
 	if err != nil {
 		return nil, err
@@ -135,18 +139,26 @@ func (w *Wallet) SignTransaction(tx *blockchaincomponent.Transaction) error {
 		return fmt.Errorf("chain ID must be set")
 	}
 
-	signingData := map[string]interface{}{
-		"from":      tx.From,
-		"to":        tx.To,
-		"value":     tx.Value,
-		"data":      hex.EncodeToString(tx.Data),
-		"gas":       tx.Gas,
-		"gas_price": tx.GasPrice,
-		// "nonce":     tx.Nonce,      // keep commented out to match node for now
-		"chain_id":  tx.ChainID,
-		"timestamp": tx.Timestamp,
+	type signingPayload struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Value     string `json:"value"`
+		Data      string `json:"data"`
+		Gas       uint64 `json:"gas"`
+		GasPrice  uint64 `json:"gas_price"`
+		ChainID   uint64 `json:"chain_id"`
+		Timestamp uint64 `json:"timestamp"`
 	}
-	payload, err := json.Marshal(signingData)
+	payload, err := json.Marshal(signingPayload{
+		From:      tx.From,
+		To:        tx.To,
+		Value:     blockchaincomponent.AmountString(tx.Value),
+		Data:      hex.EncodeToString(tx.Data),
+		Gas:       tx.Gas,
+		GasPrice:  tx.GasPrice,
+		ChainID:   tx.ChainID,
+		Timestamp: tx.Timestamp,
+	})
 	if err != nil {
 		return err
 	}

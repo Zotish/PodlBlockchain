@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +34,31 @@ type TxEnvelope struct {
 	BlockHash   string                           `json:"block_hash,omitempty"`   // if confirmed
 	BlockNumber uint64                           `json:"block_number,omitempty"` // if confirmed
 	TxIndex     int                              `json:"tx_index,omitempty"`     // if confirmed
+}
+
+type amountField struct {
+	V *big.Int
+}
+
+func (a *amountField) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		a.V = big.NewInt(0)
+		return nil
+	}
+	if strings.HasPrefix(s, "\"") {
+		unq, err := strconv.Unquote(s)
+		if err != nil {
+			return err
+		}
+		s = unq
+	}
+	amt, err := blockchaincomponent.NewAmountFromString(s)
+	if err != nil {
+		return err
+	}
+	a.V = amt
+	return nil
 }
 
 func NewBlockchainServer(port uint, blockchainPtr *blockchaincomponent.Blockchain_struct) *BlockchainServer {
@@ -113,6 +140,43 @@ func (b *BlockchainServer) sendTransaction(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func (b *BlockchainServer) sendTransactionBatch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var txs []blockchaincomponent.Transaction
+	if err := json.NewDecoder(r.Body).Decode(&txs); err != nil {
+		http.Error(w, "Invalid batch payload", http.StatusBadRequest)
+		return
+	}
+	if len(txs) == 0 {
+		json.NewEncoder(w).Encode(map[string]int{"accepted": 0, "failed": 0})
+		return
+	}
+
+	batch := make([]*blockchaincomponent.Transaction, 0, len(txs))
+	for i := range txs {
+		txCopy := txs[i]
+		batch = append(batch, &txCopy)
+	}
+
+	accepted, failed := b.BlockchainPtr.AddNewTxBatch(batch)
+	json.NewEncoder(w).Encode(map[string]int{
+		"accepted": accepted,
+		"failed":   failed,
+	})
+}
+
 func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
@@ -164,26 +228,187 @@ func (bcs *BlockchainServer) GetBalance(w http.ResponseWriter, r *http.Request) 
 	defer bcs.BlockchainPtr.Mutex.Unlock()
 
 	// Get confirmed balance from accounts
-	confirmedBalance := bcs.BlockchainPtr.Accounts[address]
+	confirmedBalance := blockchaincomponent.CopyAmount(bcs.BlockchainPtr.Accounts[address])
+	if confirmedBalance == nil {
+		confirmedBalance = big.NewInt(0)
+	}
 
 	// Calculate pending balance changes from transaction pool
-	pendingBalanceChange := uint64(0)
+	pendingBalanceChange := big.NewInt(0)
 	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
 		if tx.From == address && tx.Status == constantset.StatusPending {
-			pendingBalanceChange -= uint64(tx.Value + (tx.GasPrice * tx.CalculateGasCost()))
+			cost := new(big.Int).Add(blockchaincomponent.CopyAmount(tx.Value), blockchaincomponent.NewAmountFromUint64(tx.GasPrice*tx.CalculateGasCost()))
+			pendingBalanceChange.Sub(pendingBalanceChange, cost)
 		}
 		if tx.To == address && tx.Status == constantset.StatusPending {
-			pendingBalanceChange += uint64(tx.Value)
+			pendingBalanceChange.Add(pendingBalanceChange, blockchaincomponent.CopyAmount(tx.Value))
 		}
 	}
 
-	totalBalance := uint64(max(0, int(uint64(confirmedBalance)+uint64(pendingBalanceChange))))
+	totalBalance := new(big.Int).Add(confirmedBalance, pendingBalanceChange)
+	if totalBalance.Sign() < 0 {
+		totalBalance = big.NewInt(0)
+	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"address":                address,
-		"balance":                totalBalance,
-		"confirmed_balance":      confirmedBalance,
-		"pending_balance_change": pendingBalanceChange,
+		"balance":                blockchaincomponent.AmountString(totalBalance),
+		"confirmed_balance":      blockchaincomponent.AmountString(confirmedBalance),
+		"pending_balance_change": blockchaincomponent.AmountString(pendingBalanceChange),
+	})
+}
+
+func (bcs *BlockchainServer) GetBridgeRequests(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	addr := r.URL.Query().Get("address")
+	list := bcs.BlockchainPtr.ListBridgeRequests(addr)
+	json.NewEncoder(w).Encode(list)
+}
+
+func (bcs *BlockchainServer) GetBridgeTokens(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	list := bcs.BlockchainPtr.ListBridgeTokenMappings()
+	json.NewEncoder(w).Encode(list)
+}
+
+// BridgeLockBsc registers a BSC lock request directly (fallback when RPC log scan misses).
+func (bcs *BlockchainServer) BridgeLockBsc(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		BscTx string `json:"bsc_tx"`
+		Token string `json:"token"`
+		From  string `json:"from"`
+		ToLqd string `json:"to_lqd"`
+		Amount string `json:"amount"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if req.BscTx == "" || req.Token == "" || req.ToLqd == "" || req.Amount == "" {
+		http.Error(w, `{"error":"missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if !wallet.ValidateAddress(req.ToLqd) {
+		http.Error(w, `{"error":"invalid to_lqd"}`, http.StatusBadRequest)
+		return
+	}
+	amt, err := blockchaincomponent.NewAmountFromString(req.Amount)
+	if err != nil || amt.Sign() <= 0 {
+		http.Error(w, `{"error":"invalid amount"}`, http.StatusBadRequest)
+		return
+	}
+	bcs.BlockchainPtr.AddBridgeRequestBSC(req.BscTx, req.Token, req.From, req.ToLqd, amt)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "ok",
+	})
+}
+
+// BridgeBurnLqd executes a burn on LQD and registers a release request for BSC.
+func (bcs *BlockchainServer) BridgeBurnLqd(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Token string `json:"token"`
+		From  string `json:"from"`
+		ToBsc string `json:"to_bsc"`
+		Amount string `json:"amount"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if req.Token == "" || req.From == "" || req.ToBsc == "" || req.Amount == "" {
+		http.Error(w, `{"error":"missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	amt, err := blockchaincomponent.NewAmountFromString(req.Amount)
+	if err != nil || amt.Sign() <= 0 {
+		http.Error(w, `{"error":"invalid amount"}`, http.StatusBadRequest)
+		return
+	}
+	if !wallet.ValidateAddress(req.Token) || !wallet.ValidateAddress(req.From) {
+		http.Error(w, `{"error":"invalid address"}`, http.StatusBadRequest)
+		return
+	}
+
+	info := bcs.BlockchainPtr.GetBridgeTokenMappingByLqd(req.Token)
+	if info == nil || info.BscToken == "" {
+		http.Error(w, `{"error":"token not mapped"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Execute burn directly (state change) and register request.
+	_, err = bcs.BlockchainPtr.ContractEngine.Pipeline.Execute(
+		req.Token,
+		req.From,
+		"Burn",
+		[]string{blockchaincomponent.AmountString(amt), req.ToBsc},
+		5_000_000,
+	)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"burn failed: %v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	tx := bcs.BlockchainPtr.NewSystemTx("contract_call", req.From, req.Token, blockchaincomponent.NewAmountFromUint64(0))
+	tx.Function = "Burn"
+	tx.Args = []string{blockchaincomponent.AmountString(amt), req.ToBsc}
+	tx.IsContract = true
+	tx.Status = constantset.StatusSuccess
+	tx.TxHash = blockchaincomponent.CalculateTransactionHash(*tx)
+	bcs.BlockchainPtr.RecordRecentTx(tx)
+
+	bcs.BlockchainPtr.AddBridgeRequestBurn(tx.TxHash, info.BscToken, req.From, req.ToBsc, amt)
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"tx_hash": tx.TxHash,
+		"status":  "burned",
 	})
 }
 
@@ -216,12 +441,10 @@ func (bcs *BlockchainServer) Faucet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// credit directly (test faucet)
-	amount := uint64(100_000_00)
-	bcs.BlockchainPtr.Mutex.Lock()
-	bcs.BlockchainPtr.Accounts[address] += amount
-	bcs.BlockchainPtr.Mutex.Unlock()
+	amount := blockchaincomponent.NewAmountFromUint64(100000000000000)
+	bcs.BlockchainPtr.AddAccountBalance(address, amount)
 
-	json.NewEncoder(w).Encode(map[string]interface{}{"credited": amount, "address": address})
+	json.NewEncoder(w).Encode(map[string]interface{}{"credited": amount.String(), "address": address})
 }
 
 func (bcs *BlockchainServer) ValidatorStats(w http.ResponseWriter, r *http.Request) {
@@ -243,8 +466,88 @@ func (bcs *BlockchainServer) NetworkStats(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	stats := bcs.BlockchainPtr.GetNetworkStats()
 	json.NewEncoder(w).Encode(stats)
+}
+
+func (bcs *BlockchainServer) GetPeers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if bcs.BlockchainPtr.Network == nil {
+		http.Error(w, "network not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	bcs.BlockchainPtr.Network.Mutex.Lock()
+	defer bcs.BlockchainPtr.Network.Mutex.Unlock()
+
+	out := []map[string]interface{}{}
+	for _, p := range bcs.BlockchainPtr.Network.Peers {
+		if p == nil {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"address":    p.Address,
+			"port":       p.Port,
+			"http_port":  p.HTTPPort,
+			"last_seen":  p.LastSeen,
+			"reputation": p.Reputation,
+			"height":     p.Height,
+			"is_active":  p.IsActive,
+		})
+	}
+	json.NewEncoder(w).Encode(out)
+}
+
+func (bcs *BlockchainServer) AddPeer(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if bcs.BlockchainPtr.Network == nil {
+		http.Error(w, "network not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		Address string `json:"address"`
+		Port    int    `json:"port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	if req.Address == "" || req.Port == 0 {
+		http.Error(w, "address and port required", http.StatusBadRequest)
+		return
+	}
+
+	bcs.BlockchainPtr.Network.AddPeer(req.Address, req.Port, true)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 func (bcs *BlockchainServer) Metrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
@@ -259,7 +562,15 @@ func (b *BlockchainServer) GetBlock(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	vars := mux.Vars(r)
-	blockNumber, err := strconv.ParseUint(vars["id"], 10, 64)
+	id := vars["id"]
+	if id == "" {
+		// Fallback for default ServeMux (no gorilla mux vars)
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) > 0 {
+			id = parts[len(parts)-1]
+		}
+	}
+	blockNumber, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid block number", http.StatusBadRequest)
 		return
@@ -268,12 +579,20 @@ func (b *BlockchainServer) GetBlock(w http.ResponseWriter, r *http.Request) {
 	b.BlockchainPtr.Mutex.Lock()
 	defer b.BlockchainPtr.Mutex.Unlock()
 
-	if blockNumber >= uint64(len(b.BlockchainPtr.Blocks)) {
+	// Try in-memory blocks first (handles trimmed chains)
+	for _, blk := range b.BlockchainPtr.Blocks {
+		if blk != nil && blk.BlockNumber == blockNumber {
+			json.NewEncoder(w).Encode(blk)
+			return
+		}
+	}
+
+	// Fall back to DB if not in memory
+	block, err := blockchaincomponent.GetBlockFromDB(blockNumber)
+	if err != nil || block == nil {
 		http.Error(w, "Block not found", http.StatusNotFound)
 		return
 	}
-
-	block := b.BlockchainPtr.Blocks[blockNumber]
 	json.NewEncoder(w).Encode(block)
 }
 
@@ -323,34 +642,66 @@ func (bcs *BlockchainServer) GetRecentTransactions(w http.ResponseWriter, r *htt
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
 
-	// Merge mempool + recent history, dedupe by tx hash
-	seen := make(map[string]struct{})
-	var out []*blockchaincomponent.Transaction
+	// Merge recent history + mempool, prefer confirmed/failed over pending
+	const pendingTTLSeconds = uint64(120)
+	now := uint64(time.Now().Unix())
 
-	// 1) Pending / active mempool transactions
-	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
-		h := strings.ToLower(strings.TrimSpace(tx.TxHash))
-		if h == "" {
-			continue
+	type entry struct {
+		tx   *blockchaincomponent.Transaction
+		rank int
+	}
+	byHash := make(map[string]entry)
+
+	statusRank := func(s string) int {
+		ss := strings.ToLower(strings.TrimSpace(s))
+		if ss == strings.ToLower(constantset.StatusSuccess) {
+			return 2
 		}
-		if _, ok := seen[h]; ok {
-			continue
+		if ss == strings.ToLower(constantset.StatusFailed) {
+			return 1
 		}
-		seen[h] = struct{}{}
-		out = append(out, tx)
+		return 0 // pending/unknown
 	}
 
-	// 2) Recent history (confirmed / failed)
+	// 1) Recent history (confirmed / failed) + drop stale pending
 	for _, tx := range bcs.BlockchainPtr.RecentTxs {
 		h := strings.ToLower(strings.TrimSpace(tx.TxHash))
 		if h == "" {
 			continue
 		}
-		if _, ok := seen[h]; ok {
+		if strings.ToLower(tx.Status) != strings.ToLower(constantset.StatusSuccess) &&
+			strings.ToLower(tx.Status) != strings.ToLower(constantset.StatusFailed) {
+			ts := uint64(tx.Timestamp)
+			if ts > 0 && now > ts && now-ts > pendingTTLSeconds {
+				continue
+			}
+		}
+		r := statusRank(tx.Status)
+		byHash[h] = entry{tx: tx, rank: r}
+	}
+
+	// 2) Pending / active mempool transactions (skip stale)
+	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
+		h := strings.ToLower(strings.TrimSpace(tx.TxHash))
+		if h == "" {
 			continue
 		}
-		seen[h] = struct{}{}
-		out = append(out, tx)
+		ts := uint64(tx.Timestamp)
+		if ts > 0 && now > ts && now-ts > pendingTTLSeconds {
+			continue
+		}
+		r := statusRank(tx.Status)
+		if existing, ok := byHash[h]; ok {
+			if existing.rank >= r {
+				continue
+			}
+		}
+		byHash[h] = entry{tx: tx, rank: r}
+	}
+
+	out := make([]*blockchaincomponent.Transaction, 0, len(byHash))
+	for _, e := range byHash {
+		out = append(out, e.tx)
 	}
 
 	// 3) Sort by timestamp desc (newest first)
@@ -385,7 +736,7 @@ func (bcs *BlockchainServer) LiquidityLock(w http.ResponseWriter, r *http.Reques
 
 	var req struct {
 		Address string `json:"address"`
-		Amount  uint64 `json:"amount"`
+		Amount  amountField `json:"amount"`
 		Days    int    `json:"days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -396,12 +747,12 @@ func (bcs *BlockchainServer) LiquidityLock(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid address", http.StatusBadRequest)
 		return
 	}
-	if req.Amount == 0 || req.Days <= 0 {
+	if req.Amount.V == nil || req.Amount.V.Sign() <= 0 || req.Days <= 0 {
 		http.Error(w, "invalid amount/duration", http.StatusBadRequest)
 		return
 	}
 
-	if err := bcs.BlockchainPtr.LockLiquidity(req.Address, req.Amount, time.Duration(req.Days)*24*time.Hour); err != nil {
+	if err := bcs.BlockchainPtr.LockLiquidity(req.Address, req.Amount.V, time.Duration(req.Days)*24*time.Hour); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -440,7 +791,7 @@ func (bcs *BlockchainServer) LiquidityUnlock(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"released": released})
+	json.NewEncoder(w).Encode(map[string]interface{}{"released": blockchaincomponent.AmountString(released)})
 }
 
 func (bcs *BlockchainServer) LiquidityView(w http.ResponseWriter, r *http.Request) {
@@ -460,9 +811,9 @@ func (bcs *BlockchainServer) LiquidityView(w http.ResponseWriter, r *http.Reques
 
 	locks := bcs.BlockchainPtr.LiquidityLocks[address]
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_liquidity": bcs.BlockchainPtr.TotalLiquidity,
+		"total_liquidity": blockchaincomponent.AmountString(bcs.BlockchainPtr.TotalLiquidity),
 		"locked":          locks,
-		"active_locked":   bcs.BlockchainPtr.GetLock(address),
+		"active_locked":   blockchaincomponent.AmountString(bcs.BlockchainPtr.GetLock(address)),
 	})
 }
 
@@ -478,6 +829,462 @@ func (bcs *BlockchainServer) RewardsRecent(w http.ResponseWriter, r *http.Reques
 		hist = hist[len(hist)-50:]
 	}
 	json.NewEncoder(w).Encode(hist)
+}
+
+func (bcs *BlockchainServer) RewardsLatest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	if len(bcs.BlockchainPtr.Blocks) == 0 {
+		http.Error(w, "no blocks", http.StatusNotFound)
+		return
+	}
+
+	last := bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1]
+	out := map[string]interface{}{
+		"block_number":           last.BlockNumber,
+		"validator":              last.RewardBreakdown.Validator,
+		"validator_reward":       last.RewardBreakdown.ValidatorReward,
+		"validator_rewards":      last.RewardBreakdown.ValidatorRewards,
+		"validator_part_rewards": last.RewardBreakdown.ValidatorPartRewards,
+		"liquidity_rewards":      last.RewardBreakdown.LiquidityRewards,
+		"participant_rewards":    last.RewardBreakdown.ParticipantRewards,
+	}
+	json.NewEncoder(w).Encode(out)
+}
+
+func (bcs *BlockchainServer) ActiveValidatorsLatest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	if len(bcs.BlockchainPtr.Blocks) == 0 {
+		http.Error(w, "no blocks", http.StatusNotFound)
+		return
+	}
+
+	last := bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1]
+	active := make([]map[string]interface{}, 0, len(last.RewardBreakdown.ValidatorPartRewards))
+	votes := bcs.BlockchainPtr.BlockVotes[last.CurrentHash]
+	for addr, amount := range last.RewardBreakdown.ValidatorPartRewards {
+		var stake float64
+		var power float64
+		for _, v := range bcs.BlockchainPtr.Validators {
+			if v.Address == addr {
+				stake = v.LPStakeAmount
+				power = v.LiquidityPower
+				break
+			}
+		}
+		voted := false
+		if votes != nil {
+			voted = votes[addr]
+		}
+		active = append(active, map[string]interface{}{
+			"address": addr,
+			"stake":   stake,
+			"power":   power,
+			"reward":  amount,
+			"winner":  false,
+			"voted":   voted,
+		})
+	}
+
+	winnerAddr := last.RewardBreakdown.Validator
+	if winnerAddr != "" {
+		var stake float64
+		var power float64
+		for _, v := range bcs.BlockchainPtr.Validators {
+			if v.Address == winnerAddr {
+				stake = v.LPStakeAmount
+				power = v.LiquidityPower
+				break
+			}
+		}
+		winnerVoted := false
+		if votes != nil {
+			winnerVoted = votes[winnerAddr]
+		}
+		active = append(active, map[string]interface{}{
+			"address": winnerAddr,
+			"stake":   stake,
+			"power":   power,
+			"reward":  last.RewardBreakdown.ValidatorReward,
+			"winner":  true,
+			"voted":   winnerVoted,
+		})
+	}
+
+	out := map[string]interface{}{
+		"block_number": last.BlockNumber,
+		"winner":       last.RewardBreakdown.Validator,
+		"active":       active,
+		"votes":        votes,
+	}
+	json.NewEncoder(w).Encode(out)
+}
+
+func (bcs *BlockchainServer) SyncValidatorsAll(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if bcs.BlockchainPtr.Network == nil {
+		http.Error(w, "network not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	type syncResult struct {
+		Peer  string `json:"peer"`
+		Error string `json:"error,omitempty"`
+	}
+
+	results := []syncResult{}
+	for _, peer := range bcs.BlockchainPtr.Network.Peers {
+		if peer == nil {
+			continue
+		}
+		if err := bcs.BlockchainPtr.Network.SyncValidators(peer); err != nil {
+			results = append(results, syncResult{Peer: peer.Address, Error: err.Error()})
+			continue
+		}
+		results = append(results, syncResult{Peer: peer.Address})
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"results": results,
+	})
+}
+
+func (bcs *BlockchainServer) ChainSummary(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	limit := parseLimit(r, 20)
+	out := bcs.buildChainSummary(limit)
+	json.NewEncoder(w).Encode(out)
+}
+
+func (bcs *BlockchainServer) GlobalChainSummary(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	limit := parseLimit(r, 20)
+	nodesParam := r.URL.Query().Get("nodes")
+	nodes := parseNodes(nodesParam)
+
+	if len(nodes) == 0 && bcs.BlockchainPtr.Network != nil {
+		for _, peer := range bcs.BlockchainPtr.Network.Peers {
+			httpPort := peer.HTTPPort
+			if httpPort == 0 {
+				httpPort = peer.Port - 1000
+			}
+			if httpPort <= 0 {
+				continue
+			}
+			nodes = append(nodes, fmt.Sprintf("%s:%d", peer.Address, httpPort))
+		}
+	}
+
+	type nodeResult struct {
+		Node    string      `json:"node"`
+		Summary interface{} `json:"summary,omitempty"`
+		Error   string      `json:"error,omitempty"`
+	}
+
+	results := []nodeResult{
+		{Node: "local", Summary: bcs.buildChainSummary(limit)},
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, node := range nodes {
+		url := fmt.Sprintf("http://%s/chain/summary?limit=%d", node, limit)
+		resp, err := client.Get(url)
+		if err != nil {
+			results = append(results, nodeResult{Node: node, Error: err.Error()})
+			continue
+		}
+		var summary interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil {
+			resp.Body.Close()
+			results = append(results, nodeResult{Node: node, Error: err.Error()})
+			continue
+		}
+		resp.Body.Close()
+		results = append(results, nodeResult{Node: node, Summary: summary})
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"nodes": results,
+	})
+}
+
+func (bcs *BlockchainServer) buildChainSummary(limit int) map[string]interface{} {
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	height := len(bcs.BlockchainPtr.Blocks)
+	validators := make([]map[string]interface{}, len(bcs.BlockchainPtr.Validators))
+	for i, v := range bcs.BlockchainPtr.Validators {
+		validators[i] = map[string]interface{}{
+			"address":         v.Address,
+			"stake":           v.LPStakeAmount,
+			"liquidity_power": v.LiquidityPower,
+			"penalty_score":   v.PenaltyScore,
+		}
+	}
+
+	start := 0
+	if height > limit {
+		start = height - limit
+	}
+
+	winners := make([]map[string]interface{}, 0, height-start)
+	for i := start; i < height; i++ {
+		blk := bcs.BlockchainPtr.Blocks[i]
+		participants := make([]string, 0, len(blk.RewardBreakdown.ValidatorPartRewards))
+		for addr := range blk.RewardBreakdown.ValidatorPartRewards {
+			participants = append(participants, addr)
+		}
+		votes := bcs.BlockchainPtr.BlockVotes[blk.CurrentHash]
+		winners = append(winners, map[string]interface{}{
+			"block_number":           blk.BlockNumber,
+			"winner":                 blk.RewardBreakdown.Validator,
+			"winner_reward":          blk.RewardBreakdown.ValidatorReward,
+			"validator_part_rewards": blk.RewardBreakdown.ValidatorPartRewards,
+			"participant_rewards":    blk.RewardBreakdown.ParticipantRewards,
+			"validator_participants": participants,
+			"votes":                  votes,
+		})
+	}
+
+	return map[string]interface{}{
+		"height":     height,
+		"validators": validators,
+		"winners":    winners,
+	}
+}
+
+func parseLimit(r *http.Request, defaultLimit int) int {
+	limit := defaultLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	return limit
+}
+
+func parseNodes(nodesParam string) []string {
+	if nodesParam == "" {
+		return nil
+	}
+	parts := strings.Split(nodesParam, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func (bcs *BlockchainServer) JSONRPC(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var req struct {
+		JSONRPC string        `json:"jsonrpc"`
+		ID      interface{}   `json:"id"`
+		Method  string        `json:"method"`
+		Params  []interface{} `json:"params"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	type rpcError struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+	}
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	switch req.Method {
+	case "web3_clientVersion":
+		resp["result"] = "DefenceProject/1.0"
+	case "net_version":
+		resp["result"] = "139"
+	case "eth_chainId":
+		resp["result"] = "0x8b"
+	case "eth_blockNumber":
+		if len(bcs.BlockchainPtr.Blocks) == 0 {
+			resp["result"] = "0x0"
+		} else {
+			resp["result"] = fmt.Sprintf("0x%x", bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1].BlockNumber)
+		}
+	case "eth_getBalance":
+		if len(req.Params) < 1 {
+			resp["error"] = rpcError{Code: -32602, Message: "missing address"}
+			break
+		}
+		addr, _ := req.Params[0].(string)
+		bal := blockchaincomponent.CopyAmount(bcs.BlockchainPtr.Accounts[addr])
+		if bal == nil {
+			bal = big.NewInt(0)
+		}
+		resp["result"] = fmt.Sprintf("0x%x", bal)
+	case "eth_getTransactionCount":
+		if len(req.Params) < 1 {
+			resp["error"] = rpcError{Code: -32602, Message: "missing address"}
+			break
+		}
+		addr, _ := req.Params[0].(string)
+		nonce := bcs.BlockchainPtr.GetAccountNonce(addr)
+		resp["result"] = fmt.Sprintf("0x%x", nonce)
+	case "eth_getBlockByNumber":
+		if len(req.Params) < 1 {
+			resp["error"] = rpcError{Code: -32602, Message: "missing block tag"}
+			break
+		}
+		tag, _ := req.Params[0].(string)
+		var blk *blockchaincomponent.Block
+		if tag == "latest" || tag == "" {
+			if len(bcs.BlockchainPtr.Blocks) > 0 {
+				blk = bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1]
+			}
+		} else if strings.HasPrefix(tag, "0x") {
+			n, err := strconv.ParseUint(strings.TrimPrefix(tag, "0x"), 16, 64)
+			if err == nil && int(n) < len(bcs.BlockchainPtr.Blocks) {
+				blk = bcs.BlockchainPtr.Blocks[n]
+			}
+		}
+		if blk == nil {
+			resp["result"] = nil
+			break
+		}
+		resp["result"] = map[string]interface{}{
+			"number":       fmt.Sprintf("0x%x", blk.BlockNumber),
+			"hash":         blk.CurrentHash,
+			"parentHash":   blk.PreviousHash,
+			"timestamp":    fmt.Sprintf("0x%x", blk.TimeStamp),
+			"transactions": []interface{}{},
+		}
+	case "eth_gasPrice":
+		resp["result"] = "0x1"
+	case "eth_getTransactionByHash":
+		if len(req.Params) < 1 {
+			resp["error"] = rpcError{Code: -32602, Message: "missing tx hash"}
+			break
+		}
+		hash, _ := req.Params[0].(string)
+		tx, blockNumber := findTxByHash(bcs.BlockchainPtr, hash)
+		if tx == nil {
+			resp["result"] = nil
+			break
+		}
+		result := map[string]interface{}{
+			"hash":     tx.TxHash,
+			"from":     tx.From,
+			"to":       tx.To,
+			"value":    "0x0",
+			"gas":      fmt.Sprintf("0x%x", tx.Gas),
+			"gasPrice": fmt.Sprintf("0x%x", tx.GasPrice),
+			"nonce":    fmt.Sprintf("0x%x", tx.Nonce),
+		}
+		if tx.Value != nil {
+			result["value"] = fmt.Sprintf("0x%s", tx.Value.Text(16))
+		}
+		if blockNumber >= 0 {
+			result["blockNumber"] = fmt.Sprintf("0x%x", blockNumber)
+		} else {
+			result["blockNumber"] = nil
+		}
+		resp["result"] = result
+	case "eth_getTransactionReceipt":
+		if len(req.Params) < 1 {
+			resp["error"] = rpcError{Code: -32602, Message: "missing tx hash"}
+			break
+		}
+		hash, _ := req.Params[0].(string)
+		tx, blockNumber := findTxByHash(bcs.BlockchainPtr, hash)
+		if tx == nil || blockNumber < 0 {
+			resp["result"] = nil
+			break
+		}
+		resp["result"] = map[string]interface{}{
+			"transactionHash": tx.TxHash,
+			"blockNumber":     fmt.Sprintf("0x%x", blockNumber),
+			"status":          "0x1",
+		}
+	case "eth_syncing":
+		resp["result"] = false
+	case "eth_accounts":
+		resp["result"] = []string{}
+	case "eth_sendRawTransaction":
+		resp["error"] = rpcError{Code: -32601, Message: "method not supported"}
+	default:
+		resp["error"] = rpcError{Code: -32601, Message: "method not found"}
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+func findTxByHash(bc *blockchaincomponent.Blockchain_struct, hash string) (*blockchaincomponent.Transaction, int64) {
+	for _, blk := range bc.Blocks {
+		for _, tx := range blk.Transactions {
+			if tx.TxHash == hash {
+				return tx, int64(blk.BlockNumber)
+			}
+		}
+	}
+	for _, tx := range bc.Transaction_pool {
+		if tx.TxHash == hash {
+			return tx, -1
+		}
+	}
+	return nil, -1
 }
 
 func (bcs *BlockchainServer) AddValidatorFromPeer(w http.ResponseWriter, r *http.Request) {
@@ -677,6 +1484,17 @@ func (bcs *BlockchainServer) GetAddressTransactions(w http.ResponseWriter, r *ht
 
 	vars := mux.Vars(r)
 	rawAddress := strings.TrimSpace(vars["address"])
+	if rawAddress == "" {
+		// Fallback for default ServeMux (no gorilla mux vars)
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		for i := 0; i+1 < len(parts); i++ {
+			if parts[i] == "address" {
+				rawAddress = parts[i+1]
+				break
+			}
+		}
+	}
+	rawAddress = strings.TrimSpace(rawAddress)
 	addr := strings.ToLower(rawAddress)
 	if addr == "" {
 		http.Error(w, `{"error":"address is required"}`, http.StatusBadRequest)
@@ -895,15 +1713,20 @@ func (bcs *BlockchainServer) ProvideLiquidity(w http.ResponseWriter, r *http.Req
 	}
 
 	var req struct {
-		Address  string `json:"address"`
-		Amount   uint64 `json:"amount"`
-		LockDays int64  `json:"lock_days"`
+		Address  string     `json:"address"`
+		Amount   amountField `json:"amount"`
+		LockDays int64      `json:"lock_days"`
 	}
 
 	body, _ := io.ReadAll(r.Body)
 	json.Unmarshal(body, &req)
 
-	err := bcs.BlockchainPtr.ProvideLiquidity(req.Address, req.Amount, req.LockDays)
+	if req.Amount.V == nil || req.Amount.V.Sign() <= 0 {
+		http.Error(w, `{"error":"invalid amount"}`, 400)
+		return
+	}
+
+	err := bcs.BlockchainPtr.ProvideLiquidity(req.Address, req.Amount.V, req.LockDays)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), 400)
 		return
@@ -973,6 +1796,120 @@ func (bcs *BlockchainServer) GetAllLiquidityProviders(w http.ResponseWriter, r *
 
 	json.NewEncoder(w).Encode(out)
 }
+
+func (bcs *BlockchainServer) GetPoolLiquidity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	total := big.NewInt(0)
+	for _, v := range bcs.BlockchainPtr.PoolLiquidity {
+		if v != nil {
+			total.Add(total, v)
+		}
+	}
+	target := big.NewInt(0)
+	if len(bcs.BlockchainPtr.PoolLiquidity) > 0 {
+		target.Div(total, big.NewInt(int64(len(bcs.BlockchainPtr.PoolLiquidity))))
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"pools":        bcs.BlockchainPtr.PoolLiquidity,
+		"total":        blockchaincomponent.AmountString(total),
+		"target_equal": blockchaincomponent.AmountString(target),
+		"unallocated":  blockchaincomponent.AmountString(bcs.BlockchainPtr.UnallocatedLiquidity),
+	})
+}
+
+func (bcs *BlockchainServer) RebalancePools(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+	bcs.BlockchainPtr.RebalancePoolsEqual()
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// SyncPools registers existing contracts that qualify as pools.
+// This is optional for developers when older contracts predate pool detection.
+func (bcs *BlockchainServer) SyncPools(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	addrs := bcs.BlockchainPtr.ContractEngine.Registry.List()
+	for _, addr := range addrs {
+		rec, err := bcs.BlockchainPtr.ContractEngine.Registry.LoadContract(addr)
+		if err != nil || rec == nil || rec.Metadata == nil {
+			continue
+		}
+		if rec.Metadata.Pool {
+			bcs.BlockchainPtr.RegisterPool(addr)
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
+		"count":  len(bcs.BlockchainPtr.PoolLiquidity),
+	})
+}
+
+// RegisterPoolManual allows devs to force a pool registration.
+func (bcs *BlockchainServer) RegisterPoolManual(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Address string `json:"address"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if req.Address == "" {
+		http.Error(w, "address required", 400)
+		return
+	}
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+	bcs.BlockchainPtr.RegisterPool(req.Address)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
 func (b *BlockchainServer) GetContractStorage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
@@ -990,17 +1927,70 @@ func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
 	type Req struct {
 		Type       string `json:"type"`
 		Owner      string `json:"owner"`
 		Code       string `json:"code"`
 		PluginPath string `json:"plugin_path"`
+		PrivateKey string `json:"private_key"`
+		Gas        uint64 `json:"gas"`
+		GasPrice   uint64 `json:"gas_price"`
 	}
 
 	var req Req
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), 400)
+	var codeBytes []byte
+
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(25 << 20); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		req.Type = r.FormValue("type")
+		req.Owner = r.FormValue("owner")
+		req.PluginPath = r.FormValue("plugin_path")
+		req.PrivateKey = r.FormValue("private_key")
+		if gasStr := r.FormValue("gas"); gasStr != "" {
+			if v, err := strconv.ParseUint(gasStr, 10, 64); err == nil {
+				req.Gas = v
+			}
+		}
+		if gpStr := r.FormValue("gas_price"); gpStr != "" {
+			if v, err := strconv.ParseUint(gpStr, 10, 64); err == nil {
+				req.GasPrice = v
+			}
+		}
+
+		file, _, err := r.FormFile("contract_file")
+		if err == nil && file != nil {
+			defer file.Close()
+			codeBytes, _ = io.ReadAll(file)
+		}
+	} else {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if req.Code != "" {
+			codeBytes = []byte(req.Code)
+		}
+	}
+
+	if req.Owner == "" || !wallet.ValidateAddress(req.Owner) {
+		http.Error(w, "invalid owner address", 400)
+		return
+	}
+	if req.Type == "" {
+		http.Error(w, "contract type required", 400)
 		return
 	}
 
@@ -1016,35 +2006,67 @@ func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Reque
 	}
 
 	// 3. Save code/plugin
-	if req.Type == "plugin" {
-		meta.PluginPath = req.PluginPath
-	} else {
-		meta.Code = []byte(req.Code)
+	switch req.Type {
+	case "plugin":
+		if req.PluginPath != "" {
+			meta.PluginPath = req.PluginPath
+			break
+		}
+		if len(codeBytes) == 0 {
+			http.Error(w, "plugin file required", 400)
+			return
+		}
+		pluginDir := filepath.Join("data", "contracts")
+		_ = os.MkdirAll(pluginDir, 0o755)
+		pluginPath := filepath.Join(pluginDir, addr+".so")
+		if err := os.WriteFile(pluginPath, codeBytes, 0o755); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		meta.PluginPath = pluginPath
+	case "gocode", "dsl":
+		if len(codeBytes) == 0 {
+			http.Error(w, "contract code required", 400)
+			return
+		}
+		meta.Code = codeBytes
+	default:
+		http.Error(w, "invalid contract type", 400)
+		return
 	}
 
 	// 4. Generate ABI
 	var abi []byte
 	var err error
 
-	log.Printf(err.Error())
-
 	switch req.Type {
 	case "plugin":
-		abi = []byte(`[]`)
+		if err := bcs.BlockchainPtr.ContractEngine.Registry.PluginVM.LoadPlugin(addr, meta.PluginPath); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		pc := bcs.BlockchainPtr.ContractEngine.Registry.PluginVM.GetPlugin(addr)
+		if pc == nil {
+			http.Error(w, "plugin load failed", 500)
+			return
+		}
+		abi, err = blockchaincomponent.GenerateABIForPlugin(pc)
 	case "gocode":
 		abi, err = blockchaincomponent.GenerateABIForBytecode(nil)
 	case "dsl":
 		abi, err = blockchaincomponent.GenerateABIForDSL()
-	default:
-		http.Error(w, "invalid contract type", 400)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), 500)
 		return
 	}
 	meta.ABI = abi
+	meta.Pool, meta.PoolType = detectPoolFromABI(abi)
 
 	// 5. Create initial state
 	state := &blockchaincomponent.SmartContractState{
 		Address:   addr,
-		Balance:   0,
+		Balance:   "0",
 		Storage:   map[string]string{},
 		IsActive:  true,
 		CreatedAt: time.Now().Unix(),
@@ -1055,33 +2077,102 @@ func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	if meta.Pool {
+		bcs.BlockchainPtr.RegisterPool(addr)
+	}
 
-	// 7. Create contract deployment transaction
+	// 7. Create contract deployment transaction (fee-paying)
+	fnPayload := map[string]any{
+		"fn":   "constructor",
+		"args": []string{},
+	}
+	payloadBytes, _ := json.Marshal(fnPayload)
 	deployTx := &blockchaincomponent.Transaction{
 		From:       req.Owner,
 		To:         addr,
 		Type:       "contract_create",
 		Function:   "constructor",
 		Args:       []string{},
+		Data:       payloadBytes,
 		Timestamp:  uint64(time.Now().Unix()),
 		Status:     constantset.StatusPending,
-		IsSystem:   true,
+		IsSystem:   false,
 		ChainID:    uint64(constantset.ChainID),
-		Gas:        1,
-		GasPrice:   21000,
+		Gas:        uint64(constantset.ContractCallGas),
+		GasPrice:   1,
 		IsContract: true,
 	}
-
+	if req.Gas > 0 {
+		deployTx.Gas = req.Gas
+	}
+	if req.GasPrice > 0 {
+		deployTx.GasPrice = req.GasPrice
+	} else {
+		deployTx.GasPrice = bcs.BlockchainPtr.CalculateBaseFee() + 1
+	}
+	if req.PrivateKey != "" {
+		signer, err := wallet.ImportFromPrivateKey(req.PrivateKey)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"Failed to import wallet: %v"}`, err), http.StatusBadRequest)
+			return
+		}
+		if !strings.EqualFold(signer.Address, req.Owner) {
+			http.Error(w, `{"error":"Owner does not match private key"}`, http.StatusBadRequest)
+			return
+		}
+		_ = signer.SignTransaction(deployTx)
+	}
 	deployTx.TxHash = blockchaincomponent.CalculateTransactionHash(*deployTx)
 
-	bcs.BlockchainPtr.Transaction_pool = append(bcs.BlockchainPtr.Transaction_pool, deployTx)
+	bcs.BlockchainPtr.AddNewTxToTheTransaction_pool(deployTx)
 	bcs.BlockchainPtr.RecordRecentTx(deployTx)
 
 	// 8. Respond
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":  "deployed",
 		"address": addr,
+		"type":    req.Type,
+		"owner":   req.Owner,
 	})
+}
+
+func detectPoolFromABI(abi []byte) (bool, string) {
+	if len(abi) == 0 {
+		return false, ""
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(abi, &entries); err != nil {
+		var wrapped struct {
+			Entries []map[string]any `json:"entries"`
+		}
+		if err := json.Unmarshal(abi, &wrapped); err != nil {
+			return false, ""
+		}
+		entries = wrapped.Entries
+	}
+	names := map[string]struct{}{}
+	for _, e := range entries {
+		if n, ok := e["name"].(string); ok {
+			names[strings.ToLower(n)] = struct{}{}
+		}
+	}
+
+	has := func(n string) bool {
+		_, ok := names[strings.ToLower(n)]
+		return ok
+	}
+
+	if has("addliquidity") || has("removeliquidity") || has("swap") || has("swapatob") || has("swapbtoa") {
+		return true, "dex"
+	}
+	if (has("deposit") && has("withdraw")) || has("borrow") || has("repay") {
+		return true, "lending"
+	}
+	if has("mint") && has("ownerof") {
+		return true, "nft"
+	}
+
+	return false, ""
 }
 
 func (bcs *BlockchainServer) ContractCall(w http.ResponseWriter, r *http.Request) {
@@ -1147,6 +2238,54 @@ func (bcs *BlockchainServer) ContractABI(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Write(abi)
+}
+
+func (b *BlockchainServer) ContractList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	addrs := b.BlockchainPtr.ContractEngine.Registry.List()
+	out := []map[string]any{}
+	for _, addr := range addrs {
+		rec, err := b.BlockchainPtr.ContractEngine.Registry.LoadContract(addr)
+		if err != nil || rec == nil || rec.Metadata == nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"address": addr,
+			"type":    rec.Metadata.Type,
+			"owner":   rec.Metadata.Owner,
+		})
+	}
+	json.NewEncoder(w).Encode(out)
+}
+
+func (b *BlockchainServer) BaseFee(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	fee := b.BlockchainPtr.CalculateBaseFee()
+	json.NewEncoder(w).Encode(map[string]uint64{"base_fee": fee})
 }
 
 func GenerateContractAddress(owner string, nonce uint64) string {
@@ -1232,12 +2371,7 @@ func (b *BlockchainServer) CompileContract(w http.ResponseWriter, r *http.Reques
 	switch req.Type {
 
 	case "solidity":
-		out, err := exec.Command("solc", "--combined-json", "abi,bin", "-").CombinedOutput()
-		if err != nil {
-			http.Error(w, string(out), 500)
-			return
-		}
-		w.Write(out)
+		http.Error(w, "solidity compiler not supported in LQD engine", 400)
 		return
 
 	case "gocode":
@@ -1340,11 +2474,14 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/", b.getBlockchain)
 	http.HandleFunc("/balance", b.GetBalance)
 	http.HandleFunc("/send_tx", b.sendTransaction)
+	http.HandleFunc("/send_tx/batch", b.sendTransactionBatch)
 	http.HandleFunc("/fetch_last_n_block", b.fetchNBlocks)
 	http.HandleFunc("/account/{address}/nonce", b.GetAccountNonce)
 	http.HandleFunc("/getheight", b.GetBlockchainHeight)
 	http.HandleFunc("/validator/{address}", b.ValidatorStats)
 	http.HandleFunc("/network", b.NetworkStats)
+	http.HandleFunc("/peers", b.GetPeers)
+	http.HandleFunc("/peers/add", b.AddPeer)
 	http.HandleFunc("/faucet", b.Faucet)
 	http.HandleFunc("/block/{id}", b.GetBlock)
 	http.HandleFunc("/validators", b.GetValidators)
@@ -1353,6 +2490,12 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/liquidity/unlock", b.LiquidityUnlock)
 	http.HandleFunc("/liquidity", b.LiquidityView)
 	http.HandleFunc("/rewards/recent", b.RewardsRecent)
+	http.HandleFunc("/rewards/latest", b.RewardsLatest)
+	http.HandleFunc("/validators/active", b.ActiveValidatorsLatest)
+	http.HandleFunc("/validators/sync", b.SyncValidatorsAll)
+	http.HandleFunc("/chain/summary", b.ChainSummary)
+	http.HandleFunc("/chain/global", b.GlobalChainSummary)
+	http.HandleFunc("/rpc", b.JSONRPC)
 	http.HandleFunc("/validator/new", b.AddValidatorFromPeer)
 	http.HandleFunc("/validator/add", b.AddValidator)
 	http.HandleFunc("/tx/", b.GetTransactionByHash)
@@ -1361,12 +2504,26 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/contract/getAbi", b.ContractABI)
 	http.HandleFunc("/contract/con1", b.ContractState)
 	http.HandleFunc("/contract/con2", b.ContractEvents)
+	http.HandleFunc("/contract/list", b.ContractList)
+	http.HandleFunc("/contract/compile", b.CompileContract)
+	http.HandleFunc("/contract/storage", b.GetContractStorage)
+	http.HandleFunc("/contract/code", b.GetContractCode)
+	http.HandleFunc("/contract/events", b.ContractEvents)
+	http.HandleFunc("/basefee", b.BaseFee)
 	http.HandleFunc("/blocktime/latest", b.BlockTimeLatest)
 	http.HandleFunc("/address/{address}/transactions", b.GetAddressTransactions)
 	http.HandleFunc("/liquidity/provide", b.ProvideLiquidity)
 	http.HandleFunc("/liquidity/unstake", b.UnstakeLiquidity)
 	http.HandleFunc("/liquidity/info", b.GetLiquidityInfo)
 	http.HandleFunc("/liquidity/all", b.GetAllLiquidityProviders)
+	http.HandleFunc("/liquidity/pools", b.GetPoolLiquidity)
+	http.HandleFunc("/liquidity/rebalance", b.RebalancePools)
+	http.HandleFunc("/liquidity/pools/sync", b.SyncPools)
+	http.HandleFunc("/liquidity/pools/register", b.RegisterPoolManual)
+	http.HandleFunc("/bridge/requests", b.GetBridgeRequests)
+	http.HandleFunc("/bridge/tokens", b.GetBridgeTokens)
+	http.HandleFunc("/bridge/lock_bsc", b.BridgeLockBsc)
+	http.HandleFunc("/bridge/burn_lqd", b.BridgeBurnLqd)
 
 	//http.HandleFunc("/contract/compile", b.CompileContract)
 

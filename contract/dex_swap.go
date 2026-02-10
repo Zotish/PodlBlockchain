@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
-	"strconv"
+	"math/big"
+	"strings"
 
 	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
 )
@@ -12,21 +12,28 @@ type DEX struct{}
 // ------------------------
 // Helpers
 // ------------------------
-func parseUint(v string) uint64 {
-	u, _ := strconv.ParseUint(v, 10, 64)
-	return u
+func parseBig(v string) *big.Int {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return big.NewInt(0)
+	}
+	z := new(big.Int)
+	if _, ok := z.SetString(v, 10); !ok {
+		return big.NewInt(0)
+	}
+	return z
 }
 
-func (d *DEX) bal(ctx *blockchaincomponent.Context, key string) uint64 {
+func (d *DEX) bal(ctx *blockchaincomponent.Context, key string) *big.Int {
 	v := ctx.Get(key)
 	if v == "" {
-		return 0
+		return big.NewInt(0)
 	}
-	return parseUint(v)
+	return parseBig(v)
 }
 
-func (d *DEX) set(ctx *blockchaincomponent.Context, key string, val uint64) {
-	ctx.Set(key, fmt.Sprintf("%d", val))
+func (d *DEX) set(ctx *blockchaincomponent.Context, key string, val *big.Int) {
+	ctx.Set(key, val.String())
 }
 
 // ------------------------
@@ -58,10 +65,10 @@ func (d *DEX) Init(ctx *blockchaincomponent.Context, tokenA string, tokenB strin
 // LP minted = proportional to pool size
 // ------------------------
 func (d *DEX) AddLiquidity(ctx *blockchaincomponent.Context, amountA string, amountB string) {
-	amtA := parseUint(amountA)
-	amtB := parseUint(amountB)
+	amtA := parseBig(amountA)
+	amtB := parseBig(amountB)
 
-	if amtA == 0 || amtB == 0 {
+	if amtA.Sign() == 0 || amtB.Sign() == 0 {
 		ctx.Revert("invalid liquidity amounts")
 	}
 
@@ -72,32 +79,34 @@ func (d *DEX) AddLiquidity(ctx *blockchaincomponent.Context, amountA string, amo
 	// total LP supply
 	totalLP := d.bal(ctx, "totalLP")
 
-	var mintedLP uint64
+	var mintedLP *big.Int
 
-	if resA == 0 && resB == 0 {
+	if resA.Sign() == 0 && resB.Sign() == 0 {
 		// first liquidity provider
-		mintedLP = uint64(amtA + amtB)
+		mintedLP = new(big.Int).Add(amtA, amtB)
 	} else {
 		// proportional LP minting
-		mintedLP = min(amtA*totalLP/resA, amtB*totalLP/resB)
+		mintedA := new(big.Int).Div(new(big.Int).Mul(amtA, totalLP), resA)
+		mintedB := new(big.Int).Div(new(big.Int).Mul(amtB, totalLP), resB)
+		mintedLP = minBig(mintedA, mintedB)
 	}
 
 	// update reserves
-	d.set(ctx, "reserveA", resA+amtA)
-	d.set(ctx, "reserveB", resB+amtB)
+	d.set(ctx, "reserveA", new(big.Int).Add(resA, amtA))
+	d.set(ctx, "reserveB", new(big.Int).Add(resB, amtB))
 
 	// mint LP to provider
 	providerKey := "lp:" + ctx.CallerAddr
 	old := d.bal(ctx, providerKey)
-	d.set(ctx, providerKey, old+mintedLP)
+	d.set(ctx, providerKey, new(big.Int).Add(old, mintedLP))
 
-	d.set(ctx, "totalLP", totalLP+mintedLP)
+	d.set(ctx, "totalLP", new(big.Int).Add(totalLP, mintedLP))
 
 	ctx.Emit("LiquidityAdded", map[string]interface{}{
 		"provider": ctx.CallerAddr,
-		"amountA":  amtA,
-		"amountB":  amtB,
-		"lpMinted": mintedLP,
+		"amountA":  amtA.String(),
+		"amountB":  amtB.String(),
+		"lpMinted": mintedLP.String(),
 	})
 }
 
@@ -105,14 +114,14 @@ func (d *DEX) AddLiquidity(ctx *blockchaincomponent.Context, amountA string, amo
 // RemoveLiquidity(lpAmount)
 // ------------------------
 func (d *DEX) RemoveLiquidity(ctx *blockchaincomponent.Context, lpAmount string) {
-	lp := parseUint(lpAmount)
-	if lp == 0 {
+	lp := parseBig(lpAmount)
+	if lp.Sign() == 0 {
 		ctx.Revert("invalid lp amount")
 	}
 
 	providerKey := "lp:" + ctx.CallerAddr
 	userLP := d.bal(ctx, providerKey)
-	if lp > userLP {
+	if userLP.Cmp(lp) < 0 {
 		ctx.Revert("insufficient LP")
 	}
 
@@ -121,22 +130,22 @@ func (d *DEX) RemoveLiquidity(ctx *blockchaincomponent.Context, lpAmount string)
 	resB := d.bal(ctx, "reserveB")
 
 	// proportional withdrawal
-	outA := lp * resA / totalLP
-	outB := lp * resB / totalLP
+	outA := new(big.Int).Div(new(big.Int).Mul(lp, resA), totalLP)
+	outB := new(big.Int).Div(new(big.Int).Mul(lp, resB), totalLP)
 
 	// update reserves
-	d.set(ctx, "reserveA", resA-outA)
-	d.set(ctx, "reserveB", resB-outB)
+	d.set(ctx, "reserveA", new(big.Int).Sub(resA, outA))
+	d.set(ctx, "reserveB", new(big.Int).Sub(resB, outB))
 
 	// burn LP
-	d.set(ctx, providerKey, userLP-lp)
-	d.set(ctx, "totalLP", totalLP-lp)
+	d.set(ctx, providerKey, new(big.Int).Sub(userLP, lp))
+	d.set(ctx, "totalLP", new(big.Int).Sub(totalLP, lp))
 
 	ctx.Emit("LiquidityRemoved", map[string]interface{}{
 		"provider": ctx.CallerAddr,
-		"lpBurned": lp,
-		"outA":     outA,
-		"outB":     outB,
+		"lpBurned": lp.String(),
+		"outA":     outA.String(),
+		"outB":     outB.String(),
 	})
 }
 
@@ -144,25 +153,25 @@ func (d *DEX) RemoveLiquidity(ctx *blockchaincomponent.Context, lpAmount string)
 // Swap tokenA → tokenB
 // ------------------------
 func (d *DEX) SwapAtoB(ctx *blockchaincomponent.Context, amountIn string) {
-	amtIn := parseUint(amountIn)
+	amtIn := parseBig(amountIn)
 
 	resA := d.bal(ctx, "reserveA")
 	resB := d.bal(ctx, "reserveB")
 
-	if amtIn == 0 || resA == 0 || resB == 0 {
+	if amtIn.Sign() == 0 || resA.Sign() == 0 || resB.Sign() == 0 {
 		ctx.Revert("invalid swap")
 	}
 
 	// AMM: output = (amountIn * reserveB) / (reserveA + amountIn)
-	amtOut := (amtIn * resB) / (resA + amtIn)
+	amtOut := new(big.Int).Div(new(big.Int).Mul(amtIn, resB), new(big.Int).Add(resA, amtIn))
 
-	d.set(ctx, "reserveA", resA+amtIn)
-	d.set(ctx, "reserveB", resB-amtOut)
+	d.set(ctx, "reserveA", new(big.Int).Add(resA, amtIn))
+	d.set(ctx, "reserveB", new(big.Int).Sub(resB, amtOut))
 
 	ctx.Emit("SwapAtoB", map[string]interface{}{
 		"trader": ctx.CallerAddr,
-		"inA":    amtIn,
-		"outB":   amtOut,
+		"inA":    amtIn.String(),
+		"outB":   amtOut.String(),
 	})
 }
 
@@ -170,33 +179,34 @@ func (d *DEX) SwapAtoB(ctx *blockchaincomponent.Context, amountIn string) {
 // Swap tokenB → tokenA
 // ------------------------
 func (d *DEX) SwapBtoA(ctx *blockchaincomponent.Context, amountIn string) {
-	amtIn := parseUint(amountIn)
+	amtIn := parseBig(amountIn)
 
 	resA := d.bal(ctx, "reserveA")
 	resB := d.bal(ctx, "reserveB")
 
-	if amtIn == 0 || resA == 0 || resB == 0 {
+	if amtIn.Sign() == 0 || resA.Sign() == 0 || resB.Sign() == 0 {
 		ctx.Revert("invalid swap")
 	}
 
-	amtOut := (amtIn * resA) / (resB + amtIn)
+	amtOut := new(big.Int).Div(new(big.Int).Mul(amtIn, resA), new(big.Int).Add(resB, amtIn))
 
-	d.set(ctx, "reserveA", resA-amtOut)
-	d.set(ctx, "reserveB", resB+amtIn)
+	d.set(ctx, "reserveA", new(big.Int).Sub(resA, amtOut))
+	d.set(ctx, "reserveB", new(big.Int).Add(resB, amtIn))
 
 	ctx.Emit("SwapBtoA", map[string]interface{}{
 		"trader": ctx.CallerAddr,
-		"inB":    amtIn,
-		"outA":   amtOut,
+		"inB":    amtIn.String(),
+		"outA":   amtOut.String(),
 	})
 }
 
 // utility
-func min(a, b uint64) uint64 {
-	if a < b {
+func minBig(a, b *big.Int) *big.Int {
+	if a.Cmp(b) < 0 {
 		return a
 	}
 	return b
 }
 
-var Contract1 = &DEX{}
+// REQUIRED EXPORT
+var Contract = &DEX{}
