@@ -1,0 +1,6 @@
+=============== Feb 11, 2026 (+06) ===============
+02:00:46.477533 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+02:00:46.506935 db@open opening
+02:00:46.507333 version@stat F·[] S·0B[] Sc·[]
+02:00:46.525911 db@janitor F·2 G·0
+02:00:46.525964 db@open done T·19.001209ms

@@ -71,13 +71,14 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
 // const participantReward = toBigIntSafe(rb?.participant_rewards?.[tx.tx_hash] || 0);
 // const totalLP = rb ? Object.values(rb.liquidity_rewards || {}).reduce((a,b)=> a + toBigIntSafe(b), 0n) : 0n;
 // const totalReward = validatorReward + participantReward + totalLP;
-  const validatorReward = rb?.validator_reward || 0;
-
-  const participantReward = rb?.participant_rewards?.[tx.tx_hash] || 0;
-
+  const validatorReward = toBigIntSafe(rb?.validator_reward || 0);
+  const participantReward = toBigIntSafe(rb?.participant_rewards?.[tx.tx_hash] || 0);
   const totalLP = rb
-    ? Object.values(rb.liquidity_rewards || {}).reduce((a, b) => a + b, 0)
-    : 0;
+    ? Object.values(rb.liquidity_rewards || {}).reduce(
+        (a, b) => a + toBigIntSafe(b),
+        0n
+      )
+    : 0n;
 
   const totalReward = validatorReward + participantReward + totalLP;
 

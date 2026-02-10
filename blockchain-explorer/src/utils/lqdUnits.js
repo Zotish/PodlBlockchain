@@ -1,4 +1,4 @@
-//  ///* eslint-disable no-undef */
+/* global BigInt */
 // // import { formatUnits, parseUnits } from "ethers";
 
 // // export const LQD_DECIMALS = 8;
@@ -43,8 +43,35 @@ import { formatUnits, parseUnits } from "ethers";
 
 export const LQD_DECIMALS = 8;
 
-export const formatLQD = (v) =>
-  formatUnits(v?.toString() || "0", LQD_DECIMALS);
+// Accept number/string/bigint and safely convert to bigint base units
+export function toBigIntSafe(v, decimals = LQD_DECIMALS) {
+  if (v == null) return 0n;
+  if (typeof v === "bigint") return v;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return 0n;
+    if (Number.isInteger(v)) return BigInt(v);
+    return parseUnits(String(v), decimals);
+  }
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (s === "") return 0n;
+    if (s.includes(".")) {
+      return parseUnits(s, decimals);
+    }
+    if (/^\d+$/.test(s)) return BigInt(s);
+    try {
+      return BigInt(s);
+    } catch {
+      return 0n;
+    }
+  }
+  return 0n;
+}
 
-export const parseLQD = (v) =>
-  parseUnits(String(v ?? "0"), LQD_DECIMALS).toString();
+export function formatLQD(v, decimals = LQD_DECIMALS) {
+  return formatUnits(toBigIntSafe(v, decimals), decimals);
+}
+
+export function parseLQD(v, decimals = LQD_DECIMALS) {
+  return parseUnits(String(v ?? "0"), decimals).toString();
+}

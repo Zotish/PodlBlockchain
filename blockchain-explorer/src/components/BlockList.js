@@ -1,9 +1,7 @@
 
 
 
-/* global BigInt */
-import { formatUnits } from "ethers";
-import { formatLQD, parseLQD } from "../utils/lqdUnits";
+import { formatLQD, toBigIntSafe } from "../utils/lqdUnits";
 
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -56,11 +54,6 @@ const BlockList = ({ blocks: propBlocks, showTxHash = true }) => {
   if (loading) return <div>Loading blocks...</div>;
   if (error) return <div>Error: {error}</div>;
   if (!blocks || blocks.length === 0) return <div>No blocks found</div>;
-  const lpMap = blocks?.reward_breakdown?.liquidity_rewards || {};
-  const totalLPRewardBase = Object.values(lpMap).reduce(
-    (acc, v) => acc + BigInt(v || 0),
-    0n
-  );
   return (
     <div style={{ padding: '20px' }}>
       <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
@@ -84,17 +77,20 @@ const BlockList = ({ blocks: propBlocks, showTxHash = true }) => {
           {blocks.map((block) => {
             const rb = block.reward_breakdown || block.RewardBreakdown || null;
 
-            const validatorReward = rb?.validator_reward || 0;
+            const validatorReward = toBigIntSafe(rb?.validator_reward || 0);
             const lpTotal = rb
-              ? Object.values(rb.liquidity_rewards || {}).reduce((a, b) => a + b, 0)
-              : 0;
+              ? Object.values(rb.liquidity_rewards || {}).reduce(
+                  (a, b) => a + toBigIntSafe(b),
+                  0n
+                )
+              : 0n;
 
             const participantTotal = rb
               ? Object.values(rb.participant_rewards || rb.ParticipantRewards || {}).reduce(
-                  (a, b) => a + b,
-                  0
+                  (a, b) => a + toBigIntSafe(b),
+                  0n
                 )
-              : 0;
+              : 0n;
 
             const totalReward = validatorReward + lpTotal + participantTotal;
 
