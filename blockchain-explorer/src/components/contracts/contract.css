@@ -1,0 +1,11 @@
+.code-block {
+    background: #0f172a;
+    padding: 15px;
+    border-radius: 10px;
+    border: 1px solid #334155;
+    white-space: pre-wrap;
+    color: #93c5fd;
+    font-size: 14px;
+    overflow-x: auto;
+  }
+  
