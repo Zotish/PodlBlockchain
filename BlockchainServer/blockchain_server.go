@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
-	constantset "github.com/Zotish/DefenceProject/ConstantSet"
-	wallet "github.com/Zotish/DefenceProject/WalletComponent"
+	blockchaincomponent "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainComponent"
+	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
+	wallet "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/WalletComponent"
 	"github.com/gorilla/mux"
 )
 
@@ -2430,7 +2430,7 @@ func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Reques
 	// Use relative path "../.." → no spaces problem, points to project root.
 	// Depth is: projectRoot/_plugin_builds/build_XXXX/ → ../../ = projectRoot
 	goMod := fmt.Sprintf(
-		"module lqdcontract\n\ngo %s\n\nrequire github.com/Zotish/DefenceProject v0.0.0\n\nreplace github.com/Zotish/DefenceProject => ../..\n",
+		"module lqdcontract\n\ngo %s\n\nrequire github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain v0.0.0\n\nreplace github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain => ../..\n",
 		goVer,
 	)
 	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {

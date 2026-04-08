@@ -12,11 +12,11 @@ import (
 
 	"time"
 
-	aggregatorserver "github.com/Zotish/DefenceProject/AggregatorServer"
-	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
-	blockchainserver "github.com/Zotish/DefenceProject/BlockchainServer"
-	constantset "github.com/Zotish/DefenceProject/ConstantSet"
-	walletserver "github.com/Zotish/DefenceProject/WalletServer"
+	aggregatorserver "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/AggregatorServer"
+	blockchaincomponent "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainComponent"
+	blockchainserver "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainServer"
+	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
+	walletserver "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/WalletServer"
 )
 
 func init() {

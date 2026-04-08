@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	constantset "github.com/Zotish/DefenceProject/ConstantSet"
+	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
 )
 
 // DeployBridgeToken deploys the bridge token plugin and initializes metadata.
