@@ -10,7 +10,7 @@ import (
 
 	"strings"
 
-	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
+	blockchaincomponent "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainComponent"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/tyler-smith/go-bip32"
 	"github.com/tyler-smith/go-bip39"

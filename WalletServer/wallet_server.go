@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
-	constantset "github.com/Zotish/DefenceProject/ConstantSet"
-	wallet "github.com/Zotish/DefenceProject/WalletComponent"
+	blockchaincomponent "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainComponent"
+	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
+	wallet "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/WalletComponent"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
