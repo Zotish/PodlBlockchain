@@ -1,4 +1,4 @@
-module github.com/Zotish/DefenceProject
+module github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain
 
 go 1.24.2
 
