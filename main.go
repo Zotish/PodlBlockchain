@@ -32,9 +32,14 @@ func main() {
 	validatorAddress := chainCmdSet.String("validator", "", "Validator address to receive staking rewards")
 	remoteNode := chainCmdSet.String("remote_node", "", "Remote P2P node (host:port) to sync from")
 	minStake := chainCmdSet.Float64("min_stake", 100000, "Minimum stake amount to become a validator")
-	stakeAmount := chainCmdSet.Float64("stake_amount", 2000000, "Amount being staked by the validator")
+	stakeAmount := chainCmdSet.Float64("stake_amount", 2000000, "Amount being staked by the validator (legacy PoS)")
 	miningEnabled := chainCmdSet.Bool("mining", true, "Enable mining on this node")
 	dbPath := chainCmdSet.String("db_path", "", "Path to LevelDB for this node")
+	// True PosDL: register via DEX LP position instead of single-asset stake.
+	// When -dex_address is provided the node uses AddDEXValidator; otherwise
+	// it falls back to the legacy AddNewValidators (single-asset PoS).
+	dexAddress := chainCmdSet.String("dex_address", "", "DEX contract address for PosDL LP-based validation")
+	lpTokenAmount := chainCmdSet.String("lp_token_amount", "", "LP token amount (decimal) to lock for PosDL validation")
 
 	walletPort := walletCmdSet.Uint("port", 8080, "HTTP port to launch our wallet server")
 	blockchainNodeAddress := walletCmdSet.String("node_address", "http://127.0.0.1:5000", "Blockchain node address for the wallet gateway")
@@ -79,6 +84,9 @@ func main() {
 			go bcs.Start()
 			blockchaincomponent.StartBridgeRelayer(bc)
 
+			// Start peer health check (ping every 30s, remove unresponsive peers)
+			go bc.Network.StartHealthCheck()
+
 			if *remoteNode != "" {
 				host, portStr, err := net.SplitHostPort(*remoteNode)
 				if err != nil {
@@ -98,9 +106,19 @@ func main() {
 				log.Printf("Initial sync error: %v", err)
 			}
 
-			err := bc.AddNewValidators(*validatorAddress, *stakeAmount, time.Hour*24*30)
-			if err != nil {
-				log.Fatalf("Failed to add validator: %v", err)
+			// ── Validator Registration ──────────────────────────────────────────
+			// PosDL mode: lock DEX LP tokens (multi-asset, true liquidity stake).
+			// Legacy mode: stake single LQD amount (backward compatible).
+			if *dexAddress != "" && *lpTokenAmount != "" {
+				log.Printf("Registering PosDL validator via DEX LP: dex=%s lp=%s", *dexAddress, *lpTokenAmount)
+				if err := bc.AddDEXValidator(*validatorAddress, *dexAddress, *lpTokenAmount, time.Hour*24*30); err != nil {
+					log.Fatalf("Failed to add PosDL validator: %v", err)
+				}
+			} else {
+				err := bc.AddNewValidators(*validatorAddress, *stakeAmount, time.Hour*24*30)
+				if err != nil {
+					log.Fatalf("Failed to add legacy validator: %v", err)
+				}
 			}
 			bc.LocalValidator = *validatorAddress
 
@@ -123,9 +141,8 @@ func main() {
 				bc.UpdateMinStake(float64(len(bc.Transaction_pool)))
 
 				if err := bc.Network.SyncChain(); err != nil {
-					log.Printf("Sync error: %v", err)
-					time.Sleep(1 * time.Second)
-					continue
+					// Solo node: sync error is normal — don't block mining
+					log.Printf("Sync error (solo node): %v", err)
 				}
 				if time.Since(lastValidatorsSync) > 5*time.Second {
 					bc.Network.SyncAllValidators()
@@ -156,9 +173,9 @@ func main() {
 					bc.MonitorValidators()
 				}
 
-				interval := 1 * time.Second
+				interval := 100 * time.Millisecond
 				if len(bc.Transaction_pool) > 200 {
-					interval = 2 * time.Second
+					interval = 200 * time.Millisecond
 				}
 				time.Sleep(interval)
 			}

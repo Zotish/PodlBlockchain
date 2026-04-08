@@ -3,7 +3,9 @@ package blockchaincomponent
 import (
 	"fmt"
 	"log"
+	"math/big"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,8 +21,19 @@ const (
 )
 
 type Validator struct {
-	Address        string    `json:"address"`
-	LPStakeAmount  float64   `json:"lp_stake_amount"`
+	Address string `json:"address"`
+
+	// ── True Proof of Dynamic Liquidity ──────────────────────────────────────
+	// When DEXAddress is set the validator's power is derived from their locked
+	// LP position in that DEX pool (multi-asset liquidity), not from a single-
+	// asset stake.  This is the canonical PosDL mode.
+	DEXAddress    string `json:"dex_address,omitempty"`
+	LPTokenAmount string `json:"lp_token_amount,omitempty"` // decimal big-int string
+
+	// ── Legacy PoS (used when DEXAddress == "") ───────────────────────────────
+	LPStakeAmount float64 `json:"lp_stake_amount"`
+
+	// ── Common ───────────────────────────────────────────────────────────────
 	LockTime       time.Time `json:"lock_time"`
 	LiquidityPower float64   `json:"liquidity_power"`
 	PenaltyScore   float64   `json:"penalty_score"`
@@ -72,11 +85,126 @@ func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lo
 	return nil
 }
 
+// AddDEXValidator registers a validator using a DEX LP position — the True PosDL mode.
+// The validator must already hold LP tokens in the DEX pool at dexAddress.
+// lpTokenAmount is the amount of LP tokens (decimal string) to lock for validation.
+func (bc *Blockchain_struct) AddDEXValidator(address, dexAddress, lpTokenAmount string, lockDuration time.Duration) error {
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+
+	for _, v := range bc.Validators {
+		if v.Address == address {
+			log.Printf("PosDL validator %s already registered; continuing", address)
+			return nil
+		}
+	}
+	if dexAddress == "" {
+		return fmt.Errorf("dex_address is required for PosDL validator registration")
+	}
+	if lpTokenAmount == "" || lpTokenAmount == "0" {
+		return fmt.Errorf("lp_token_amount must be > 0")
+	}
+
+	newVal := &Validator{
+		Address:       address,
+		DEXAddress:    strings.ToLower(dexAddress),
+		LPTokenAmount: lpTokenAmount,
+		LockTime:      time.Now().Add(lockDuration),
+		LastActive:    time.Now(),
+	}
+	newVal.LiquidityPower = bc.getDEXLPPower(newVal)
+
+	bc.Validators = append(bc.Validators, newVal)
+	if bc.Network != nil {
+		go bc.Network.BroadcastValidator(newVal)
+	}
+
+	dbCopy := *bc
+	dbCopy.Mutex = sync.Mutex{}
+	if err := PutIntoDB(dbCopy); err != nil {
+		return fmt.Errorf("error saving PosDL validator: %v", err)
+	}
+	log.Printf("PosDL validator registered: %s DEX=%s lpAmount=%s", address, dexAddress, lpTokenAmount)
+	return nil
+}
+
+// UpdateLiquidityPower refreshes every validator's LiquidityPower.
+// PosDL validators query the DEX contract storage; legacy validators use
+// time-weighted single-asset stake (backward-compatible).
 func (bc *Blockchain_struct) UpdateLiquidityPower() {
 	for _, v := range bc.Validators {
-		remainingLock := time.Until(v.LockTime).Hours()
-		v.LiquidityPower = v.LPStakeAmount * (remainingLock / 8760)
+		if v.DEXAddress != "" {
+			// True PosDL: power comes from DEX LP position value
+			v.LiquidityPower = bc.getDEXLPPower(v)
+		} else {
+			// Legacy PoS: time-weighted single-asset stake
+			remainingLock := time.Until(v.LockTime).Hours()
+			if remainingLock < 0 {
+				remainingLock = 0
+			}
+			v.LiquidityPower = v.LPStakeAmount * (remainingLock / 8760)
+		}
 	}
+}
+
+// getDEXLPPower reads the validator's locked LP position directly from contract
+// storage and computes:
+//
+//	power = (lockedLP / totalLP) × (reserveA + reserveB) × lockMultiplier
+//
+// where lockMultiplier = 1 + remainingLockYears, so longer locks earn more power.
+func (bc *Blockchain_struct) getDEXLPPower(v *Validator) float64 {
+	if bc.ContractEngine == nil || v.DEXAddress == "" {
+		return 0
+	}
+
+	storage, err := bc.ContractEngine.DB.LoadAllStorage(strings.ToLower(v.DEXAddress))
+	if err != nil || len(storage) == 0 {
+		return 0
+	}
+
+	// Prefer the on-chain locked amount; fall back to the registered amount
+	// (useful during bootstrapping before the contract tx is mined).
+	valKey := "val_lp:" + strings.ToLower(v.Address)
+	lockedLPStr, ok := storage[valKey]
+	if !ok || lockedLPStr == "" || lockedLPStr == "0" {
+		lockedLPStr = v.LPTokenAmount
+	}
+
+	lockedLP := parseBigToFloat(lockedLPStr)
+	totalLP := parseBigToFloat(storage["totalLP"])
+	resA := parseBigToFloat(storage["reserveA"])
+	resB := parseBigToFloat(storage["reserveB"])
+
+	if totalLP <= 0 || lockedLP <= 0 {
+		return 0
+	}
+
+	// LP backing value
+	lpValue := lockedLP * (resA + resB) / totalLP
+
+	// Lock time multiplier: base 1.0 + remaining fraction of a year
+	remaining := time.Until(v.LockTime).Hours()
+	if remaining < 0 {
+		remaining = 0
+	}
+	lockMultiplier := 1.0 + (remaining / 8760.0)
+
+	return lpValue * lockMultiplier
+}
+
+// parseBigToFloat converts a decimal integer string (e.g. big.Int.String()) to float64.
+func parseBigToFloat(v string) float64 {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	z := new(big.Int)
+	if _, ok := z.SetString(v, 10); !ok {
+		return 0
+	}
+	f, _ := new(big.Float).SetInt(z).Float64()
+	return f
 }
 
 func (bc *Blockchain_struct) MonitorValidators() {

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -15,8 +16,8 @@ import (
 
 const (
 	GasLimitAdjustmentFactor = 1024
-	MinGasLimit              = 5000
-	MaxGasLimit              = 8000000
+	MinGasLimit              = 21000000  // minimum 1000 simple transfers per block
+	MaxGasLimit              = 500000000 // max = MaxBlockGas
 )
 
 type Block struct {
@@ -84,7 +85,7 @@ type VerifiedTx struct {
 	Err     error
 }
 
-const TxWorkers = 8
+const TxWorkers = 10
 
 // Worker uses ONLY in-memory accounts for speed.
 
@@ -166,6 +167,11 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	}
 
 	txPool := bc.Transaction_pool
+
+	// Sort by gas price descending (highest fee first) for block inclusion
+	sort.Slice(txPool, func(i, j int) bool {
+		return txPool[i].GasPrice > txPool[j].GasPrice
+	})
 
 	taskChan := make(chan *Transaction, len(txPool))
 	resultChan := make(chan VerifiedTx, len(txPool))

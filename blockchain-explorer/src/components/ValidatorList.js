@@ -15,8 +15,8 @@ const ValidatorList = ({ validators }) => {
           </div>
 
           <div className="validator-stats">
-            <span>Stake: {Number.isFinite(v.stake) ? v.stake.toFixed(2) : '0.00'}</span>
-            <span>Power: {Number.isFinite(v.liquidity_power) ? v.liquidity_power.toFixed(2) : '0.00'}</span>
+            <span>Stake: {Number.isFinite(Number(v.stake)) ? Number(v.stake).toFixed(2) : '0.00'} LQD</span>
+            <span>Power: {Number.isFinite(Number(v.liquidity_power)) ? Number(v.liquidity_power).toFixed(2) : '0.00'}</span>
             <span>Penalty: {Number.isFinite(v.penalty_score) ? (v.penalty_score * 100).toFixed(1) : '0.0'}%</span>
           </div>
 

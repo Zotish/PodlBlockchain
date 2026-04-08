@@ -3,7 +3,14 @@ export const API_BASE = "http://127.0.0.1:9000";
 export async function fetchJSON(path, options) {
   const res = await fetch(`${API_BASE}${path}`, options);
   if (!res.ok) {
-    throw new Error(`${path} -> ${res.status}`);
+    // Try to read the JSON error body for a friendly message
+    try {
+      const data = await res.json();
+      if (data && data.error) throw new Error(data.error);
+    } catch (inner) {
+      if (inner.message && inner.message !== 'Failed to fetch') throw inner;
+    }
+    throw new Error(`Request failed (${res.status})`);
   }
   return res.json();
 }

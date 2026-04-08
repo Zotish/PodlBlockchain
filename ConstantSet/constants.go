@@ -14,7 +14,7 @@ var (
 	GasContractCall         = 20000
 	BLOCKCHAIN_DB_PATH      = "5002/evodb"
 	BLOCKCHAIN_KEY          = "blockchain_key"
-	MaxBlockGas             = 40000000
+	MaxBlockGas             = 500000000
 	ChainID                 = uint(139)
 	MaxBlockSize            = 2 * 1024 * 1024
 	MaxTxPoolSize           = 100000000

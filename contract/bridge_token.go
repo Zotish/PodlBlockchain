@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 package main
 
 import (
@@ -21,6 +24,10 @@ func parseBig(s string) *big.Int {
 		return big.NewInt(0)
 	}
 	return z
+}
+
+func normAddr(addr string) string {
+	return strings.ToLower(strings.TrimSpace(addr))
 }
 
 func (c *BridgeToken) ensureInit(ctx *blockchaincomponent.Context) {
@@ -76,7 +83,7 @@ func (c *BridgeToken) TotalSupply(ctx *blockchaincomponent.Context) {
 
 func (c *BridgeToken) BalanceOf(ctx *blockchaincomponent.Context, addr string) {
 	c.ensureInit(ctx)
-	bal := ctx.Get("bal:" + addr)
+	bal := ctx.Get("bal:" + normAddr(addr))
 	if bal == "" {
 		bal = "0"
 	}
@@ -85,7 +92,8 @@ func (c *BridgeToken) BalanceOf(ctx *blockchaincomponent.Context, addr string) {
 
 func (c *BridgeToken) Transfer(ctx *blockchaincomponent.Context, to string, amount string) {
 	c.ensureInit(ctx)
-	from := ctx.CallerAddr
+	from := normAddr(ctx.CallerAddr)
+	to = normAddr(to)
 	fromKey := "bal:" + from
 	toKey := "bal:" + to
 	fromBal := parseBig(ctx.Get(fromKey))
@@ -102,12 +110,73 @@ func (c *BridgeToken) Transfer(ctx *blockchaincomponent.Context, to string, amou
 	})
 }
 
+// Approve allows a spender to transfer tokens on behalf of the caller.
+func (c *BridgeToken) Approve(ctx *blockchaincomponent.Context, spender string, amount string) {
+	c.ensureInit(ctx)
+	owner := normAddr(ctx.CallerAddr)
+	spender = normAddr(spender)
+	key := "allow:" + owner + ":" + spender
+	ctx.Set(key, amount)
+	ctx.Emit("Approve", map[string]any{
+		"owner":   owner,
+		"spender": spender,
+		"amount":  amount,
+	})
+}
+
+// Allowance returns approved amount for spender.
+func (c *BridgeToken) Allowance(ctx *blockchaincomponent.Context, owner string, spender string) {
+	c.ensureInit(ctx)
+	owner = normAddr(owner)
+	spender = normAddr(spender)
+	key := "allow:" + owner + ":" + spender
+	val := ctx.Get(key)
+	if val == "" {
+		val = "0"
+	}
+	ctx.Set("output", val)
+}
+
+// TransferFrom moves tokens from an owner using the caller as spender.
+func (c *BridgeToken) TransferFrom(ctx *blockchaincomponent.Context, from string, to string, amount string) {
+	c.ensureInit(ctx)
+	spender := normAddr(ctx.CallerAddr)
+	from = normAddr(from)
+	to = normAddr(to)
+	allowKey := "allow:" + from + ":" + spender
+	allow := parseBig(ctx.Get(allowKey))
+	amt := parseBig(amount)
+	if allow.Cmp(amt) < 0 {
+		ctx.Revert("allowance too low")
+	}
+
+	fromKey := "bal:" + from
+	toKey := "bal:" + to
+
+	fromBal := parseBig(ctx.Get(fromKey))
+	if fromBal.Cmp(amt) < 0 {
+		ctx.Revert("insufficient balance")
+	}
+
+	ctx.Set(fromKey, new(big.Int).Sub(fromBal, amt).String())
+	ctx.Set(toKey, new(big.Int).Add(parseBig(ctx.Get(toKey)), amt).String())
+	ctx.Set(allowKey, new(big.Int).Sub(allow, amt).String())
+
+	ctx.Emit("TransferFrom", map[string]any{
+		"spender": spender,
+		"from":    from,
+		"to":      to,
+		"amount":  amount,
+	})
+}
+
 // Mint can only be called by contract owner (bridge escrow).
 func (c *BridgeToken) Mint(ctx *blockchaincomponent.Context, to string, amount string) {
 	c.ensureInit(ctx)
-	if ctx.CallerAddr != ctx.OwnerAddr {
+	if normAddr(ctx.CallerAddr) != normAddr(ctx.OwnerAddr) {
 		ctx.Revert("only owner can mint")
 	}
+	to = normAddr(to)
 	toKey := "bal:" + to
 	amt := parseBig(amount)
 	total := parseBig(ctx.Get("totalSupply"))
@@ -122,7 +191,7 @@ func (c *BridgeToken) Mint(ctx *blockchaincomponent.Context, to string, amount s
 // Burn reduces caller balance and emits a bridge event with destination BSC address.
 func (c *BridgeToken) Burn(ctx *blockchaincomponent.Context, amount string, toBsc string) {
 	c.ensureInit(ctx)
-	from := ctx.CallerAddr
+	from := normAddr(ctx.CallerAddr)
 	fromKey := "bal:" + from
 	amt := parseBig(amount)
 	fromBal := parseBig(ctx.Get(fromKey))

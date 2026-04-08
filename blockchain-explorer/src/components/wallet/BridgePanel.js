@@ -19,9 +19,15 @@ const ERC20_ABI = [
 
 function toRawAmount(amountStr, decimals) {
   if (!amountStr) return '0';
-  const [whole, frac = ''] = amountStr.split('.');
+  const trimmed = amountStr.trim();
+  const [whole, frac = ''] = trimmed.split('.');
+  // Overflow guard: max 20 integer digits
+  if ((whole || '').replace(/^0+/, '').length > 20) return '0';
+  if (frac.length > 18) return '0';
   const cleanFrac = frac.padEnd(decimals, '0').slice(0, decimals);
   const raw = `${whole || '0'}${cleanFrac}`.replace(/^0+/, '') || '0';
+  // Final guard: max 39 digits (uint256 safe)
+  if (raw.length > 39) return '0';
   return raw;
 }
 
@@ -55,7 +61,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
 
   const selectedToken = useMemo(() => {
     if (useCustomToken) {
-      return { address: customToken, decimals: Number(customDecimals || 0), symbol: 'CUSTOM' };
+      return { address: customToken, decimals: Number(customDecimals ?? 18), symbol: 'CUSTOM' };
     }
     return DEFAULT_TOKENS.find((t) => t.address.toLowerCase() === tokenAddr.toLowerCase()) || DEFAULT_TOKENS[0];
   }, [useCustomToken, customToken, customDecimals, tokenAddr]);
@@ -123,9 +129,9 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
     (t) => t?.bsc_token?.toLowerCase() === selectedToken.address?.toLowerCase()
   );
   const lqdTokenAddr = mappedToken?.lqd_token || '';
-  const lqdTokenDecimals = Number(mappedToken?.decimals || selectedToken.decimals || 0);
+  const lqdTokenDecimals = Number(mappedToken?.decimals ?? selectedToken.decimals ?? 18);
   const burnTokenAddr = useCustomBurn ? customBurnToken : lqdTokenAddr;
-  const burnTokenDecimals = useCustomBurn ? Number(customBurnDecimals || 0) : lqdTokenDecimals;
+  const burnTokenDecimals = useCustomBurn ? Number(customBurnDecimals ?? 18) : lqdTokenDecimals;
 
   const submitBscLock = async () => {
     setLockStatus('');
@@ -142,7 +148,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
       setLockStatus('Token address required');
       return;
     }
-    const rawAmount = toRawAmount(amountLock, selectedToken.decimals || 0);
+    const rawAmount = toRawAmount(amountLock, selectedToken.decimals ?? 18);
     if (rawAmount === '0') {
       setLockStatus('Amount required');
       return;
@@ -177,7 +183,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
       // Auto-approve if allowance < amount
       try {
         const tokenContract = new Contract(normalizeHex(token), ERC20_ABI, signer);
-        const needAmount = parseUnits(String(amountLock), selectedToken.decimals || 0);
+        const needAmount = parseUnits(String(amountLock), selectedToken.decimals ?? 18);
         const allowance = await tokenContract.allowance(fromAddr, toAddr);
         if (allowance < needAmount) {
           setLockStatus('Approving token spend…');
@@ -304,7 +310,14 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
         <input value={toLqd} onChange={(e) => setToLqd(e.target.value)} placeholder={lqdAddress} />
 
         <label>Amount</label>
-        <input value={amountLock} onChange={(e) => setAmountLock(e.target.value)} />
+        <input
+          type="number"
+          min="0"
+          max="999999999999999999"
+          step="any"
+          value={amountLock}
+          onChange={(e) => setAmountLock(e.target.value)}
+        />
 
         <button className="btn-primary" onClick={submitBscLock}>Lock on BSC</button>
         {lockStatus && <p>{lockStatus}</p>}
@@ -342,7 +355,14 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
         )}
 
         <label>Amount</label>
-        <input value={amountBurn} onChange={(e) => setAmountBurn(e.target.value)} />
+        <input
+          type="number"
+          min="0"
+          max="999999999999999999"
+          step="any"
+          value={amountBurn}
+          onChange={(e) => setAmountBurn(e.target.value)}
+        />
 
         <button className="btn-primary" onClick={submitLqdBurn}>Burn on LQD</button>
         {burnStatus && <p>{burnStatus}</p>}

@@ -1,46 +1,220 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 
-const API = "http://127.0.0.1:9000";
+const NODE = "http://127.0.0.1:5000";
+const WALLET = "http://127.0.0.1:8080";
 
-export default function ContractCompiler({ onCompiled }) {
-  const [source, setSource] = useState("");
-  const [type, setType] = useState("solidity");
-  const [output, setOutput] = useState(null);
+const PLACEHOLDER = `package main
+
+// Example: simple token contract
+type MyToken struct{}
+
+func (t *MyToken) Name(ctx interface{}, args ...string) (interface{}, error) {
+    return map[string]string{"output": "MyToken"}, nil
+}
+
+func (t *MyToken) Symbol(ctx interface{}, args ...string) (interface{}, error) {
+    return map[string]string{"output": "MTK"}, nil
+}
+
+func (t *MyToken) TotalSupply(ctx interface{}, args ...string) (interface{}, error) {
+    return map[string]string{"output": "1000000000000000"}, nil
+}
+
+var Contract = &MyToken{}
+`;
+
+export default function ContractCompiler({ walletAddress, privateKey, onDeployed }) {
+  const [source, setSource]         = useState("");
+  const [type, setType]             = useState("goplugin");
+  const [status, setStatus]         = useState("");
+  const [isError, setIsError]       = useState(false);
+  const [compiling, setCompiling]   = useState(false);
+  const [deploying, setDeploying]   = useState(false);
+  const [compiledBlob, setCompiledBlob] = useState(null);
+  const [compiledType, setCompiledType] = useState("plugin");
+  const [compiledSize, setCompiledSize] = useState(0);
+  const [deployedAddr, setDeployedAddr] = useState("");
+
+  const show = (msg, err = false) => { setStatus(msg); setIsError(err); };
 
   const compile = async () => {
-    const res = await fetch(`${API}/contract/compile`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, source }),
-    });
+    if (!source.trim()) { show("⚠️ Enter source code first", true); return; }
+    setCompiling(true);
+    setCompiledBlob(null);
+    setDeployedAddr("");
+    show("");
 
-    const out = await res.json();
-    setOutput(out);
-    onCompiled && onCompiled(out);
+    try {
+      if (type === "goplugin") {
+        show("⏳ Building Go plugin… (may take ~10s)");
+        const res = await fetch(`${NODE}/contract/compile-plugin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source }),
+        });
+        const data = await res.json();
+        if (!data.success) {
+          show("❌ Compile error:\n\n" + (data.error || "unknown"), true);
+          return;
+        }
+        // Decode base64 → Blob
+        const binStr = atob(data.binary);
+        const bytes  = new Uint8Array(binStr.length);
+        for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "application/octet-stream" });
+        setCompiledBlob(blob);
+        setCompiledType("plugin");
+        setCompiledSize(data.size);
+        show(`✅ Go Plugin compiled! Size: ${(data.size / 1024).toFixed(1)} KB — Ready to deploy`);
+      } else {
+        const res = await fetch(`${NODE}/contract/compile`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type, source }),
+        });
+        const data = await res.json();
+        if (data.error) { show("❌ " + data.error, true); return; }
+        const raw = JSON.stringify(data);
+        const blob = new Blob([raw], { type: "application/octet-stream" });
+        setCompiledBlob(blob);
+        setCompiledType(type);
+        setCompiledSize(raw.length);
+        show(`✅ Compiled! Type: ${type} — Ready to deploy`);
+      }
+    } catch (e) {
+      show("❌ Error: " + e.message, true);
+    } finally {
+      setCompiling(false);
+    }
+  };
+
+  const deploy = async () => {
+    if (!compiledBlob) { show("⚠️ Compile first", true); return; }
+    if (!walletAddress) { show("⚠️ Wallet not connected", true); return; }
+    if (!privateKey)    { show("⚠️ Private key required", true); return; }
+
+    setDeploying(true);
+    show("📦 Deploying to chain…");
+    try {
+      const form = new FormData();
+      const fileName = compiledType === "plugin" ? "contract.so" : "contract.lqd";
+      form.append("contract_file", compiledBlob, fileName);
+      form.append("owner", walletAddress);
+      form.append("private_key", privateKey);
+      form.append("contract_type", compiledType);
+      form.append("gas", "500000");
+
+      const res = await fetch(`${NODE}/contract/deploy`, { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Deploy failed");
+
+      setDeployedAddr(data.address || "");
+      show(`🎉 Deployed!\nAddress: ${data.address}\nType: ${compiledType}`);
+      setCompiledBlob(null);
+      onDeployed && onDeployed(data.address);
+    } catch (e) {
+      show("❌ Deploy failed: " + e.message, true);
+    } finally {
+      setDeploying(false);
+    }
   };
 
   return (
     <div className="contract-panel">
       <h3>🛠 Smart Contract Compiler</h3>
 
-      <select value={type} onChange={(e) => setType(e.target.value)}>
-        <option value="solidity">Solidity</option>
-        <option value="gocode">Go-Contract</option>
-        <option value="dsl">DSL</option>
-      </select>
+      {/* Language selector */}
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 13, fontWeight: 600, display: "block", marginBottom: 4 }}>
+          Language
+        </label>
+        <select
+          value={type}
+          onChange={(e) => { setType(e.target.value); setCompiledBlob(null); show(""); }}
+          style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 14 }}
+        >
+          <option value="goplugin">⭐ Go Plugin (.so) — Full DApp Power</option>
+          <option value="gocode">Go Bytecode (limited opcodes)</option>
+          <option value="dsl">DSL Script (simple key-value)</option>
+          <option value="solidity">Solidity (needs solc installed)</option>
+        </select>
+      </div>
 
-      <textarea
-        className="code-input"
-        placeholder="Write your smart contract code here..."
-        value={source}
-        onChange={(e) => setSource(e.target.value)}
-      />
+      {/* Hint for goplugin */}
+      {type === "goplugin" && (
+        <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#1e40af", marginBottom: 10 }}>
+          💡 Write any Go contract — token, DEX, NFT, staking, etc. Must start with <code>package main</code> and export <code>var Contract</code>.
+        </div>
+      )}
 
-      <button onClick={compile} className="fn-btn">Compile</button>
+      {/* Code editor */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <label style={{ fontSize: 13, fontWeight: 600 }}>Source Code</label>
+          {!source && (
+            <button
+              onClick={() => setSource(PLACEHOLDER)}
+              style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer" }}
+            >
+              Load Example
+            </button>
+          )}
+        </div>
+        <textarea
+          value={source}
+          onChange={(e) => setSource(e.target.value)}
+          placeholder={type === "goplugin" ? PLACEHOLDER : "Paste your contract source code here..."}
+          rows={18}
+          style={{
+            width: "100%", fontFamily: "monospace", fontSize: 12,
+            padding: 12, borderRadius: 8, border: "1px solid #d1d5db",
+            background: "#1e1e2e", color: "#cdd6f4",
+            resize: "vertical", boxSizing: "border-box"
+          }}
+        />
+      </div>
 
-      {output && (
-        <div className="code-block">
-          <pre>{JSON.stringify(output, null, 2)}</pre>
+      {/* Compile button */}
+      <button
+        onClick={compile}
+        disabled={compiling}
+        className="btn-primary"
+        style={{ width: "100%", marginBottom: 8 }}
+      >
+        {compiling ? "⏳ Compiling…" : "⚙️ Compile"}
+      </button>
+
+      {/* Status */}
+      {status && (
+        <pre style={{
+          background: isError ? "#fef2f2" : "#f0fdf4",
+          border: `1px solid ${isError ? "#fecaca" : "#bbf7d0"}`,
+          color: isError ? "#b91c1c" : "#166534",
+          borderRadius: 8, padding: 12, fontSize: 12,
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+          marginBottom: compiledBlob ? 10 : 0
+        }}>
+          {status}
+        </pre>
+      )}
+
+      {/* Deploy button — shown after successful compile */}
+      {compiledBlob && !deployedAddr && (
+        <button
+          onClick={deploy}
+          disabled={deploying}
+          className="btn-primary"
+          style={{ width: "100%", background: "#16a34a", marginTop: 4 }}
+        >
+          {deploying ? "📦 Deploying…" : "🚀 Deploy to Chain"}
+        </button>
+      )}
+
+      {/* Deployed address */}
+      {deployedAddr && (
+        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: 12, marginTop: 8 }}>
+          <div style={{ fontWeight: 600, color: "#166534", marginBottom: 4 }}>🎉 Contract Live!</div>
+          <div style={{ fontFamily: "monospace", fontSize: 13, wordBreak: "break-all" }}>{deployedAddr}</div>
         </div>
       )}
     </div>

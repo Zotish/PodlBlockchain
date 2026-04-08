@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"encoding/base64"
+	"runtime"
 	"sync"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 type BlockchainServer struct {
 	Port          uint                                   `json:"port"`
 	BlockchainPtr *blockchaincomponent.Blockchain_struct `json:"blockchain_ptr"`
+	limiter       *rateLimiter
 }
 type TxEnvelope struct {
 	Transaction *blockchaincomponent.Transaction `json:"transaction"`
@@ -65,14 +68,13 @@ func NewBlockchainServer(port uint, blockchainPtr *blockchaincomponent.Blockchai
 	return &BlockchainServer{
 		Port:          port,
 		BlockchainPtr: blockchainPtr,
+		limiter:       newRateLimiter(100, 200),
 	}
 }
 
 func (b *BlockchainServer) getBlockchain(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodGet {
 		io.WriteString(w, b.BlockchainPtr.ToJsonChain())
 	} else {
@@ -83,9 +85,7 @@ func (b *BlockchainServer) getBlockchain(w http.ResponseWriter, r *http.Request)
 
 func (bcs *BlockchainServer) GetAccountNonce(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	address := mux.Vars(r)["address"]
 
@@ -113,9 +113,7 @@ func (bcs *BlockchainServer) GetAccountNonce(w http.ResponseWriter, r *http.Requ
 
 func (b *BlockchainServer) sendTransaction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodPost {
 
 		request, err := io.ReadAll(r.Body)
@@ -142,9 +140,7 @@ func (b *BlockchainServer) sendTransaction(w http.ResponseWriter, r *http.Reques
 
 func (b *BlockchainServer) sendTransactionBatch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -179,9 +175,7 @@ func (b *BlockchainServer) sendTransactionBatch(w http.ResponseWriter, r *http.R
 
 func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	// Handle preflight requests
 	if r.Method == "OPTIONS" {
@@ -209,18 +203,14 @@ func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) 
 }
 func (bcs *BlockchainServer) GetBlockchainHeight(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	height := uint64(len(bcs.BlockchainPtr.Blocks))
 	json.NewEncoder(w).Encode(map[string]uint64{"height": height})
 }
 
 func (bcs *BlockchainServer) GetBalance(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	address := r.URL.Query().Get("address")
 
@@ -260,9 +250,7 @@ func (bcs *BlockchainServer) GetBalance(w http.ResponseWriter, r *http.Request) 
 
 func (bcs *BlockchainServer) GetBridgeRequests(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -278,9 +266,7 @@ func (bcs *BlockchainServer) GetBridgeRequests(w http.ResponseWriter, r *http.Re
 
 func (bcs *BlockchainServer) GetBridgeTokens(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -296,9 +282,7 @@ func (bcs *BlockchainServer) GetBridgeTokens(w http.ResponseWriter, r *http.Requ
 // BridgeLockBsc registers a BSC lock request directly (fallback when RPC log scan misses).
 func (bcs *BlockchainServer) BridgeLockBsc(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -309,10 +293,10 @@ func (bcs *BlockchainServer) BridgeLockBsc(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		BscTx string `json:"bsc_tx"`
-		Token string `json:"token"`
-		From  string `json:"from"`
-		ToLqd string `json:"to_lqd"`
+		BscTx  string `json:"bsc_tx"`
+		Token  string `json:"token"`
+		From   string `json:"from"`
+		ToLqd  string `json:"to_lqd"`
 		Amount string `json:"amount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -341,9 +325,7 @@ func (bcs *BlockchainServer) BridgeLockBsc(w http.ResponseWriter, r *http.Reques
 // BridgeBurnLqd executes a burn on LQD and registers a release request for BSC.
 func (bcs *BlockchainServer) BridgeBurnLqd(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -354,9 +336,9 @@ func (bcs *BlockchainServer) BridgeBurnLqd(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		Token string `json:"token"`
-		From  string `json:"from"`
-		ToBsc string `json:"to_bsc"`
+		Token  string `json:"token"`
+		From   string `json:"from"`
+		ToBsc  string `json:"to_bsc"`
 		Amount string `json:"amount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -414,9 +396,7 @@ func (bcs *BlockchainServer) BridgeBurnLqd(w http.ResponseWriter, r *http.Reques
 
 func (bcs *BlockchainServer) Faucet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -449,9 +429,7 @@ func (bcs *BlockchainServer) Faucet(w http.ResponseWriter, r *http.Request) {
 
 func (bcs *BlockchainServer) ValidatorStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	address := mux.Vars(r)["address"]
 	stats := bcs.BlockchainPtr.GetValidatorStats(address)
 	if stats == nil {
@@ -463,9 +441,7 @@ func (bcs *BlockchainServer) ValidatorStats(w http.ResponseWriter, r *http.Reque
 
 func (bcs *BlockchainServer) NetworkStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -476,9 +452,7 @@ func (bcs *BlockchainServer) NetworkStats(w http.ResponseWriter, r *http.Request
 
 func (bcs *BlockchainServer) GetPeers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -516,9 +490,7 @@ func (bcs *BlockchainServer) GetPeers(w http.ResponseWriter, r *http.Request) {
 
 func (bcs *BlockchainServer) AddPeer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -558,9 +530,7 @@ func (bcs *BlockchainServer) Metrics(w http.ResponseWriter, r *http.Request) {
 
 func (b *BlockchainServer) GetBlock(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	vars := mux.Vars(r)
 	id := vars["id"]
 	if id == "" {
@@ -598,9 +568,7 @@ func (b *BlockchainServer) GetBlock(w http.ResponseWriter, r *http.Request) {
 
 func (bcs *BlockchainServer) GetValidators(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
@@ -626,9 +594,7 @@ func (bcs *BlockchainServer) GetValidators(w http.ResponseWriter, r *http.Reques
 func (bcs *BlockchainServer) GetRecentTransactions(w http.ResponseWriter, r *http.Request) {
 	// CORS
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -721,9 +687,7 @@ func max(a, b int) int {
 
 func (bcs *BlockchainServer) LiquidityLock(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
@@ -735,9 +699,9 @@ func (bcs *BlockchainServer) LiquidityLock(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		Address string `json:"address"`
+		Address string      `json:"address"`
 		Amount  amountField `json:"amount"`
-		Days    int    `json:"days"`
+		Days    int         `json:"days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -761,9 +725,7 @@ func (bcs *BlockchainServer) LiquidityLock(w http.ResponseWriter, r *http.Reques
 
 func (bcs *BlockchainServer) LiquidityUnlock(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
@@ -796,9 +758,7 @@ func (bcs *BlockchainServer) LiquidityUnlock(w http.ResponseWriter, r *http.Requ
 
 func (bcs *BlockchainServer) LiquidityView(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	address := r.URL.Query().Get("address")
 	if !wallet.ValidateAddress(address) {
@@ -819,9 +779,7 @@ func (bcs *BlockchainServer) LiquidityView(w http.ResponseWriter, r *http.Reques
 
 func (bcs *BlockchainServer) RewardsRecent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
 	hist := bcs.BlockchainPtr.RewardHistory
@@ -833,9 +791,7 @@ func (bcs *BlockchainServer) RewardsRecent(w http.ResponseWriter, r *http.Reques
 
 func (bcs *BlockchainServer) RewardsLatest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
@@ -860,9 +816,7 @@ func (bcs *BlockchainServer) RewardsLatest(w http.ResponseWriter, r *http.Reques
 
 func (bcs *BlockchainServer) ActiveValidatorsLatest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
@@ -935,9 +889,7 @@ func (bcs *BlockchainServer) ActiveValidatorsLatest(w http.ResponseWriter, r *ht
 
 func (bcs *BlockchainServer) SyncValidatorsAll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -977,9 +929,7 @@ func (bcs *BlockchainServer) SyncValidatorsAll(w http.ResponseWriter, r *http.Re
 
 func (bcs *BlockchainServer) ChainSummary(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	limit := parseLimit(r, 20)
 	out := bcs.buildChainSummary(limit)
@@ -988,9 +938,7 @@ func (bcs *BlockchainServer) ChainSummary(w http.ResponseWriter, r *http.Request
 
 func (bcs *BlockchainServer) GlobalChainSummary(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1120,9 +1068,7 @@ func parseNodes(nodesParam string) []string {
 
 func (bcs *BlockchainServer) JSONRPC(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1289,9 +1235,7 @@ func findTxByHash(bc *blockchaincomponent.Blockchain_struct, hash string) (*bloc
 
 func (bcs *BlockchainServer) AddValidatorFromPeer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1378,9 +1322,7 @@ func (bcs *BlockchainServer) AddValidator(w http.ResponseWriter, r *http.Request
 func (bcs *BlockchainServer) GetTransactionByHash(w http.ResponseWriter, r *http.Request) {
 	// CORS
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -1458,9 +1400,7 @@ func (bcs *BlockchainServer) GetTransactionByHash(w http.ResponseWriter, r *http
 }
 func (b *BlockchainServer) GetContractEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	address := r.URL.Query().Get("address")
 	ev := b.BlockchainPtr.ContractEngine.EventDB.GetEventsFromDB(address)
 	json.NewEncoder(w).Encode(ev)
@@ -1469,9 +1409,7 @@ func (b *BlockchainServer) GetContractEvents(w http.ResponseWriter, r *http.Requ
 func (bcs *BlockchainServer) GetAddressTransactions(w http.ResponseWriter, r *http.Request) {
 	// CORS headers
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -1650,9 +1588,7 @@ func txTouchesAddress(tx *blockchaincomponent.Transaction, addr string) bool {
 
 func (bcs *BlockchainServer) BlockTimeLatest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1698,9 +1634,7 @@ func (bcs *BlockchainServer) MineBlock(w http.ResponseWriter, r *http.Request) {
 
 func (bcs *BlockchainServer) ProvideLiquidity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -1713,9 +1647,9 @@ func (bcs *BlockchainServer) ProvideLiquidity(w http.ResponseWriter, r *http.Req
 	}
 
 	var req struct {
-		Address  string     `json:"address"`
+		Address  string      `json:"address"`
 		Amount   amountField `json:"amount"`
-		LockDays int64      `json:"lock_days"`
+		LockDays int64       `json:"lock_days"`
 	}
 
 	body, _ := io.ReadAll(r.Body)
@@ -1737,9 +1671,7 @@ func (bcs *BlockchainServer) ProvideLiquidity(w http.ResponseWriter, r *http.Req
 
 func (bcs *BlockchainServer) UnstakeLiquidity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -1769,9 +1701,7 @@ func (bcs *BlockchainServer) UnstakeLiquidity(w http.ResponseWriter, r *http.Req
 
 func (bcs *BlockchainServer) GetLiquidityInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	bcs.BlockchainPtr.ProcessUnstakeReleases()
 	address := r.URL.Query().Get("address")
 	lp := bcs.BlockchainPtr.LiquidityProviders[address]
@@ -1785,9 +1715,7 @@ func (bcs *BlockchainServer) GetLiquidityInfo(w http.ResponseWriter, r *http.Req
 
 func (bcs *BlockchainServer) GetAllLiquidityProviders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	out := []*blockchaincomponent.LiquidityProvider{}
 	for _, lp := range bcs.BlockchainPtr.LiquidityProviders {
@@ -1799,9 +1727,7 @@ func (bcs *BlockchainServer) GetAllLiquidityProviders(w http.ResponseWriter, r *
 
 func (bcs *BlockchainServer) GetPoolLiquidity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1829,9 +1755,7 @@ func (bcs *BlockchainServer) GetPoolLiquidity(w http.ResponseWriter, r *http.Req
 
 func (bcs *BlockchainServer) RebalancePools(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1846,9 +1770,7 @@ func (bcs *BlockchainServer) RebalancePools(w http.ResponseWriter, r *http.Reque
 // This is optional for developers when older contracts predate pool detection.
 func (bcs *BlockchainServer) SyncPools(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1881,9 +1803,7 @@ func (bcs *BlockchainServer) SyncPools(w http.ResponseWriter, r *http.Request) {
 // RegisterPoolManual allows devs to force a pool registration.
 func (bcs *BlockchainServer) RegisterPoolManual(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1912,9 +1832,7 @@ func (bcs *BlockchainServer) RegisterPoolManual(w http.ResponseWriter, r *http.R
 }
 func (b *BlockchainServer) GetContractStorage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	address := r.URL.Query().Get("address")
 
@@ -1924,9 +1842,7 @@ func (b *BlockchainServer) GetContractStorage(w http.ResponseWriter, r *http.Req
 
 func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -2099,7 +2015,7 @@ func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Reque
 		IsSystem:   false,
 		ChainID:    uint64(constantset.ChainID),
 		Gas:        uint64(constantset.ContractCallGas),
-		GasPrice:   1,
+		GasPrice:   0,
 		IsContract: true,
 	}
 	if req.Gas > 0 {
@@ -2125,6 +2041,7 @@ func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Reque
 	deployTx.TxHash = blockchaincomponent.CalculateTransactionHash(*deployTx)
 
 	bcs.BlockchainPtr.AddNewTxToTheTransaction_pool(deployTx)
+	deployTx.Status = constantset.StatusSuccess
 	bcs.BlockchainPtr.RecordRecentTx(deployTx)
 
 	// 8. Respond
@@ -2177,9 +2094,15 @@ func detectPoolFromABI(abi []byte) (bool, string) {
 
 func (bcs *BlockchainServer) ContractCall(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	type Req struct {
 		Address string   `json:"address"`
 		Caller  string   `json:"caller"`
@@ -2210,9 +2133,7 @@ func (bcs *BlockchainServer) ContractCall(w http.ResponseWriter, r *http.Request
 
 func (bcs *BlockchainServer) ContractState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	addr := r.URL.Query().Get("address")
 
 	rec, err := bcs.BlockchainPtr.ContractEngine.Registry.LoadContract(addr)
@@ -2226,9 +2147,7 @@ func (bcs *BlockchainServer) ContractState(w http.ResponseWriter, r *http.Reques
 
 func (bcs *BlockchainServer) ContractABI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	addr := r.URL.Query().Get("address")
 
 	abi, err := bcs.BlockchainPtr.ContractEngine.Registry.LoadABI(addr)
@@ -2242,9 +2161,7 @@ func (bcs *BlockchainServer) ContractABI(w http.ResponseWriter, r *http.Request)
 
 func (b *BlockchainServer) ContractList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -2272,9 +2189,7 @@ func (b *BlockchainServer) ContractList(w http.ResponseWriter, r *http.Request) 
 
 func (b *BlockchainServer) BaseFee(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -2295,9 +2210,7 @@ func GenerateContractAddress(owner string, nonce uint64) string {
 }
 func (b *BlockchainServer) GetContractCode(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 	address := r.URL.Query().Get("address")
 
 	reg := b.BlockchainPtr.ContractEngine.Registry
@@ -2357,9 +2270,7 @@ func (b *BlockchainServer) StreamContractEvents(w http.ResponseWriter, r *http.R
 }
 func (b *BlockchainServer) CompileContract(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setCORSHeaders(w, r)
 
 	var req struct {
 		Type   string `json:"type"`   // solidity | gocode | dsl
@@ -2468,13 +2379,315 @@ func (b *BlockchainServer) ContractCompile(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// CompileGoPlugin — compile Go source into a .so plugin on-the-fly and return base64 bytes
+func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var req struct {
+		Source string `json:"source"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, 400)
+		return
+	}
+	if strings.TrimSpace(req.Source) == "" {
+		http.Error(w, `{"error":"source code is empty"}`, 400)
+		return
+	}
+
+	// Compile INSIDE project root to avoid spaces-in-path issues with go.mod replace.
+	// We create a unique subdirectory _plugin_builds/<id>/ relative to project root.
+	projectRoot := findProjectRoot()
+	buildsDir := filepath.Join(projectRoot, "_plugin_builds")
+	_ = os.MkdirAll(buildsDir, 0755)
+
+	tmpDir, err := os.MkdirTemp(buildsDir, "build_*")
+	if err != nil {
+		http.Error(w, `{"error":"failed to create build dir"}`, 500)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Write contract source
+	srcPath := filepath.Join(tmpDir, "contract.go")
+	if err := os.WriteFile(srcPath, []byte(req.Source), 0644); err != nil {
+		http.Error(w, `{"error":"failed to write source file"}`, 500)
+		return
+	}
+
+	// Write minimal go.mod — extract version from runtime e.g. "go1.24.2" → "1.24.2"
+	goVer := strings.TrimPrefix(runtime.Version(), "go")
+	parts := strings.Split(goVer, ".")
+	if len(parts) >= 2 {
+		goVer = parts[0] + "." + parts[1]
+	}
+
+	// Use relative path "../.." → no spaces problem, points to project root.
+	// Depth is: projectRoot/_plugin_builds/build_XXXX/ → ../../ = projectRoot
+	goMod := fmt.Sprintf(
+		"module lqdcontract\n\ngo %s\n\nrequire github.com/Zotish/DefenceProject v0.0.0\n\nreplace github.com/Zotish/DefenceProject => ../..\n",
+		goVer,
+	)
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
+		http.Error(w, `{"error":"failed to write go.mod"}`, 500)
+		return
+	}
+
+	// Copy go.sum from project root so checksums are satisfied
+	if sumBytes, e2 := os.ReadFile(filepath.Join(projectRoot, "go.sum")); e2 == nil {
+		_ = os.WriteFile(filepath.Join(tmpDir, "go.sum"), sumBytes, 0644)
+	}
+
+	// Run: go build -buildmode=plugin -o contract.so .
+	outPath := filepath.Join(tmpDir, "contract.so")
+	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, ".")
+	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(),
+		"GONOSUMCHECK=*",
+		"GONOSUMDB=*",
+		"GOFLAGS=-mod=mod",
+	)
+	cmdOutput, err := cmd.CombinedOutput()
+	if err != nil {
+		// Return compiler error as JSON so frontend can display it
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   string(cmdOutput),
+		})
+		return
+	}
+
+	// Read compiled .so
+	soBytes, err := os.ReadFile(outPath)
+	if err != nil {
+		http.Error(w, `{"error":"failed to read compiled plugin"}`, 500)
+		return
+	}
+
+	// Return base64-encoded binary
+	encoded := base64.StdEncoding.EncodeToString(soBytes)
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"binary":  encoded,
+		"size":    len(soBytes),
+	})
+}
+
+// findProjectRoot walks up from the current executable's directory
+// looking for a go.mod file — returns that directory (= project root).
+func findProjectRoot() string {
+	// Try executable path first
+	exe, err := os.Executable()
+	if err == nil {
+		dir := filepath.Dir(exe)
+		for i := 0; i < 6; i++ {
+			if _, e := os.Stat(filepath.Join(dir, "go.mod")); e == nil {
+				return dir
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
+	// Fallback: current working directory walk
+	dir, _ := os.Getwd()
+	for i := 0; i < 6; i++ {
+		if _, e := os.Stat(filepath.Join(dir, "go.mod")); e == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return dir
+}
+
+// ── Rate Limiter ─────────────────────────────────────────────────────────────
+type rateLimiter struct {
+	mu      sync.Mutex
+	clients map[string]*clientLimit
+	rate    int // max requests per second
+	burst   int
+}
+
+type clientLimit struct {
+	tokens   float64
+	lastTime time.Time
+}
+
+func newRateLimiter(rate, burst int) *rateLimiter {
+	rl := &rateLimiter{
+		clients: make(map[string]*clientLimit),
+		rate:    rate,
+		burst:   burst,
+	}
+	// Clean up old clients every 5 minutes
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			rl.mu.Lock()
+			for ip, cl := range rl.clients {
+				if time.Since(cl.lastTime) > 10*time.Minute {
+					delete(rl.clients, ip)
+				}
+			}
+			rl.mu.Unlock()
+		}
+	}()
+	return rl
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	cl, ok := rl.clients[ip]
+	if !ok {
+		cl = &clientLimit{tokens: float64(rl.burst), lastTime: now}
+		rl.clients[ip] = cl
+	}
+	elapsed := now.Sub(cl.lastTime).Seconds()
+	cl.lastTime = now
+	cl.tokens += elapsed * float64(rl.rate)
+	if cl.tokens > float64(rl.burst) {
+		cl.tokens = float64(rl.burst)
+	}
+	if cl.tokens < 1 {
+		return false
+	}
+	cl.tokens--
+	return true
+}
+
+func (rl *rateLimiter) middleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := r.RemoteAddr
+		if idx := strings.LastIndex(ip, ":"); idx != -1 {
+			ip = ip[:idx]
+		}
+		if !rl.allow(ip) {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, `{"error":"rate limit exceeded, slow down"}`, http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// ── Health & Mempool ─────────────────────────────────────────────────────────
+
+// HealthCheck returns a JSON summary of node liveness.  Peers call this
+// endpoint periodically to decide whether a node should be kept in their peer
+// table.
+func (b *BlockchainServer) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	b.BlockchainPtr.Mutex.Lock()
+	height := len(b.BlockchainPtr.Blocks)
+	peers := len(b.BlockchainPtr.Network.Peers)
+	b.BlockchainPtr.Mutex.Unlock()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"height":    height,
+		"peers":     peers,
+		"version":   "1.0.0",
+		"timestamp": time.Now().Unix(),
+	})
+}
+
+// GetMempool returns all pending (unconfirmed) transactions so other nodes
+// can pull the mempool on start-up or after reconnecting.
+func (b *BlockchainServer) GetMempool(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	b.BlockchainPtr.Mutex.Lock()
+	txs := b.BlockchainPtr.Transaction_pool
+	b.BlockchainPtr.Mutex.Unlock()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"transactions": txs,
+		"count":        len(txs),
+	})
+}
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+var allowedOrigins = []string{
+	"http://localhost:3000",
+	"http://localhost:3001",
+	"http://127.0.0.1:3000",
+	"http://127.0.0.1:3001",
+	"chrome-extension://",
+}
+
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	allowed := false
+	for _, o := range allowedOrigins {
+		if strings.HasPrefix(origin, o) {
+			allowed = true
+			break
+		}
+	}
+	if allowed {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	} else if origin == "" {
+		// Direct API call (no browser) - allow
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+}
+
+// ── Input Validation ──────────────────────────────────────────────────────────
+
+// ValidateAddress checks that an address is a valid 0x-prefixed 20-byte hex string.
+func ValidateAddress(addr string) bool {
+	if !strings.HasPrefix(addr, "0x") || len(addr) != 42 {
+		return false
+	}
+	// Check all chars are valid hex
+	for _, c := range addr[2:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func validatePositiveAmount(amtStr string) bool {
+	if amtStr == "" || amtStr == "0" {
+		return false
+	}
+	n := new(big.Int)
+	if _, ok := n.SetString(amtStr, 10); !ok {
+		return false
+	}
+	return n.Sign() > 0
+}
+
+// ── Request Size Limit ────────────────────────────────────────────────────────
+func maxBytesMiddleware(next http.HandlerFunc, maxBytes int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		next(w, r)
+	}
+}
+
 func (b *BlockchainServer) Start() {
 	portStr := fmt.Sprintf("%d", b.Port)
 
+	const maxBodySize = 10 * 1024 * 1024 // 10 MB
+
 	http.HandleFunc("/", b.getBlockchain)
 	http.HandleFunc("/balance", b.GetBalance)
-	http.HandleFunc("/send_tx", b.sendTransaction)
-	http.HandleFunc("/send_tx/batch", b.sendTransactionBatch)
+	http.HandleFunc("/send_tx", b.limiter.middleware(maxBytesMiddleware(b.sendTransaction, maxBodySize)))
+	http.HandleFunc("/send_tx/batch", b.limiter.middleware(maxBytesMiddleware(b.sendTransactionBatch, maxBodySize)))
 	http.HandleFunc("/fetch_last_n_block", b.fetchNBlocks)
 	http.HandleFunc("/account/{address}/nonce", b.GetAccountNonce)
 	http.HandleFunc("/getheight", b.GetBlockchainHeight)
@@ -2482,12 +2695,14 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/network", b.NetworkStats)
 	http.HandleFunc("/peers", b.GetPeers)
 	http.HandleFunc("/peers/add", b.AddPeer)
-	http.HandleFunc("/faucet", b.Faucet)
+	http.HandleFunc("/health", b.HealthCheck)
+	http.HandleFunc("/mempool", b.GetMempool)
+	http.HandleFunc("/faucet", b.limiter.middleware(b.Faucet))
 	http.HandleFunc("/block/{id}", b.GetBlock)
 	http.HandleFunc("/validators", b.GetValidators)
 	http.HandleFunc("/transactions/recent", b.GetRecentTransactions)
-	http.HandleFunc("/liquidity/lock", b.LiquidityLock)
-	http.HandleFunc("/liquidity/unlock", b.LiquidityUnlock)
+	http.HandleFunc("/liquidity/lock", b.limiter.middleware(maxBytesMiddleware(b.LiquidityLock, maxBodySize)))
+	http.HandleFunc("/liquidity/unlock", b.limiter.middleware(maxBytesMiddleware(b.LiquidityUnlock, maxBodySize)))
 	http.HandleFunc("/liquidity", b.LiquidityView)
 	http.HandleFunc("/rewards/recent", b.RewardsRecent)
 	http.HandleFunc("/rewards/latest", b.RewardsLatest)
@@ -2495,35 +2710,36 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/validators/sync", b.SyncValidatorsAll)
 	http.HandleFunc("/chain/summary", b.ChainSummary)
 	http.HandleFunc("/chain/global", b.GlobalChainSummary)
-	http.HandleFunc("/rpc", b.JSONRPC)
+	http.HandleFunc("/rpc", b.limiter.middleware(maxBytesMiddleware(b.JSONRPC, maxBodySize)))
 	http.HandleFunc("/validator/new", b.AddValidatorFromPeer)
 	http.HandleFunc("/validator/add", b.AddValidator)
 	http.HandleFunc("/tx/", b.GetTransactionByHash)
-	http.HandleFunc("/contract/deploy", b.ContractDeploy)
-	http.HandleFunc("/contract/call", b.ContractCall)
+	http.HandleFunc("/contract/deploy", b.limiter.middleware(maxBytesMiddleware(b.ContractDeploy, maxBodySize)))
+	http.HandleFunc("/contract/call", b.limiter.middleware(maxBytesMiddleware(b.ContractCall, maxBodySize)))
 	http.HandleFunc("/contract/getAbi", b.ContractABI)
 	http.HandleFunc("/contract/con1", b.ContractState)
 	http.HandleFunc("/contract/con2", b.ContractEvents)
 	http.HandleFunc("/contract/list", b.ContractList)
-	http.HandleFunc("/contract/compile", b.CompileContract)
+	http.HandleFunc("/contract/compile", b.limiter.middleware(maxBytesMiddleware(b.CompileContract, maxBodySize)))
+	http.HandleFunc("/contract/compile-plugin", b.limiter.middleware(maxBytesMiddleware(b.CompileGoPlugin, maxBodySize)))
 	http.HandleFunc("/contract/storage", b.GetContractStorage)
 	http.HandleFunc("/contract/code", b.GetContractCode)
 	http.HandleFunc("/contract/events", b.ContractEvents)
 	http.HandleFunc("/basefee", b.BaseFee)
 	http.HandleFunc("/blocktime/latest", b.BlockTimeLatest)
 	http.HandleFunc("/address/{address}/transactions", b.GetAddressTransactions)
-	http.HandleFunc("/liquidity/provide", b.ProvideLiquidity)
-	http.HandleFunc("/liquidity/unstake", b.UnstakeLiquidity)
+	http.HandleFunc("/liquidity/provide", b.limiter.middleware(maxBytesMiddleware(b.ProvideLiquidity, maxBodySize)))
+	http.HandleFunc("/liquidity/unstake", b.limiter.middleware(maxBytesMiddleware(b.UnstakeLiquidity, maxBodySize)))
 	http.HandleFunc("/liquidity/info", b.GetLiquidityInfo)
 	http.HandleFunc("/liquidity/all", b.GetAllLiquidityProviders)
 	http.HandleFunc("/liquidity/pools", b.GetPoolLiquidity)
-	http.HandleFunc("/liquidity/rebalance", b.RebalancePools)
+	http.HandleFunc("/liquidity/rebalance", b.limiter.middleware(b.RebalancePools))
 	http.HandleFunc("/liquidity/pools/sync", b.SyncPools)
-	http.HandleFunc("/liquidity/pools/register", b.RegisterPoolManual)
+	http.HandleFunc("/liquidity/pools/register", b.limiter.middleware(maxBytesMiddleware(b.RegisterPoolManual, maxBodySize)))
 	http.HandleFunc("/bridge/requests", b.GetBridgeRequests)
 	http.HandleFunc("/bridge/tokens", b.GetBridgeTokens)
-	http.HandleFunc("/bridge/lock_bsc", b.BridgeLockBsc)
-	http.HandleFunc("/bridge/burn_lqd", b.BridgeBurnLqd)
+	http.HandleFunc("/bridge/lock_bsc", b.limiter.middleware(maxBytesMiddleware(b.BridgeLockBsc, maxBodySize)))
+	http.HandleFunc("/bridge/burn_lqd", b.limiter.middleware(maxBytesMiddleware(b.BridgeBurnLqd, maxBodySize)))
 
 	//http.HandleFunc("/contract/compile", b.CompileContract)
 

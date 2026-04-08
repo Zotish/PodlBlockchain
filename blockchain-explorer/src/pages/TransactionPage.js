@@ -2,6 +2,7 @@
 
 
 
+/* global BigInt */
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { formatLQD, toBigIntSafe } from '../utils/lqdUnits';
@@ -15,7 +16,7 @@ const TransactionPage = () => {
   const [error, setError] = useState('');
 
   // Fetch transaction details
-  const fetchTx = async () => {
+  const fetchTx = async (stopPolling) => {
     try {
       setError('');
       const data = await fetchJSON(`/tx/${hash}`);
@@ -29,28 +30,57 @@ const TransactionPage = () => {
         blockNumber: result.block_number,
         txIndex: result.tx_index,
       });
+      // Stop polling once confirmed
+      if (result.transaction?.status === 'success' || result.transaction?.status === 'succsess' || result.transaction?.status === 'failed') {
+        stopPolling && stopPolling();
+      }
     } catch (e) {
       setError(e.message);
       setTx(null);
       setMeta(null);
+      // Stop polling if tx is not found — no point retrying
+      if (e.message?.toLowerCase().includes('not found')) {
+        stopPolling && stopPolling();
+      }
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchTx();
-    const interval = setInterval(fetchTx, 1000);
-    return () => clearInterval(interval);
+    let intervalId;
+    const stop = () => clearInterval(intervalId);
+    fetchTx(stop);
+    intervalId = setInterval(() => fetchTx(stop), 5000);
+    return () => clearInterval(intervalId);
   }, [hash]);
 
   if (loading) return <div className="loading">Loading transaction…</div>;
 
   if (error || !tx) {
+    const notFound = !tx && (error?.toLowerCase().includes('not found') || error?.includes('404'));
     return (
       <div style={{ maxWidth: 960, margin: '0 auto', padding: 16 }}>
         <h2>Transaction Details</h2>
-        <p style={{ color: '#b91c1c' }}>{error || 'No transaction found.'}</p>
+        <div style={{
+          background: '#fef2f2', border: '1px solid #fecaca',
+          borderRadius: 10, padding: '16px 20px', marginBottom: 16
+        }}>
+          <div style={{ fontWeight: 600, color: '#b91c1c', marginBottom: 4 }}>
+            {notFound ? 'Transaction Not Found' : 'Error'}
+          </div>
+          <div style={{ fontSize: 13, color: '#7f1d1d', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+            {hash}
+          </div>
+          {notFound && (
+            <div style={{ fontSize: 13, color: '#6b7280', marginTop: 8 }}>
+              This transaction does not exist on the current chain. It may be from a previous chain run or the hash is incorrect.
+            </div>
+          )}
+          {!notFound && error && (
+            <div style={{ fontSize: 13, color: '#b91c1c', marginTop: 6 }}>{error}</div>
+          )}
+        </div>
         <Link to="/transactions" style={{ color: '#2563eb' }}>← Back to Transactions</Link>
       </div>
     );
@@ -59,7 +89,7 @@ const TransactionPage = () => {
   const value = (tx.value ?? 0);
 const gas = (tx.gas ?? tx.Gas ?? 0);
 const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
-  const fee = gas * gasPrice;
+  const fee = BigInt(gas || 0) * BigInt(gasPrice || 0);
   const timestamp = tx.timestamp ? new Date(tx.timestamp * 1000).toLocaleString() : '—';
 
   // ------------------------------
@@ -183,7 +213,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
         }}>
           <div><strong>Value:</strong> {formatLQD(value)} LQD</div>
           <div><strong>Fee:</strong> {formatLQD(fee)} LQD</div>
-          <div><strong>Gas Price:</strong> {formatLQD(gasPrice)}</div>
+          <div><strong>Gas Price:</strong> {String(gasPrice)}</div>
           <div><strong>Gas:</strong> {gas}</div>
           <div><strong>Nonce:</strong> {tx.nonce}</div>
           <div><strong>Chain ID:</strong> {tx.chain_id}</div>
