@@ -42,7 +42,7 @@ func NewTransaction(from string, to string, value *big.Int, data []byte) *Transa
 	newTx.GasPrice = 1
 	newTx.Value = CopyAmount(value)
 	newTx.Status = constantset.StatusPending
-	//newTx.Nonce = nonce + 1
+	newTx.Nonce = 0 // Nonce is set by caller or via GetAccountNonce before submission
 	newTx.ChainID = uint64(constantset.ChainID)
 	newTx.Timestamp = uint64(time.Now().Unix())
 	newTx.Sig = []byte{}

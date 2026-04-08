@@ -891,7 +891,13 @@ func NewExecutionPipeline(reg *ContractRegistry) *ExecutionPipeline {
 	return &ExecutionPipeline{Registry: reg}
 }
 
-func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas uint64) (*ContractExecutionResult, error) {
+func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas uint64) (res *ContractExecutionResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("contract panic: %v", r)
+			res = nil
+		}
+	}()
 
 	rec, err := ep.Registry.LoadContract(addr)
 	if err != nil {

@@ -243,6 +243,16 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		if blockchainStruct.BridgeTokenMap == nil {
 			blockchainStruct.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
 		}
+
+		// Start auto mempool cleanup
+		go func() {
+			ticker := time.NewTicker(2 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				blockchainStruct.CleanTransactionPool()
+			}
+		}()
+
 		return blockchainStruct
 	} else {
 		newBlockchain := new(Blockchain_struct)
@@ -291,6 +301,15 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 			return nil
 		}
 
+		// Start auto mempool cleanup
+		go func() {
+			ticker := time.NewTicker(2 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				newBlockchain.CleanTransactionPool()
+			}
+		}()
+
 		return newBlockchain
 	}
 }
@@ -325,11 +344,17 @@ func (bc *Blockchain_struct) CleanStaleTransactions() {
 
 	bc.Transaction_pool = filtered
 }
-func (bs *Blockchain_struct) ToJsonChain() string {
-
+func (bs *Blockchain_struct) ToJsonChain() (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("ToJsonChain recover:", r)
+			result = `{"error":"marshal failed"}`
+		}
+	}()
 	block, err := json.Marshal(bs)
 	if err != nil {
-		log.Println("error")
+		log.Println("ToJsonChain marshal error:", err)
+		return `{"error":"marshal failed"}`
 	}
 	return string(block)
 }
@@ -900,8 +925,8 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	// 2) Timestamp sanity (allow small future skew)
 	now := uint64(time.Now().Unix())
 	const maxPast = uint64(3600)  // 1h old -> reject
-	const maxFuture = uint64(600) // >5m in future -> reject
-	if tx.Timestamp+maxFuture < now || now-tx.Timestamp > maxPast {
+	const maxFuture = uint64(600) // >10m in future -> reject
+	if tx.Timestamp > now+maxFuture || now-tx.Timestamp > maxPast {
 		tx.Status = constantset.StatusFailed
 		log.Printf("TX %s failed: timestamp out of range (ts=%d now=%d)", tx.TxHash, tx.Timestamp, now)
 		return false
@@ -919,15 +944,13 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 		return false
 	}
 
-	// 4) Nonce policy
-	//expected := bc.GetAccountNonce(tx.From)
-	// If your node stores "current" nonce (last used), uncomment:
-	//expected++
-	// if tx.Nonce != expected {
-	// 	tx.Status = constantset.StatusFailed
-	// 	log.Printf("TX %s failed: bad nonce (got %d want %d)", tx.TxHash, tx.Nonce, expected)
-	// 	return false
-	// }
+	// 4) Nonce policy - proper nonce validation
+	expected := bc.GetAccountNonce(tx.From) + 1
+	if tx.Nonce != 0 && tx.Nonce != expected {
+		tx.Status = constantset.StatusFailed
+		log.Printf("TX %s failed: bad nonce (got %d want %d)", tx.TxHash, tx.Nonce, expected)
+		return false
+	}
 
 	// 5) Signature (v normalized in wallet: v∈{27,28})
 
@@ -981,6 +1004,17 @@ func (bc *Blockchain_struct) GetAccountNonce(address string) uint64 {
 
 	return highestNonce
 }
+func (bc *Blockchain_struct) GetConfirmations(txHash string) int {
+	for i, block := range bc.Blocks {
+		for _, tx := range block.Transactions {
+			if tx.TxHash == txHash {
+				return len(bc.Blocks) - i
+			}
+		}
+	}
+	return 0
+}
+
 func RemoveFailedTx(pool []*Transaction, tx *Transaction) []*Transaction {
 	for i, t := range pool {
 		if t.TxHash == tx.TxHash {

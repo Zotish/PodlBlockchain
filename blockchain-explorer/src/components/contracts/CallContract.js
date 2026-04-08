@@ -36,6 +36,7 @@
 
 // src/components/contract/CallContract.js
 import React, { useState } from "react";
+import { parseLQD, isAmountParam } from "../../utils/lqdUnits";
 
 const NODE = "http://127.0.0.1:9000";
 
@@ -68,7 +69,12 @@ export default function CallContract({ walletAddress, privateKey }) {
     setEvents([]);
   };
 
-  const handleInputChange = (key, value) => {
+  const handleInputChange = (key, value, inputType = "") => {
+    // Guard: numeric types — max 39 digits
+    if (inputType && (inputType.startsWith("uint") || inputType.startsWith("int"))) {
+      const digits = value.replace(/^-/, "").replace(/^0+/, "") || "0";
+      if (digits.length > 39) return; // silently block overflow
+    }
     setFnInputs((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -99,7 +105,12 @@ export default function CallContract({ walletAddress, privateKey }) {
 
     const args = (selectedFn.inputs || []).map((i, idx) => {
       const key = i.name || `${selectedFn.name}_${idx}`;
-      return fnInputs[key] || "";
+      const val = fnInputs[key] || "";
+      // If it's an amount-type uint field AND contains a decimal point → treat as human-readable
+      if (isAmountParam(i) && val.includes(".")) {
+        try { return parseLQD(val); } catch { return val; }
+      }
+      return val;
     });
     let res;
     if (readOnly) {
@@ -187,16 +198,16 @@ export default function CallContract({ walletAddress, privateKey }) {
 
           {selectedFn.inputs.map((input, idx) => {
             const key = input.name || `${selectedFn.name}_${idx}`;
+            const isNumeric = input.type && (input.type.startsWith("uint") || input.type.startsWith("int"));
             return (
-            <input
-              key={key}
-              type="text"
-              placeholder={`${input.name} (${input.type})`}
-              value={fnInputs[key] || ""}
-              onChange={(e) =>
-                handleInputChange(key, e.target.value)
-              }
-            />
+              <input
+                key={key}
+                type={isNumeric ? "number" : "text"}
+                placeholder={`${input.name} (${input.type})${isAmountParam(input) ? " — e.g. 1.5 or raw" : ""}`}
+                value={fnInputs[key] || ""}
+                min={isNumeric ? "0" : undefined}
+                onChange={(e) => handleInputChange(key, e.target.value, input.type)}
+              />
             );
           })}
 

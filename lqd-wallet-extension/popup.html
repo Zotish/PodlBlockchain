@@ -1,0 +1,285 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>LQD Wallet</title>
+  </head>
+  <body>
+    <div class="app">
+
+      <!-- ═══ ONBOARDING ═══ -->
+      <section id="onboarding" class="screen">
+        <div class="logo">⬡ LQD</div>
+        <p class="tagline">Proof of Dynamic Liquidity Wallet</p>
+        <button id="startCreate" class="primary big">Create New Wallet</button>
+        <button id="startImport" class="secondary big">Import Existing Wallet</button>
+      </section>
+
+      <!-- ═══ CREATE ═══ -->
+      <section id="create" class="screen hidden">
+        <header class="topbar">
+          <button id="backFromCreate" class="ghost">← Back</button>
+          <div class="brand">Create Wallet</div>
+        </header>
+        <div class="card">
+          <div class="card-title">Set a password</div>
+          <input id="createPass" type="password" placeholder="Password (min 8 chars)" />
+          <input id="createPass2" type="password" placeholder="Confirm password" />
+          <button id="createBtn" class="primary" style="margin-top:8px">Create Wallet</button>
+          <div id="createOut" class="mono" style="margin-top:8px"></div>
+        </div>
+      </section>
+
+      <!-- ═══ IMPORT ═══ -->
+      <section id="import" class="screen hidden">
+        <header class="topbar">
+          <button id="backFromImport" class="ghost">← Back</button>
+          <div class="brand">Import Wallet</div>
+        </header>
+        <div class="card">
+          <div class="card-title">Import by private key</div>
+          <input id="importAddress" placeholder="Address (0x...)" />
+          <input id="importKey" placeholder="Private key (hex)" type="password" />
+          <input id="importPass" type="password" placeholder="Set password" />
+          <button id="importBtn" class="primary" style="margin-top:8px">Import</button>
+          <div id="importOut" class="mono" style="margin-top:8px"></div>
+        </div>
+      </section>
+
+      <!-- ═══ MAIN ═══ -->
+      <section id="main" class="screen hidden">
+        <header class="topbar">
+          <div class="header-left">
+            <div class="brand">⬡ LQD</div>
+            <button id="networkBtn" class="chip network-chip">
+              <span id="networkName">Mainnet</span> ▾
+            </button>
+          </div>
+          <div class="top-actions">
+            <button id="openReceive" class="ghost" title="Receive">⬇</button>
+            <button id="openFullPage" class="ghost" title="Open Full View">⤢</button>
+            <button id="openSettings" class="ghost" title="Settings">⚙</button>
+          </div>
+        </header>
+
+        <!-- Account card -->
+        <div class="account-card">
+          <div class="account-row">
+            <div>
+              <div class="label">Account</div>
+              <div id="address" class="address-text mono"></div>
+            </div>
+            <div class="right-col">
+              <div id="status" class="status">Locked</div>
+              <button id="copyAddrBtn" class="ghost mini" title="Copy address">⧉</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Balance card -->
+        <div class="card balance-card">
+          <div class="balance-title">LQD Balance</div>
+          <div id="lqdBalance" class="balance">—</div>
+          <div id="balanceUsd" class="balance-sub"></div>
+          <div class="row" style="margin-top:10px">
+            <button id="openSend" class="primary">↑ Send</button>
+            <button id="refreshBalance" class="secondary">↻ Refresh</button>
+          </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="card" style="padding:8px">
+          <div class="subtabs">
+            <button id="tabTokens" class="active">Tokens</button>
+            <button id="tabActivity">Activity</button>
+            <button id="tabDapps">dApps</button>
+          </div>
+
+          <!-- Tokens pane -->
+          <div id="tokensPane">
+            <div class="row" style="margin-bottom:8px">
+              <input id="tokenAddress" placeholder="Token contract address" />
+              <button id="addToken" class="secondary">Add</button>
+            </div>
+            <div id="tokenList" class="list"></div>
+          </div>
+
+          <!-- Activity pane -->
+          <div id="activityPane" class="hidden">
+            <div id="activityList" class="list"></div>
+          </div>
+
+          <!-- dApps pane -->
+          <div id="dappsPane" class="hidden">
+            <div class="card-title">Pending Requests</div>
+            <div id="pendingList" class="list"></div>
+            <div class="card-title" style="margin-top:10px">Connected Sites</div>
+            <div id="allowList" class="list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ SETTINGS ═══ -->
+      <section id="settings" class="screen hidden">
+        <header class="topbar">
+          <button id="backFromSettings" class="ghost">← Back</button>
+          <div class="brand">Settings</div>
+          <button id="lockBtn" class="ghost danger-text">Lock</button>
+        </header>
+
+        <div class="card">
+          <div class="card-title">Network</div>
+          <div class="row">
+            <button id="openNetworks" class="secondary">Manage Networks</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Node Endpoints</div>
+          <div class="row">
+            <button id="presetLocal5000" class="chip">Port 5000</button>
+            <button id="presetLocal9000" class="chip">Port 9000</button>
+          </div>
+          <input id="nodeUrl" placeholder="Node URL" style="margin-top:6px" />
+          <input id="walletUrl" placeholder="Wallet URL" style="margin-top:6px" />
+          <button id="saveEndpoints" class="secondary" style="margin-top:8px">Save Endpoints</button>
+          <div id="endpointStatus" class="mono" style="margin-top:4px"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Security</div>
+          <input id="revealPass" type="password" placeholder="Enter password to reveal" />
+          <div class="row" style="margin-top:8px">
+            <button id="revealKey" class="secondary">Show Private Key</button>
+            <button id="revealMnemonic" class="secondary">Show Seed Phrase</button>
+          </div>
+          <div id="revealOut" class="mono secret-box"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Backup</div>
+          <button id="exportBackup" class="secondary">Export Encrypted Backup</button>
+        </div>
+      </section>
+
+      <!-- ═══ NETWORKS ═══ -->
+      <section id="networks" class="screen hidden">
+        <header class="topbar">
+          <button id="backFromNetworks" class="ghost">← Back</button>
+          <div class="brand">Networks</div>
+        </header>
+        <div id="networkList" class="list" style="margin-bottom:10px"></div>
+        <div class="card">
+          <div class="card-title">Add Custom Network</div>
+          <input id="netName" placeholder="Network Name" />
+          <input id="netChainId" placeholder="Chain ID (e.g. 0x8d)" style="margin-top:6px" />
+          <input id="netNodeUrl" placeholder="Node URL" style="margin-top:6px" />
+          <input id="netWalletUrl" placeholder="Wallet URL" style="margin-top:6px" />
+          <input id="netSymbol" placeholder="Symbol (e.g. LQD)" style="margin-top:6px" />
+          <button id="addNetworkBtn" class="primary" style="margin-top:8px">Add Network</button>
+          <div id="addNetworkStatus" class="mono" style="margin-top:4px"></div>
+        </div>
+      </section>
+
+      <!-- ═══ LOCKED ═══ -->
+      <section id="locked" class="screen hidden">
+        <div class="logo">⬡ LQD</div>
+        <div class="card">
+          <div class="card-title">Unlock Wallet</div>
+          <input id="unlockPass" type="password" placeholder="Enter password" />
+          <button id="unlockBtn" class="primary" style="margin-top:8px">Unlock</button>
+          <div id="unlockErr" class="error" style="margin-top:4px"></div>
+        </div>
+      </section>
+
+      <!-- ═══ MODALS ═══ -->
+
+      <!-- Send LQD modal -->
+      <div id="sendModal" class="modal hidden">
+        <div class="modal-card">
+          <div class="card-title">Send LQD</div>
+          <input id="sendTo" placeholder="Recipient address (0x...)" />
+          <div style="position:relative;margin-top:6px">
+            <input id="sendAmount" type="number" placeholder="Amount (LQD)" min="0" step="0.00000001" style="width:100%;padding-right:52px;box-sizing:border-box" />
+            <button id="sendMaxBtn" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);font-size:10px;padding:2px 7px;background:var(--accent,#7B61FF);color:#fff;border:none;border-radius:6px;cursor:pointer">MAX</button>
+          </div>
+          <div id="sendBalanceDisplay" class="mono fee-preview" style="color:var(--text2,#aaa)"></div>
+          <div id="sendFeePreview" class="mono fee-preview"></div>
+          <div class="row" style="margin-top:10px">
+            <button id="sendCancel" class="secondary">Cancel</button>
+            <button id="sendSubmit" class="primary">Preview →</button>
+          </div>
+          <div id="sendStatus" class="mono" style="margin-top:6px"></div>
+        </div>
+      </div>
+
+      <!-- Token send modal -->
+      <div id="tokenSendModal" class="modal hidden">
+        <div class="modal-card">
+          <div class="card-title">Send Token</div>
+          <div id="tokenSendName" class="mono" style="margin-bottom:6px"></div>
+          <input id="tokenSendTo" placeholder="Recipient address (0x...)" />
+          <input id="tokenSendAmount" type="number" placeholder="Amount" min="0" style="margin-top:6px" />
+          <div id="tokenSendFee" class="mono fee-preview"></div>
+          <div class="row" style="margin-top:10px">
+            <button id="tokenSendCancel" class="secondary">Cancel</button>
+            <button id="tokenSendSubmit" class="primary">Preview →</button>
+          </div>
+          <div id="tokenSendStatus" class="mono" style="margin-top:6px"></div>
+        </div>
+      </div>
+
+      <!-- Confirm transaction modal -->
+      <div id="confirmModal" class="modal hidden">
+        <div class="modal-card">
+          <div class="confirm-header">
+            <div class="card-title" id="confirmTitle">Confirm Transaction</div>
+            <div id="confirmOriginEl" class="origin-badge"></div>
+          </div>
+          <div id="confirmDetails" class="confirm-details"></div>
+          <div id="confirmFeeEl" class="mono fee-preview"></div>
+          <label class="remember-row">
+            <input type="checkbox" id="confirmRemember" />
+            <span>Remember this site</span>
+          </label>
+          <div class="row" style="margin-top:10px">
+            <button id="confirmRejectBtn" class="secondary">Reject</button>
+            <button id="confirmApproveBtn" class="primary">Approve</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Receive modal -->
+      <div id="receiveModal" class="modal hidden">
+        <div class="modal-card">
+          <div class="card-title">Receive LQD</div>
+          <div class="qr-placeholder">⬡</div>
+          <div id="receiveAddress" class="mono receive-address"></div>
+          <div class="row" style="margin-top:10px">
+            <button id="copyReceiveAddress" class="primary">Copy Address</button>
+            <button id="receiveClose" class="secondary">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Activity detail modal -->
+      <div id="activityModal" class="modal hidden">
+        <div class="modal-card">
+          <div class="card-title" id="activityTitle">Transaction</div>
+          <div id="activityDetails" class="mono" style="white-space:pre-wrap;font-size:11px"></div>
+          <div class="row" style="margin-top:10px">
+            <button id="activityCopy" class="secondary">Copy Hash</button>
+            <button id="activityClose" class="primary">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Global error bar -->
+      <div id="error" class="error-bar hidden"></div>
+
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

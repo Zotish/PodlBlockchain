@@ -147,43 +147,110 @@
 // export default SendTransaction;
 
 
+/* global BigInt */
 // src/components/SendTransaction.jsx
-import React, { useState } from 'react';
-import { parseLQD } from "./lqdUnits";
-import { parseUnits } from 'ethers';
+import React, { useState, useEffect } from 'react';
+import { parseLQD, formatLQD, LQD_DECIMALS } from "./lqdUnits";
+
+const NODE_URL = "http://127.0.0.1:9000";
 
 const SendTransaction = ({ fromAddress, privateKey }) => {
   const [toAddress, setToAddress] = useState('');
   const [amount, setAmount] = useState('');
-  const [gasPrice, setGasPrice] = useState('1');        // 🔥 changed (backend uses 1 by default)
+  const [gasPrice, setGasPrice] = useState('1');
   const [gasLimit, setGasLimit] = useState('21000');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // ── live balance for validation & MAX button
+  const [rawBalance, setRawBalance] = useState('0');
+
+  useEffect(() => {
+    if (!fromAddress) return;
+    fetch(`${NODE_URL}/balance?address=${encodeURIComponent(fromAddress)}`)
+      .then(r => r.json())
+      .then(d => setRawBalance(d.balance || d.Balance || "0"))
+      .catch(() => {});
+  }, [fromAddress]);
+
+  const humanBalance = formatLQD(rawBalance);  // e.g. "10000000"
+
+  const handleMax = () => {
+    // max = balance − fee;  keep a small buffer for gas
+    try {
+      const gp = BigInt(parseInt(gasPrice, 10) || 1);
+      const gl = BigInt(parseInt(gasLimit, 10) || 21000);
+      const fee = gp * gl;
+      const bal = BigInt(rawBalance || "0");
+      const maxRaw = bal > fee ? bal - fee : 0n;
+      // convert raw → human (divide by 10^8)
+      const intPart = maxRaw / BigInt(10 ** LQD_DECIMALS);
+      const fracPart = (maxRaw % BigInt(10 ** LQD_DECIMALS)).toString().padStart(LQD_DECIMALS, "0").replace(/0+$/, "");
+      setAmount(fracPart ? `${intPart}.${fracPart}` : String(intPart));
+    } catch { /* ignore */ }
+  };
+
+  // Input validation helper
+  const validateAmount = (val) => {
+    if (!val || val.trim() === "") return "Amount is required";
+    const parts = val.split(".");
+    if (parts.length > 2) return "Invalid amount format";
+    const intPart = parts[0].replace(/^-/, "");
+    if (intPart.length > 18) return "Amount too large (max 18 digits)";
+    if (parts[1] && parts[1].length > 8) return "Max 8 decimal places for LQD";
+    if (parseFloat(val) <= 0) return "Amount must be greater than 0";
+    // balance check (human units)
+    try {
+      const rawSend = BigInt(parseLQD(val));
+      const gp = BigInt(parseInt(gasPrice, 10) || 1);
+      const gl = BigInt(parseInt(gasLimit, 10) || 21000);
+      const fee = gp * gl;
+      const bal = BigInt(rawBalance || "0");
+      if (rawSend + fee > bal) {
+        return `Insufficient balance. You have ${humanBalance} LQD, sending ${val} LQD + fee.`;
+      }
+    } catch { /* ignore bigint errors */ }
+    return null;
+  };
 
   const handleSendTransaction = async (e) => {
     e.preventDefault();
-    
+
     if (!toAddress || !amount || !privateKey) {
       setError('Please fill all fields');
       return;
     }
 
-    // 🔥 ensure proper address format
     if (!toAddress.startsWith("0x")) {
       setError("Invalid address. Must start with 0x.");
       return;
+    }
+
+    const amountErr = validateAmount(amount);
+    if (amountErr) { setError(amountErr); return; }
+
+    const gasPriceNum = parseInt(gasPrice, 10);
+    const gasLimitNum = parseInt(gasLimit, 10);
+    if (!gasPriceNum || gasPriceNum < 1 || gasPriceNum > 10_000_000) {
+      setError("Gas price must be between 1 and 10,000,000"); return;
+    }
+    if (!gasLimitNum || gasLimitNum < 21000 || gasLimitNum > 10_000_000) {
+      setError("Gas limit must be between 21,000 and 10,000,000"); return;
     }
 
     setLoading(true);
     setError('');
     setSuccess('');
 
-
-
     try {
-
-      const rawValueStr = parseLQD(amount); // base units as string
+      let rawValueStr;
+      try {
+        rawValueStr = parseLQD(amount);
+      } catch (parseErr) {
+        setError("Invalid amount: " + parseErr.message);
+        setLoading(false);
+        return;
+      }
       console.log("amount=", amount, "rawValueStr=", rawValueStr);
       const transactionData = {
         from: fromAddress,
@@ -194,8 +261,7 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
         private_key: privateKey
       };
 
-      // 🔥 FIXED: correct backend endpoint
-      const response = await fetch('http://127.0.0.1:9000/wallet/send', {
+      const response = await fetch(`${NODE_URL}/wallet/send`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -215,6 +281,13 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
       setSuccess(`Transaction sent! Hash: ${hash}`);
       setToAddress('');
       setAmount('');
+      // refresh live balance display
+      setTimeout(() => {
+        fetch(`${NODE_URL}/balance?address=${encodeURIComponent(fromAddress)}`)
+          .then(r => r.json())
+          .then(d => setRawBalance(d.balance || d.Balance || "0"))
+          .catch(() => {});
+      }, 2000);
       
     } catch (err) {
       setError(err.message);
@@ -250,13 +323,24 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
         </div>
 
         <div className="form-group">
-          <label>Amount (LQD):</label>
+          <label style={{ display: "flex", justifyContent: "space-between" }}>
+            <span>Amount (LQD):</span>
+            <span style={{ fontWeight: "normal", opacity: 0.7 }}>
+              Balance: <strong>{humanBalance} LQD</strong>
+              <button
+                type="button"
+                onClick={handleMax}
+                style={{ marginLeft: 8, fontSize: 11, padding: "1px 6px", cursor: "pointer" }}
+              >MAX</button>
+            </span>
+          </label>
           <input
             type="number"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            placeholder="Enter amount"
+            placeholder="e.g. 100.5"
             min="0"
+            step="0.00000001"
             required
           />
         </div>
@@ -271,6 +355,7 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
                 value={gasPrice}
                 onChange={(e) => setGasPrice(e.target.value)}
                 min="1"
+                max="10000000"
               />
             </div>
             <div className="form-group">
@@ -280,6 +365,7 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
                 value={gasLimit}
                 onChange={(e) => setGasLimit(e.target.value)}
                 min="21000"
+                max="10000000"
               />
             </div>
           </div>

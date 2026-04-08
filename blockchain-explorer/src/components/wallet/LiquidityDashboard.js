@@ -1,4 +1,4 @@
-
+/* global BigInt */
 import React, { useEffect, useState } from "react";
 import './Wallet.css'
 import { formatLQD, parseLQD } from "./lqdUnits";
@@ -41,7 +41,7 @@ export default function LiquidityDashboard({ address }) {
     const body = {
       address,
       amount: rawValueStr,
-      lock_days: Number(lockDays),
+      lock_days: Math.max(1, parseInt(lockDays, 10) || 1),
     };
 
     try {
@@ -80,19 +80,27 @@ export default function LiquidityDashboard({ address }) {
     }
   };
 
-  // ---- Derived UI values (no structure change, just cosmetics) ----
+  // ---- Derived UI values — use BigInt for raw base-unit arithmetic ----
   const hasLP = !!lp;
   const isUnstaking = lp?.is_unstaking;
-  const totalStake = lp?.stake_amount || 0;
-  const unstakeAmount = lp?.unstake_amount || 0;
-  const released = lp?.released_so_far || 0;
-  const pendingRewards = lp?.pending_rewards || 0;
-  const totalRewards = lp?.total_rewards || 0;
+  // Keep as strings (raw base units) so BigInt math stays precise
+  const totalStake    = lp?.stake_amount    ?? "0";
+  const unstakeAmount = lp?.unstake_amount  ?? "0";
+  const released      = lp?.released_so_far ?? "0";
+  const pendingRewards = lp?.pending_rewards ?? "0";
+  const totalRewards   = lp?.total_rewards  ?? "0";
+
+  // Safe BigInt helpers
+  const toBig = (v) => { try { return BigInt(v || 0); } catch { return 0n; } };
+  const unstakeBig  = toBig(unstakeAmount);
+  const releasedBig = toBig(released);
 
   const unstakePercent =
-    isUnstaking && unstakeAmount > 0
-      ? Math.min(100, Math.round((released / unstakeAmount) * 100))
+    isUnstaking && unstakeBig > 0n
+      ? Math.min(100, Math.round(Number(releasedBig * 100n / unstakeBig)))
       : 0;
+
+  const remainingRaw = unstakeBig > releasedBig ? (unstakeBig - releasedBig).toString() : "0";
 
   const readableLockTime =
     lp?.lock_time ? new Date(lp.lock_time * 1000).toLocaleString() : "—";
@@ -181,7 +189,7 @@ export default function LiquidityDashboard({ address }) {
                 <div className="lp-progress-meta">
                   <span>{unstakePercent}% released</span>
                   <span>
-                    Remaining: {unstakeAmount > released ? unstakeAmount - released : 0} LQD
+                    Remaining: {formatLQD(remainingRaw)} LQD
                   </span>
                 </div>
 

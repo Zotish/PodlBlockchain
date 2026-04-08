@@ -47,16 +47,16 @@ const ValidatorPage = () => {
       <div className="validator-stats">
         <div className="stat-card">
           <h3>Stake Amount</h3>
-          <p>{Number(stake).toFixed(2)} LQD</p>
+          <p>{Number.isFinite(Number(stake)) ? Number(stake).toFixed(2) : '0.00'} LQD</p>
         </div>
         <div className="stat-card">
           <h3>Liquidity Power</h3>
-          <p>{Number(power).toFixed(2)}</p>
+          <p>{Number.isFinite(Number(power)) ? Number(power).toFixed(2) : '0.00'}</p>
         </div>
         <div className="stat-card">
           <h3>Penalty Score</h3>
           <p className={Number(penalty) > 0.5 ? 'penalty-high' : 'penalty-low'}>
-            {Number(penalty).toFixed(2)}
+            {Number.isFinite(Number(penalty)) ? (Number(penalty) * 100).toFixed(2) : '0.00'}%
           </p>
         </div>
       </div>

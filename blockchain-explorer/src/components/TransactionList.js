@@ -2,6 +2,7 @@
 
 
 
+/* global BigInt */
 import { formatLQD } from "../utils/lqdUnits";
 
 import React, { useMemo } from "react";
@@ -50,7 +51,7 @@ const TransactionList = ({ transactions = [], validators = [] }) => {
 
           const gas = tx.gas || tx.Gas || 0;
           const gasPrice = tx.gasPrice || tx.GasPrice || 0;
-          const fee = gas * gasPrice;
+          const fee = BigInt(gas || 0) * BigInt(gasPrice || 0);
 
           return (
             <div

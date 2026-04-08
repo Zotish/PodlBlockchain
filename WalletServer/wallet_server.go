@@ -39,7 +39,7 @@ func NewWalletServer(port uint64, blockchainNodeAddress string) *WalletServer {
 
 func (ws *WalletServer) CreateNewWallet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -136,7 +136,7 @@ func (ws *WalletServer) ImportFromMnemonic(w http.ResponseWriter, r *http.Reques
 
 func (ws *WalletServer) ImportFromPrivateKey(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -175,7 +175,7 @@ func (ws *WalletServer) ImportFromPrivateKey(w http.ResponseWriter, r *http.Requ
 
 func (ws *WalletServer) GetBalance(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -216,7 +216,7 @@ func (ws *WalletServer) GetBalance(w http.ResponseWriter, r *http.Request) {
 
 func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -416,7 +416,7 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 
 func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -503,7 +503,7 @@ func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
 
 func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -582,7 +582,7 @@ func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
 // BridgeLockBscToken locks a BEP20 token on BSC to mint on LQD.
 func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -705,7 +705,7 @@ func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Reques
 // BridgeBscLockTxData prepares calldata for BSC lock() so frontend can send via injected wallet.
 func (ws *WalletServer) BridgeBscLockTxData(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -778,7 +778,7 @@ func (ws *WalletServer) BridgeBscLockTxData(w http.ResponseWriter, r *http.Reque
 // BridgeBurnLqdToken burns a LQD bridge token to release on BSC.
 func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -835,7 +835,7 @@ func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Reques
 
 func (ws *WalletServer) SendTransactionBatch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -982,7 +982,7 @@ func (ws *WalletServer) SendTransactionBatch(w http.ResponseWriter, r *http.Requ
 
 func (ws *WalletServer) ContractTemplate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	if r.Method == http.MethodOptions {
@@ -1090,7 +1090,7 @@ func (ws *WalletServer) ContractTemplate(w http.ResponseWriter, r *http.Request)
 
 func (ws *WalletServer) GetTokenBalance(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -1146,21 +1146,47 @@ func (ws *WalletServer) GetTokenBalance(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(result)
 }
 
+// apiKeyMiddleware checks X-API-Key header against LQD_API_KEY env var.
+// If LQD_API_KEY is not set, all requests are allowed (dev mode).
+func apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// CORS preflight always passes
+		if r.Method == http.MethodOptions {
+			next(w, r)
+			return
+		}
+		requiredKey := os.Getenv("LQD_API_KEY")
+		if requiredKey != "" {
+			clientKey := r.Header.Get("X-API-Key")
+			if clientKey == "" {
+				clientKey = r.URL.Query().Get("api_key")
+			}
+			if clientKey != requiredKey {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(`{"error":"invalid or missing API key"}`))
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
 func (ws *WalletServer) Start() {
 	portStr := fmt.Sprintf("%d", ws.Port)
-	http.HandleFunc("/wallet/new", ws.CreateNewWallet)
-	http.HandleFunc("/wallet/import/mnemonic", ws.ImportFromMnemonic)
-	http.HandleFunc("/wallet/import/private-key", ws.ImportFromPrivateKey)
-	http.HandleFunc("/wallet/balance", ws.GetBalance)
-	http.HandleFunc("/wallet/send", ws.SendTransaction)
-	http.HandleFunc("/wallet/send_batch", ws.SendTransactionBatch)
-	http.HandleFunc("/wallet/contract-template", ws.ContractTemplate)
-	http.HandleFunc("/wallet/bridge/lock", ws.BridgeLock)
-	http.HandleFunc("/wallet/bridge/burn", ws.BridgeBurn)
-	http.HandleFunc("/wallet/bridge/lock_bsc_token", ws.BridgeLockBscToken)
-	http.HandleFunc("/wallet/bridge/burn_lqd_token", ws.BridgeBurnLqdToken)
-	http.HandleFunc("/wallet/bridge/bsc_lock_tx", ws.BridgeBscLockTxData)
-	http.HandleFunc("/wallet/token-balance", ws.GetTokenBalance)
+	http.HandleFunc("/wallet/new", apiKeyMiddleware(ws.CreateNewWallet))
+	http.HandleFunc("/wallet/import/mnemonic", apiKeyMiddleware(ws.ImportFromMnemonic))
+	http.HandleFunc("/wallet/import/private-key", apiKeyMiddleware(ws.ImportFromPrivateKey))
+	http.HandleFunc("/wallet/balance", apiKeyMiddleware(ws.GetBalance))
+	http.HandleFunc("/wallet/send", apiKeyMiddleware(ws.SendTransaction))
+	http.HandleFunc("/wallet/send_batch", apiKeyMiddleware(ws.SendTransactionBatch))
+	http.HandleFunc("/wallet/contract-template", apiKeyMiddleware(ws.ContractTemplate))
+	http.HandleFunc("/wallet/bridge/lock", apiKeyMiddleware(ws.BridgeLock))
+	http.HandleFunc("/wallet/bridge/burn", apiKeyMiddleware(ws.BridgeBurn))
+	http.HandleFunc("/wallet/bridge/lock_bsc_token", apiKeyMiddleware(ws.BridgeLockBscToken))
+	http.HandleFunc("/wallet/bridge/burn_lqd_token", apiKeyMiddleware(ws.BridgeBurnLqdToken))
+	http.HandleFunc("/wallet/bridge/bsc_lock_tx", apiKeyMiddleware(ws.BridgeBscLockTxData))
+	http.HandleFunc("/wallet/token-balance", apiKeyMiddleware(ws.GetTokenBalance))
 
 	log.Printf("Starting wallet server on port %d\n", ws.Port)
 	log.Printf("Connected to blockchain node at %s\n", ws.BlockchainNodeAddress)

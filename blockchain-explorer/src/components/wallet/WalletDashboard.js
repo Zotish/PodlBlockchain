@@ -97,6 +97,7 @@ const WalletDashboard = () => {
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState('');
   const navigate = useNavigate();
+  const sentConnectRef = useRef(false);
 
   // --------------------------------------------------
   // 🔐 AUTO-LOCK HOOKS (always at top, non-conditional)
@@ -117,6 +118,7 @@ const WalletDashboard = () => {
     setUnlockPassword('');
     setUnlockError('');
     localStorage.removeItem(STORAGE_KEY);
+    sentConnectRef.current = false;
   }, []);
 
   const resetInactivityTimer = useCallback(() => {
@@ -229,6 +231,28 @@ const WalletDashboard = () => {
     if (walletAddress) navigate(`/address/${walletAddress}`);
   };
 
+  const sendWalletToOpener = useCallback(() => {
+    if (!walletAddress || !privateKey) return;
+    const payload = {
+      type: 'LQD_WALLET_CONNECT',
+      address: walletAddress,
+      privateKey: privateKey,
+    };
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage(payload, '*');
+    }
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(payload, '*');
+    }
+  }, [walletAddress, privateKey]);
+
+  useEffect(() => {
+    if (!isWalletLoaded) return;
+    if (sentConnectRef.current) return;
+    sendWalletToOpener();
+    sentConnectRef.current = true;
+  }, [isWalletLoaded, sendWalletToOpener]);
+
   // --------------------------------------------------
   // 1) No saved wallet → Show create/import page
   // --------------------------------------------------
@@ -300,9 +324,14 @@ const WalletDashboard = () => {
           </div>
         </div>
 
-        <button className="btn-disconnect" onClick={disconnectWallet}>
-          Disconnect
-        </button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button className="btn-secondary" onClick={sendWalletToOpener}>
+            Connect to DEX
+          </button>
+          <button className="btn-disconnect" onClick={disconnectWallet}>
+            Disconnect
+          </button>
+        </div>
       </div>
 
       <div className="wallet-tabs">
@@ -736,5 +765,3 @@ export default WalletDashboard;
 // };
 
 // export default WalletDashboard;
-
-

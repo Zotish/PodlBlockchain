@@ -21,12 +21,16 @@ const TokenCard = ({ token, address, privateKey, onRefresh, onRemove }) => {
     if (!amountStr) return null;
     const trimmed = amountStr.trim();
     if (trimmed === "") return null;
+
+    // Overflow guard: max 20 integer digits + decimals
     const [intPartRaw, fracPartRaw] = trimmed.split(".");
+    if ((intPartRaw || "").replace(/^0+/, "").length > 20) return null;
+    if ((fracPartRaw || "").length > 18) return null;
+
     const intPart = (intPartRaw || "0").replace(/^0+/, "") || "0";
     let fracPart = fracPartRaw || "";
 
     if (fracPart.length > decimals) {
-      // cut extra precision instead of erroring
       fracPart = fracPart.slice(0, decimals);
     } else {
       fracPart = fracPart.padEnd(decimals, "0");
@@ -34,6 +38,8 @@ const TokenCard = ({ token, address, privateKey, onRefresh, onRemove }) => {
 
     const full = (intPart + fracPart).replace(/^0+/, "") || "0";
     if (!/^[0-9]+$/.test(full)) return null;
+    // Final length guard: max 39 digits (safe for uint256)
+    if (full.length > 39) return null;
     return full;
   };
 
@@ -294,8 +300,33 @@ const WalletBalance = ({ address, privateKey }) => {
     return (
       names.includes("symbol") &&
       names.includes("decimals") &&
-      names.includes("balanceof")
+      names.includes("balanceof") &&
+      names.includes("transfer")
     );
+  };
+
+  const detectDappType = (abi) => {
+    const names = Array.isArray(abi)
+      ? abi.map((fn) => (fn?.name || "").toLowerCase()).filter(Boolean)
+      : [];
+    const has = (k) => names.includes(k);
+    if (has("addliquidity") || has("removeliquidity") || has("swapatob") || has("swapbtoa")) {
+      return { name: "DEX", symbol: "DEX", type: "dex" };
+    }
+    if (has("tokenuri") || has("ownerof") || has("safetransferfrom")) {
+      return { name: "NFT", symbol: "NFT", type: "nft" };
+    }
+    if (has("borrow") || has("repay") || has("deposit") || has("withdraw") || has("interest")) {
+      return { name: "Lending", symbol: "LEND", type: "lending" };
+    }
+    if (has("proposal") || has("vote") || has("delegate")) {
+      return { name: "DAO", symbol: "DAO", type: "dao" };
+    }
+    return null;
+  };
+
+  const classifyDapp = (abi) => {
+    return detectDappType(abi) || { name: "Dapp Contract", symbol: "DAPP", type: "dapp" };
   };
 
   const fetchTokenMetadata = async (contractAddr) => {
@@ -367,7 +398,18 @@ const WalletBalance = ({ address, privateKey }) => {
       let newToken = null;
       try {
         const abi = await fetchContractABI(contractAddr);
-        if (isTokenABI(abi)) {
+        const dapp = detectDappType(abi);
+        if (dapp) {
+          newToken = {
+            contract: contractAddr,
+            name: dapp.name,
+            symbol: dapp.symbol,
+            decimals: 0,
+            balanceRaw: "0",
+            balanceFormatted: "0",
+            type: dapp.type,
+          };
+        } else if (isTokenABI(abi)) {
           const meta = await fetchTokenMetadata(contractAddr);
           const bal = await fetchTokenBalance(
             contractAddr,
@@ -384,14 +426,15 @@ const WalletBalance = ({ address, privateKey }) => {
             type: "lqd20",
           };
         } else {
+          const d = classifyDapp(abi);
           newToken = {
             contract: contractAddr,
-            name: "Dapp Contract",
-            symbol: "DAPP",
+            name: d.name,
+            symbol: d.symbol,
             decimals: 0,
             balanceRaw: "0",
             balanceFormatted: "0",
-            type: "dapp",
+            type: d.type,
           };
         }
       } catch (err) {
@@ -475,7 +518,7 @@ const WalletBalance = ({ address, privateKey }) => {
 
       await fetchBalance();
 
-      alert(`Received ${result.credited || 0} LQD from faucet!`);
+      alert(`Received ${formatLQD(result.credited || "0")} LQD from faucet!`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -579,7 +622,24 @@ const WalletBalance = ({ address, privateKey }) => {
 
         try {
           const abi = await fetchContractABI(contractAddr);
-          if (isTokenABI(abi)) {
+          const dapp = detectDappType(abi);
+          if (dapp) {
+            const dappToken = {
+              contract: contractAddr,
+              name: dapp.name,
+              symbol: dapp.symbol,
+              decimals: 0,
+              balanceRaw: "0",
+              balanceFormatted: "0",
+              type: dapp.type,
+            };
+            added += 1;
+            setTokens((prev) => {
+              const updated = [...prev, dappToken];
+              saveTokensForAddress(address, updated);
+              return updated;
+            });
+          } else if (isTokenABI(abi)) {
             const meta = await fetchTokenMetadata(contractAddr);
             const bal = await fetchTokenBalance(
               contractAddr,
@@ -602,14 +662,15 @@ const WalletBalance = ({ address, privateKey }) => {
               return updated;
             });
           } else {
+            const d = classifyDapp(abi);
             const dappToken = {
               contract: contractAddr,
-              name: "Dapp Contract",
-              symbol: "DAPP",
+              name: d.name,
+              symbol: d.symbol,
               decimals: 0,
               balanceRaw: "0",
               balanceFormatted: "0",
-              type: "dapp",
+              type: d.type,
             };
             added += 1;
             setTokens((prev) => {
@@ -630,11 +691,13 @@ const WalletBalance = ({ address, privateKey }) => {
     }
   };
 
-  // Fetch LQD + periodically refresh everything
+  // Fetch LQD on mount/address change, then auto-refresh every 5 seconds
   useEffect(() => {
     fetchBalance();
+    const interval = setInterval(fetchBalance, 5000);
+    return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [address, tokens.length]);
+  }, [address]);
 
   if (loading && balance === "0")
     return <div className="loading">Loading balance...</div>;

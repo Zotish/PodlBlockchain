@@ -1018,9 +1018,11 @@ func (ns *NetworkService) SyncChain() error {
 
 	for _, peer := range ns.Peers {
 		if peer.Height == 0 {
-			if err := ns.fetchPeerHeight(peer); err != nil {
-				log.Printf("Failed to fetch peer height from %s:%d: %v", peer.Address, peer.Port, err)
-			}
+			go func(p *Peer) { // async — don't block mining loop
+				if err := ns.fetchPeerHeight(p); err != nil {
+					log.Printf("Failed to fetch peer height from %s:%d: %v", p.Address, p.Port, err)
+				}
+			}(peer)
 		}
 		// Skip peers with low reputation
 		if peer.Reputation < MinReputationThreshold {
@@ -1111,4 +1113,151 @@ func (ns *NetworkService) BroadcastValidator(v *Validator) {
 			}
 		}(peerKey, peer, url, payload)
 	}
+}
+
+// ── Bootstrap ────────────────────────────────────────────────────────────────
+
+// DefaultBootstrapPeers lists well-known seed nodes used for multi-node testing.
+var DefaultBootstrapPeers = []string{
+	"127.0.0.1:6001",
+	"127.0.0.1:6002",
+}
+
+// Bootstrap connects to known seed nodes on startup so the node can discover
+// its peers without manual configuration.
+func (ns *NetworkService) Bootstrap(seedPeers []string) {
+	for _, addr := range seedPeers {
+		parts := strings.Split(addr, ":")
+		if len(parts) != 2 {
+			continue
+		}
+		port, err := strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		peer := &Peer{
+			Address: parts[0],
+			Port:    port,
+		}
+		ns.Mutex.Lock()
+		key := fmt.Sprintf("%s:%d", peer.Address, peer.Port)
+		if _, exists := ns.Peers[key]; !exists {
+			ns.Peers[key] = peer
+			log.Printf("[Network] Bootstrap peer added: %s", key)
+		}
+		ns.Mutex.Unlock()
+	}
+}
+
+// ── HTTP-based mempool broadcast ─────────────────────────────────────────────
+
+// BroadcastTransactionHTTP sends a transaction to all known peers via HTTP.
+// This complements the TCP-based BroadcastTransaction for peers that only
+// expose an HTTP endpoint.
+func (ns *NetworkService) BroadcastTransactionHTTP(tx interface{}) {
+	ns.Mutex.Lock()
+	peers := make([]*Peer, 0, len(ns.Peers))
+	for _, p := range ns.Peers {
+		peers = append(peers, p)
+	}
+	ns.Mutex.Unlock()
+
+	txJSON, err := json.Marshal(tx)
+	if err != nil {
+		return
+	}
+
+	for _, peer := range peers {
+		if peer.HTTPPort == 0 {
+			continue
+		}
+		go func(p *Peer) {
+			url := fmt.Sprintf("http://%s:%d/send_tx", p.Address, p.HTTPPort)
+			client := &http.Client{Timeout: 3 * time.Second}
+			resp, err := client.Post(url, "application/json", bytes.NewReader(txJSON))
+			if err != nil {
+				p.Reputation *= 0.99 // slight reputation decay on failure
+				return
+			}
+			resp.Body.Close()
+		}(peer)
+	}
+}
+
+// ── Retry helper ─────────────────────────────────────────────────────────────
+
+// postToPeerWithRetry sends a POST request to a peer with exponential-backoff
+// retries.  It skips peers that have no HTTP port.
+func (ns *NetworkService) postToPeerWithRetry(peer *Peer, path string, body []byte, maxRetries int) error {
+	if peer.HTTPPort == 0 {
+		return fmt.Errorf("peer %s has no HTTP port", peer.Address)
+	}
+	url := fmt.Sprintf("http://%s:%d%s", peer.Address, peer.HTTPPort, path)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
+			if backoff > 10*time.Second {
+				backoff = 10 * time.Second
+			}
+			time.Sleep(backoff)
+		}
+		resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 500 {
+			return nil // success or client error (don't retry 4xx)
+		}
+		lastErr = fmt.Errorf("server error %d", resp.StatusCode)
+	}
+	return lastErr
+}
+
+// ── Peer health check ─────────────────────────────────────────────────────────
+
+// StartHealthCheck periodically GETs /health on each peer and removes peers
+// that have accumulated too many failures (reputation drops below zero).
+func (ns *NetworkService) StartHealthCheck() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			ns.Mutex.Lock()
+			snapshot := make(map[string]*Peer, len(ns.Peers))
+			for k, v := range ns.Peers {
+				snapshot[k] = v
+			}
+			ns.Mutex.Unlock()
+
+			for key, peer := range snapshot {
+				if peer.HTTPPort == 0 {
+					continue
+				}
+				go func(k string, p *Peer) {
+					url := fmt.Sprintf("http://%s:%d/health", p.Address, p.HTTPPort)
+					client := &http.Client{Timeout: 3 * time.Second}
+					resp, err := client.Get(url)
+					if err != nil {
+						p.Reputation -= 0.1
+						if p.Reputation < 0 {
+							ns.Mutex.Lock()
+							delete(ns.Peers, k)
+							ns.Mutex.Unlock()
+							log.Printf("[Network] Removed unresponsive peer: %s", k)
+						}
+						return
+					}
+					resp.Body.Close()
+					if p.Reputation < 1.0 {
+						p.Reputation = min(p.Reputation+0.1, 1.0)
+					}
+				}(key, peer)
+			}
+		}
+	}()
 }
