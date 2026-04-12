@@ -66,6 +66,14 @@ func minBig(a, b *big.Int) *big.Int {
 	return b
 }
 
+func actorAddr(ctx *bc.Context) string {
+	actor := strings.TrimSpace(ctx.OriginAddr)
+	if actor == "" {
+		actor = ctx.CallerAddr
+	}
+	return strings.ToLower(actor)
+}
+
 func calcAmountOut(amtIn, resIn, resOut *big.Int) *big.Int {
 	if amtIn.Sign() == 0 || resIn.Sign() == 0 || resOut.Sign() == 0 {
 		return big.NewInt(0)
@@ -80,9 +88,7 @@ func calcAmountOut(amtIn, resIn, resOut *big.Int) *big.Int {
 
 func (p *Pair) pullToken(ctx *bc.Context, token, from string, amt *big.Int) {
 	if isNative(token) {
-		if ctx.MsgValue().Cmp(amt) < 0 {
-			ctx.Revert("msg.value less than required native LQD amount")
-		}
+		ctx.ReceiveNative(amt)
 		return
 	}
 	if _, err := ctx.Call(token, "TransferFrom", []string{from, ctx.ContractAddr, amt.String()}); err != nil {
@@ -166,7 +172,7 @@ func (p *Pair) AddLiquidity(ctx *bc.Context, amountA string, amountB string) {
 		ctx.Revert("amounts must be > 0")
 	}
 
-	caller := strings.ToLower(ctx.CallerAddr)
+	caller := actorAddr(ctx)
 
 	p.pullToken(ctx, t0, caller, amtA)
 	p.pullToken(ctx, t1, caller, amtB)
@@ -235,7 +241,7 @@ func (p *Pair) RemoveLiquidity(ctx *bc.Context, lpAmount string) {
 		ctx.Revert("insufficient output")
 	}
 
-	caller := strings.ToLower(ctx.CallerAddr)
+	caller := actorAddr(ctx)
 	p.burnLP(ctx, caller, lpAmt)
 	ctx.Set("reserve0", new(big.Int).Sub(res0, out0).String())
 	ctx.Set("reserve1", new(big.Int).Sub(res1, out1).String())
@@ -273,7 +279,7 @@ func (p *Pair) Swap(ctx *bc.Context, amountIn string, minAmountOut string, token
 		ctx.Revert("amountIn must be > 0")
 	}
 
-	caller := strings.ToLower(ctx.CallerAddr)
+	caller := actorAddr(ctx)
 
 	res0 := parseBig(ctx.Get("reserve0"))
 	res1 := parseBig(ctx.Get("reserve1"))
@@ -431,7 +437,7 @@ func (p *Pair) Transfer(ctx *bc.Context, to string, amount string) {
 // ─── Proof of Dynamic Liquidity — validator LP locking ───────────────────────
 
 func (p *Pair) LockLPForValidation(ctx *bc.Context, lpAmount string, durationSecs string) {
-	caller := strings.ToLower(ctx.CallerAddr)
+	caller := actorAddr(ctx)
 	lpAmt := parseBig(lpAmount)
 	if lpAmt.Sign() == 0 {
 		ctx.Revert("LP amount must be > 0")
@@ -456,7 +462,7 @@ func (p *Pair) LockLPForValidation(ctx *bc.Context, lpAmount string, durationSec
 }
 
 func (p *Pair) UnlockValidatorLP(ctx *bc.Context) {
-	caller := strings.ToLower(ctx.CallerAddr)
+	caller := actorAddr(ctx)
 	lockUntil := parseBig(ctx.Get("vlu:" + caller)).Int64()
 	if time.Now().Unix() < lockUntil {
 		ctx.Revert("lock period not expired")

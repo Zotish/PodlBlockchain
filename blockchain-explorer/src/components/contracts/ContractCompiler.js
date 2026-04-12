@@ -1,7 +1,7 @@
 import React, { useState, useRef } from "react";
+import { API_BASE } from "../../utils/api";
 
-const NODE = "http://127.0.0.1:5000";
-const WALLET = "http://127.0.0.1:8080";
+const NODE = API_BASE;
 
 const PLACEHOLDER = `package main
 

@@ -122,6 +122,14 @@ func pairKey(a, b string) (pk, t0, t1 string) {
 	return b + ":" + a, b, a
 }
 
+func sortPairAmounts(tokenA, tokenB, amountA, amountB string) (string, string) {
+	_, t0, _ := pairKey(tokenA, tokenB)
+	if normAddr(tokenA) == t0 {
+		return amountA, amountB
+	}
+	return amountB, amountA
+}
+
 // ─── Storage helpers ──────────────────────────────────────────────────────────
 
 func (f *Factory) pget(ctx *bc.Context, pk, field string) string {
@@ -143,11 +151,7 @@ func (f *Factory) psetBig(ctx *bc.Context, pk, field string, v *big.Int) {
 // For native LQD it verifies msg.value; for LQD20 it calls TransferFrom.
 func (f *Factory) pullToken(ctx *bc.Context, token, from string, amt *big.Int) {
 	if isNative(token) {
-		msgVal := ctx.MsgValue()
-		if msgVal.Cmp(amt) < 0 {
-			ctx.Revert("msg.value less than required native LQD amount")
-		}
-		// native LQD is already in the contract via tx.value — nothing more to do
+		ctx.ReceiveNative(amt)
 		return
 	}
 	if _, err := ctx.Call(token, "TransferFrom", []string{from, ctx.ContractAddr, amt.String()}); err != nil {
@@ -299,7 +303,8 @@ func (f *Factory) requirePair(ctx *bc.Context, tokenA, tokenB string) (pairAddr,
 // For native LQD pairs: set tx.value = amount of the "lqd" token.
 func (f *Factory) AddLiquidity(ctx *bc.Context, tokenA string, tokenB string, amountA string, amountB string) {
 	pairAddr, _ := f.requirePair(ctx, tokenA, tokenB)
-	_, err := ctx.Call(pairAddr, "AddLiquidity", []string{amountA, amountB})
+	amt0, amt1 := sortPairAmounts(tokenA, tokenB, amountA, amountB)
+	_, err := ctx.Call(pairAddr, "AddLiquidity", []string{amt0, amt1})
 	if err != nil {
 		ctx.Revert("AddLiquidity failed: " + err.Error())
 	}
@@ -319,10 +324,10 @@ func (f *Factory) RemoveLiquidity(ctx *bc.Context, tokenA string, tokenB string,
 // SwapExactTokensForTokens swaps an exact input for a minimum output.
 //
 // Routing logic (Virtual Routing — PosDL innovation):
-//   1. Try the direct pair first.
-//   2. If no direct pair exists, find the best 2-hop route guided by
-//      routing_weight set by the Dynamic Liquidity Engine.
-//      The intermediate token with the highest combined weight wins.
+//  1. Try the direct pair first.
+//  2. If no direct pair exists, find the best 2-hop route guided by
+//     routing_weight set by the Dynamic Liquidity Engine.
+//     The intermediate token with the highest combined weight wins.
 //
 // For native LQD input:  set tx.value = amountIn, tokenIn = "lqd"
 // For native LQD output: tokenOut = "lqd", native LQD sent back automatically
@@ -547,9 +552,12 @@ func (f *Factory) GetAmountIn(ctx *bc.Context, amountOut string, tokenIn string,
 func (f *Factory) GetPoolInfo(ctx *bc.Context, tokenA string, tokenB string) {
 	pairAddr, pk := f.requirePair(ctx, tokenA, tokenB)
 	_ = pk
-	_, err := ctx.Call(pairAddr, "GetInfo", []string{})
+	res, err := ctx.Call(pairAddr, "GetInfo", []string{})
 	if err != nil {
 		ctx.Revert("GetPoolInfo failed: " + err.Error())
+	}
+	if res != nil {
+		ctx.Set("output", res.Output)
 	}
 }
 
@@ -600,9 +608,12 @@ func (f *Factory) UnlockValidatorLP(ctx *bc.Context, tokenA string, tokenB strin
 // GetValidatorLP returns locked LP info for a validator.
 func (f *Factory) GetValidatorLP(ctx *bc.Context, tokenA string, tokenB string, validatorAddr string) {
 	pairAddr, _ := f.requirePair(ctx, tokenA, tokenB)
-	_, err := ctx.Call(pairAddr, "GetValidatorLP", []string{validatorAddr})
+	res, err := ctx.Call(pairAddr, "GetValidatorLP", []string{validatorAddr})
 	if err != nil {
 		ctx.Revert("GetValidatorLP failed: " + err.Error())
+	}
+	if res != nil {
+		ctx.Set("output", res.Output)
 	}
 }
 

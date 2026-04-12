@@ -250,25 +250,110 @@ type nativeSend struct {
 }
 
 type TxBuffer struct {
-	changes     map[string]map[string]string // contract addr → storage key → value
-	events      []ContractEvent              // all events from all nested calls
-	callStack   map[string]bool              // re-entrancy guard
-	depth       int                          // current call depth
-	nativeValue *big.Int                     // LQD sent with the top-level TX (msg.value)
-	nativeSends []nativeSend                 // queued native LQD transfers (applied after commit)
+	changes      map[string]map[string]string // contract addr → storage key → value
+	events       []ContractEvent              // all events from all nested calls
+	callStack    map[string]bool              // re-entrancy guard
+	depth        int                          // current call depth
+	nativeValue  *big.Int                     // LQD sent with the top-level TX (msg.value)
+	nativeEscrow *big.Int                     // unclaimed native LQD attached to this TX
+	nativeEntry  string                       // top-level contract address receiving any unclaimed native LQD
+	nativeCredit map[string]*big.Int          // staged native LQD credits per contract address
+	nativeSends  []nativeSend                 // queued native LQD transfers (applied after commit)
+	originAddr   string                       // original external caller for this TX
 }
 
-func NewTxBuffer(value *big.Int) *TxBuffer {
+func NewTxBuffer(value *big.Int, origin, entry string) *TxBuffer {
 	v := new(big.Int)
 	if value != nil {
 		v.Set(value)
 	}
 	return &TxBuffer{
-		changes:     make(map[string]map[string]string),
-		events:      []ContractEvent{},
-		callStack:   make(map[string]bool),
-		nativeValue: v,
+		changes:      make(map[string]map[string]string),
+		events:       []ContractEvent{},
+		callStack:    make(map[string]bool),
+		nativeValue:  new(big.Int).Set(v),
+		nativeEscrow: new(big.Int).Set(v),
+		nativeEntry:  strings.ToLower(strings.TrimSpace(entry)),
+		nativeCredit: make(map[string]*big.Int),
+		originAddr:   origin,
 	}
+}
+
+func (tb *TxBuffer) creditNative(addr string, amt *big.Int) {
+	if amt == nil || amt.Sign() <= 0 {
+		return
+	}
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	if addr == "" {
+		return
+	}
+	if tb.nativeCredit[addr] == nil {
+		tb.nativeCredit[addr] = big.NewInt(0)
+	}
+	tb.nativeCredit[addr].Add(tb.nativeCredit[addr], amt)
+}
+
+func (tb *TxBuffer) nativeCreditsWithRemainder() map[string]*big.Int {
+	out := make(map[string]*big.Int, len(tb.nativeCredit)+1)
+	for addr, amt := range tb.nativeCredit {
+		out[addr] = new(big.Int).Set(amt)
+	}
+	if tb.nativeEscrow != nil && tb.nativeEscrow.Sign() > 0 && tb.nativeEntry != "" {
+		if out[tb.nativeEntry] == nil {
+			out[tb.nativeEntry] = big.NewInt(0)
+		}
+		out[tb.nativeEntry].Add(out[tb.nativeEntry], tb.nativeEscrow)
+	}
+	return out
+}
+
+func (tb *TxBuffer) ensureNativeFlows(blockchain *Blockchain_struct) error {
+	credits := tb.nativeCreditsWithRemainder()
+	available := make(map[string]*big.Int, len(credits)+len(tb.nativeSends))
+
+	getAvailable := func(addr string) *big.Int {
+		addr = strings.ToLower(strings.TrimSpace(addr))
+		if bal, ok := available[addr]; ok {
+			return bal
+		}
+		base, _ := blockchain.getAccountBalance(addr)
+		if base == nil {
+			base = big.NewInt(0)
+		}
+		if credit := credits[addr]; credit != nil {
+			base = new(big.Int).Add(base, credit)
+		} else {
+			base = new(big.Int).Set(base)
+		}
+		available[addr] = base
+		return base
+	}
+
+	for _, send := range tb.nativeSends {
+		from := strings.ToLower(strings.TrimSpace(send.from))
+		to := strings.ToLower(strings.TrimSpace(send.to))
+		if getAvailable(from).Cmp(send.amt) < 0 {
+			return fmt.Errorf("native send failed: insufficient balance in %s", from)
+		}
+		available[from].Sub(available[from], send.amt)
+		getAvailable(to).Add(available[to], send.amt)
+	}
+	return nil
+}
+
+func (tb *TxBuffer) applyNativeFlows(blockchain *Blockchain_struct) error {
+	for addr, amt := range tb.nativeCreditsWithRemainder() {
+		if amt.Sign() > 0 {
+			blockchain.addAccountBalance(addr, amt)
+		}
+	}
+	for _, send := range tb.nativeSends {
+		if !blockchain.subAccountBalance(send.from, send.amt) {
+			return fmt.Errorf("native send failed: insufficient balance in %s", send.from)
+		}
+		blockchain.addAccountBalance(send.to, send.amt)
+	}
+	return nil
 }
 
 // GetStorage reads from buffer first, falls back to persistent DB.
@@ -328,6 +413,7 @@ func (tb *TxBuffer) PopCall(addr string) {
 type Context struct {
 	ContractAddr string
 	CallerAddr   string
+	OriginAddr   string
 	OwnerAddr    string
 	BlockTime    int64
 	GasUsed      uint64
@@ -340,10 +426,11 @@ type Context struct {
 	txBuffer     *TxBuffer // nil for read-only calls; set for state-changing TXs
 }
 
-func NewContext(addr, caller, owner string, db *ContractDB, gas uint64) *Context {
+func NewContext(addr, caller, origin, owner string, db *ContractDB, gas uint64) *Context {
 	return &Context{
 		ContractAddr: addr,
 		CallerAddr:   caller,
+		OriginAddr:   origin,
 		OwnerAddr:    owner,
 		BlockTime:    time.Now().Unix(),
 		GasUsed:      0,
@@ -429,6 +516,24 @@ func (ctx *Context) MsgValue() *big.Int {
 		return big.NewInt(0)
 	}
 	return new(big.Int).Set(ctx.txBuffer.nativeValue)
+}
+
+// ReceiveNative claims native LQD attached to the top-level TX for the current contract.
+// This is used by native-aware contracts so routed calls can attribute msg.value to the
+// contract that actually consumes it.
+func (ctx *Context) ReceiveNative(amt *big.Int) {
+	ctx.consumeGas(5000)
+	if ctx.txBuffer == nil {
+		ctx.Revert("ReceiveNative only available in state-changing TX mode")
+	}
+	if amt == nil || amt.Sign() <= 0 {
+		ctx.Revert("ReceiveNative: amount must be > 0")
+	}
+	if ctx.txBuffer.nativeEscrow == nil || ctx.txBuffer.nativeEscrow.Cmp(amt) < 0 {
+		ctx.Revert("msg.value less than required native LQD amount")
+	}
+	ctx.txBuffer.nativeEscrow.Sub(ctx.txBuffer.nativeEscrow, amt)
+	ctx.txBuffer.creditNative(ctx.ContractAddr, amt)
 }
 
 // SendNative queues a native LQD transfer from the contract to `to`.
@@ -1118,7 +1223,7 @@ func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas
 		return nil, err
 	}
 
-	ctx := NewContext(addr, caller, rec.Metadata.Owner, ep.Registry.DB, gas)
+	ctx := NewContext(addr, caller, caller, rec.Metadata.Owner, ep.Registry.DB, gas)
 	// No txBuffer — writes go directly to DB (read-only semantics).
 
 	ctx.callFunc = func(tgt, method string, a []string) (*ContractExecutionResult, error) {
@@ -1133,10 +1238,16 @@ func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas
 // only when the entire call tree succeeds. On any revert the buffer is discarded.
 // value is the native LQD attached to this TX (msg.value); pass nil for 0.
 func (ep *ExecutionPipeline) ExecuteAtomic(addr, caller, fn string, args []string, gas uint64, value *big.Int) (res *ContractExecutionResult, err error) {
-	txBuf := NewTxBuffer(value)
+	txBuf := NewTxBuffer(value, caller, addr)
 	res, err = ep.executeInner(addr, caller, fn, args, gas, txBuf)
 	if err != nil {
 		return nil, err // buffer discarded — full rollback
+	}
+
+	if ep.Registry.Blockchain != nil {
+		if err := txBuf.ensureNativeFlows(ep.Registry.Blockchain); err != nil {
+			return nil, err
+		}
 	}
 
 	// Commit all buffered storage changes atomically
@@ -1144,13 +1255,10 @@ func (ep *ExecutionPipeline) ExecuteAtomic(addr, caller, fn string, args []strin
 		return nil, fmt.Errorf("atomic commit failed: %w", commitErr)
 	}
 
-	// Apply queued native LQD sends (after storage commit so state is consistent)
+	// Apply staged native LQD credits/sends after storage commit.
 	if ep.Registry.Blockchain != nil {
-		for _, send := range txBuf.nativeSends {
-			if !ep.Registry.Blockchain.subAccountBalance(send.from, send.amt) {
-				return nil, fmt.Errorf("native send failed: insufficient balance in %s", send.from)
-			}
-			ep.Registry.Blockchain.addAccountBalance(send.to, send.amt)
+		if err := txBuf.applyNativeFlows(ep.Registry.Blockchain); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1186,7 +1294,11 @@ func (ep *ExecutionPipeline) executeInner(addr, caller, fn string, args []string
 		return nil, err
 	}
 
-	ctx := NewContext(addr, caller, rec.Metadata.Owner, ep.Registry.DB, gas)
+	origin := caller
+	if txBuf.originAddr != "" {
+		origin = txBuf.originAddr
+	}
+	ctx := NewContext(addr, caller, origin, rec.Metadata.Owner, ep.Registry.DB, gas)
 	ctx.txBuffer = txBuf // atomic mode
 
 	// Cross-contract calls within this TX share the same buffer

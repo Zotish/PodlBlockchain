@@ -115,6 +115,7 @@ export default function App() {
   const [dexAddr, setDexAddr] = useState(() => localStorage.getItem("lqd_dex_address") || DEX_CONTRACT_ADDRESS);
   const [nodeUrl, setNodeUrl]   = useState(() => localStorage.getItem("lqd_node_url") || NODE_URL);
   const [walletUrl, setWalletUrl] = useState(() => localStorage.getItem("lqd_wallet_url") || WALLET_URL);
+  const [pairAddr, setPairAddr] = useState("");
 
   // Pool state
   const [pool, setPool] = useState({ reserveA: "0", reserveB: "0", totalLP: "0", lpBalance: "0", tokenA: "", tokenB: "" });
@@ -276,24 +277,29 @@ export default function App() {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
-  // ── Pool polling — reads factory multi-pair storage ──────────────────────
+  // ── Pool polling — resolves pair address from factory, then reads pair storage ──
   const refreshPool = useCallback(async () => {
     if (!dexAddr || !tokenA || !tokenB) return;
     try {
-      const data = await getContractStorage(dexAddr);
-      const s = data?.State?.storage ?? data?.State ?? {};
-
-      // Factory stores per-pair data as p:{pk}:field
-      // pk = sorted(t0, t1) joined with ":"
+      const factoryData = await getContractStorage(dexAddr);
+      const factoryStorage = factoryData?.State?.storage ?? factoryData?.State ?? {};
       const normA = tokenA.toLowerCase();
       const normB = tokenB.toLowerCase();
       const pk = normA < normB ? `${normA}:${normB}` : `${normB}:${normA}`;
+      const nextPairAddr = factoryStorage[`pairAddr:${pk}`] || "";
+      setPairAddr(nextPairAddr);
+      if (!nextPairAddr) {
+        setPool({ reserveA: "0", reserveB: "0", totalLP: "0", lpBalance: "0", tokenA: "", tokenB: "" });
+        return;
+      }
 
-      const r0 = s[`p:${pk}:r0`] || "0";
-      const r1 = s[`p:${pk}:r1`] || "0";
-      const totalLP = s[`p:${pk}:lp`] || "0";
-      const t0 = s[`p:${pk}:t0`] || "";
-      const t1 = s[`p:${pk}:t1`] || "";
+      const pairData = await getContractStorage(nextPairAddr);
+      const s = pairData?.State?.storage ?? pairData?.State ?? {};
+      const r0 = s.reserve0 || "0";
+      const r1 = s.reserve1 || "0";
+      const totalLP = s.totalLP || "0";
+      const t0 = s.token0 || (normA < normB ? normA : normB);
+      const t1 = s.token1 || (normA < normB ? normB : normA);
 
       // Align reserves to tokenA/tokenB order
       let reserveA, reserveB;
@@ -303,7 +309,7 @@ export default function App() {
       // LP balance
       let lpBal = "0";
       if (wallet.address) {
-        const lpKey = `p:${pk}:lp:${wallet.address.toLowerCase()}`;
+        const lpKey = `lp:${wallet.address.toLowerCase()}`;
         const key = Object.keys(s).find(k => k.toLowerCase() === lpKey.toLowerCase());
         lpBal = (key && s[key]) ? s[key] : "0";
       }
@@ -320,7 +326,9 @@ export default function App() {
         } catch {}
       };
       fetchMeta(t0); fetchMeta(t1);
-    } catch {}
+    } catch {
+      setPairAddr("");
+    }
   }, [dexAddr, tokenA, tokenB, wallet.address]);
 
   useEffect(() => {
@@ -334,11 +342,12 @@ export default function App() {
     if (!wallet.address || !dexAddr) return;
     const next = { a: "0", b: "0" };
     try {
+      const spender = pairAddr || "";
       // Native LQD needs no approval — treat allowance as max
       if (tokenA === "lqd") next.a = "999999999999999999";
-      else if (tokenA?.startsWith("0x") && tokenA.length === 42) next.a = await getTokenAllowance(tokenA, wallet.address, dexAddr);
+      else if (spender && tokenA?.startsWith("0x") && tokenA.length === 42) next.a = await getTokenAllowance(tokenA, wallet.address, spender);
       if (tokenB === "lqd") next.b = "999999999999999999";
-      else if (tokenB?.startsWith("0x") && tokenB.length === 42) next.b = await getTokenAllowance(tokenB, wallet.address, dexAddr);
+      else if (spender && tokenB?.startsWith("0x") && tokenB.length === 42) next.b = await getTokenAllowance(tokenB, wallet.address, spender);
     } catch {}
     // Always take the max of fetched and the optimistic floor (ref persists across renders)
     const floorA = minAllowanceRef.current.a;
@@ -349,7 +358,7 @@ export default function App() {
     if (safeBig(next.a) >= safeBig(floorA)) minAllowanceRef.current.a = "0";
     if (safeBig(next.b) >= safeBig(floorB)) minAllowanceRef.current.b = "0";
     setAllowances({ a: resolvedA, b: resolvedB });
-  }, [wallet.address, tokenA, tokenB, dexAddr]);
+  }, [wallet.address, tokenA, tokenB, dexAddr, pairAddr]);
 
   // ── Balances ──────────────────────────────────────────────────────────────
   const refreshBalances = useCallback(async () => {
@@ -385,11 +394,11 @@ export default function App() {
 
   // ── Validator info ────────────────────────────────────────────────────────
   useEffect(() => {
-    if (tab !== "Validate" || !wallet.address || !dexAddr) return;
-    callContract({ address: dexAddr, caller: wallet.address, fn: "GetValidatorLP", args: [wallet.address], value: "0" })
+    if (tab !== "Validate" || !wallet.address || !dexAddr || !tokenA || !tokenB) return;
+    callContract({ address: dexAddr, caller: wallet.address, fn: "GetValidatorLP", args: [tokenA, tokenB, wallet.address], value: "0" })
       .then(r => setValInfo(r))
       .catch(() => setValInfo(null));
-  }, [tab, wallet.address, dexAddr]);
+  }, [tab, wallet.address, dexAddr, tokenA, tokenB]);
 
   // ── Close menus on outside click ─────────────────────────────────────────
   useEffect(() => {
@@ -428,8 +437,9 @@ export default function App() {
   // dec = token decimals so we convert human → raw before approving
   async function doApprove(tokenAddr, humanAmt, dec = 8) {
     if (!canSend || !tokenAddr) return;
+    if (!pairAddr) { showToast("Create the pair first so approvals target the pool contract", "error"); return; }
     const rawAmt = parseHuman(humanAmt, dec) || "0";
-    const ok = await sendTx(tokenAddr, "Approve", [dexAddr, rawAmt], "Approved");
+    const ok = await sendTx(tokenAddr, "Approve", [pairAddr, rawAmt], "Approved");
     if (ok) {
       // Set optimistic floor in ref — survives re-renders until on-chain confirms
       if (tokenAddr === tokenA) minAllowanceRef.current.a = rawAmt;
@@ -507,11 +517,11 @@ export default function App() {
     // Check allowances — skip for native LQD (no approval needed)
     await refreshAllowances();
     if (tokenA !== "lqd") {
-      const freshA = await getTokenAllowance(tokenA, wallet.address, dexAddr).catch(() => "0");
+      const freshA = await getTokenAllowance(tokenA, wallet.address, pairAddr).catch(() => "0");
       if (safeBig(freshA) < safeBig(rawA)) { showToast(`Approve ${symA} first`, "error"); return; }
     }
     if (tokenB !== "lqd") {
-      const freshB = await getTokenAllowance(tokenB, wallet.address, dexAddr).catch(() => "0");
+      const freshB = await getTokenAllowance(tokenB, wallet.address, pairAddr).catch(() => "0");
       if (safeBig(freshB) < safeBig(rawB)) { showToast(`Approve ${symB} first`, "error"); return; }
     }
 
@@ -536,16 +546,18 @@ export default function App() {
 
   async function doLockLP() {
     if (!canSend) { showToast("Connect wallet first", "error"); return; }
+    if (!tokenA || !tokenB) { showToast("Select the pool tokens first", "error"); return; }
     if (!valLPAmt) { showToast("Enter LP amount", "error"); return; }
     const days = parseInt(valDays, 10);
     if (!days || days <= 0) { showToast("Invalid lock duration", "error"); return; }
     const rawLP = parseHuman(valLPAmt, 8);  // LP tokens always 8 decimals
-    await sendTx(dexAddr, "LockLPForValidation", [rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation");
+    await sendTx(dexAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation");
   }
 
   async function doUnlockLP() {
     if (!canSend) return;
-    await sendTx(dexAddr, "UnlockValidatorLP", [], "LP unlocked");
+    if (!tokenA || !tokenB) { showToast("Select the pool tokens first", "error"); return; }
+    await sendTx(dexAddr, "UnlockValidatorLP", [tokenA, tokenB], "LP unlocked");
   }
 
   async function doImportToken() {

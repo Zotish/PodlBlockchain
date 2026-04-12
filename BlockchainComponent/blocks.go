@@ -258,7 +258,9 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		}
 
 		_ = bc.subAccountBalance(res.Tx.From, totalTxCost)
-		bc.addAccountBalance(res.Tx.To, CopyAmount(res.Tx.Value))
+		if !(res.Tx.IsContract && res.Tx.Type == "contract_call") {
+			bc.addAccountBalance(res.Tx.To, CopyAmount(res.Tx.Value))
+		}
 
 		res.Tx.Status = constantset.StatusSuccess
 

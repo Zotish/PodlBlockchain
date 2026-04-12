@@ -60,6 +60,7 @@ func (w *WLQD) Deposit(ctx *bc.Context, amount string) {
 	if msgVal.Cmp(amt) < 0 {
 		ctx.Revert("msg.value less than deposit amount")
 	}
+	ctx.ReceiveNative(amt)
 
 	caller := normAddr(ctx.CallerAddr)
 
