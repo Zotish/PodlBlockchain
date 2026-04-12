@@ -6,12 +6,13 @@ import {
   callContract,
   getBaseFee,
   getContractStorage,
+  getNativeBalance,
   getTokenAllowance,
   getTokenBalance,
   getTokenMeta,
   sendContractTx,
 } from "./api";
-import { loadTokens, upsertToken } from "./storage";
+import { loadTokens, saveTokens, upsertToken } from "./storage";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SECS_PER_DAY = 86400;
@@ -111,7 +112,7 @@ export default function App() {
   const [tokenB, setTokenB] = useState("");
 
   // DEX config
-  const [dexAddr, setDexAddr] = useState(DEX_CONTRACT_ADDRESS);
+  const [dexAddr, setDexAddr] = useState(() => localStorage.getItem("lqd_dex_address") || DEX_CONTRACT_ADDRESS);
   const [nodeUrl, setNodeUrl]   = useState(() => localStorage.getItem("lqd_node_url") || NODE_URL);
   const [walletUrl, setWalletUrl] = useState(() => localStorage.getItem("lqd_wallet_url") || WALLET_URL);
 
@@ -147,6 +148,9 @@ export default function App() {
   const [showWalletMenu, setShowWalletMenu] = useState(false);
   const walletMenuRef = useRef(null);
 
+  // Tracks optimistic allowance floor — interval polling never goes below this
+  const minAllowanceRef = useRef({ a: "0", b: "0" });
+
   // Token selector modal
   const [modalOpen, setModalOpen] = useState(false);
   const [modalTarget, setModalTarget] = useState("A");
@@ -179,7 +183,8 @@ export default function App() {
   // Wallet is considered connected if address is set + can sign (pk or extension)
   const walletConnected = !!(wallet.address && (wallet.privateKey || (typeof window !== "undefined" && window.lqd)));
   const canSend = !!(walletConnected && dexAddr);
-  const poolInited = !!(pool.tokenA && pool.tokenB);
+  // Pool is inited if reserves exist (r0 > 0) OR if pair was created (totalLP key exists)
+  const poolInited = !!(tokenA && tokenB && (safeBig(pool.reserveA) > 0n || safeBig(pool.reserveB) > 0n || pool.totalLP !== "0"));
 
   // ── Toast helper ─────────────────────────────────────────────────────────
   function showToast(msg, type = "info") {
@@ -271,37 +276,52 @@ export default function App() {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
-  // ── Pool polling ──────────────────────────────────────────────────────────
+  // ── Pool polling — reads factory multi-pair storage ──────────────────────
   const refreshPool = useCallback(async () => {
-    if (!dexAddr) return;
+    if (!dexAddr || !tokenA || !tokenB) return;
     try {
       const data = await getContractStorage(dexAddr);
       const s = data?.State?.storage ?? data?.State ?? {};
-      const tA = s.tokenA || "";
-      const tB = s.tokenB || "";
+
+      // Factory stores per-pair data as p:{pk}:field
+      // pk = sorted(t0, t1) joined with ":"
+      const normA = tokenA.toLowerCase();
+      const normB = tokenB.toLowerCase();
+      const pk = normA < normB ? `${normA}:${normB}` : `${normB}:${normA}`;
+
+      const r0 = s[`p:${pk}:r0`] || "0";
+      const r1 = s[`p:${pk}:r1`] || "0";
+      const totalLP = s[`p:${pk}:lp`] || "0";
+      const t0 = s[`p:${pk}:t0`] || "";
+      const t1 = s[`p:${pk}:t1`] || "";
+
+      // Align reserves to tokenA/tokenB order
+      let reserveA, reserveB;
+      if (normA === t0) { reserveA = r0; reserveB = r1; }
+      else               { reserveA = r1; reserveB = r0; }
+
+      // LP balance
       let lpBal = "0";
       if (wallet.address) {
-        const want = `lp:${wallet.address}`.toLowerCase();
-        const key = Object.keys(s).find(k => k.toLowerCase() === want);
+        const lpKey = `p:${pk}:lp:${wallet.address.toLowerCase()}`;
+        const key = Object.keys(s).find(k => k.toLowerCase() === lpKey.toLowerCase());
         lpBal = (key && s[key]) ? s[key] : "0";
       }
-      setPool({ reserveA: s.reserveA || "0", reserveB: s.reserveB || "0", totalLP: s.totalLP || "0", lpBalance: lpBal, tokenA: tA, tokenB: tB });
-      if (tA && !tokenA) setTokenA(tA);
-      if (tB && !tokenB) setTokenB(tB);
 
-      // auto-fetch token meta
+      setPool({ reserveA, reserveB, totalLP, lpBalance: lpBal, tokenA: t0, tokenB: t1 });
+
+      // auto-fetch token meta for non-native tokens
       const fetchMeta = async (addr) => {
-        if (!addr || !wallet.address) return;
+        if (!addr || addr === "lqd" || !wallet.address) return;
         try {
           const m = await getTokenMeta(addr, wallet.address);
           upsertToken({ address: addr, name: m.name || "Token", symbol: m.symbol || addr.slice(2, 6).toUpperCase(), decimals: m.decimals || "8" });
           setTokens(loadTokens());
         } catch {}
       };
-      if (tA) fetchMeta(tA);
-      if (tB) fetchMeta(tB);
+      fetchMeta(t0); fetchMeta(t1);
     } catch {}
-  }, [dexAddr, wallet.address]);
+  }, [dexAddr, tokenA, tokenB, wallet.address]);
 
   useEffect(() => {
     refreshPool();
@@ -309,29 +329,51 @@ export default function App() {
     return () => clearInterval(id);
   }, [refreshPool]);
 
-  // ── Balances & allowances ─────────────────────────────────────────────────
-  useEffect(() => {
-    async function load() {
-      if (!wallet.address) { setBalances({ a: "", b: "" }); return; }
-      const next = { a: "", b: "" };
-      try {
-        if (tokenA?.startsWith("0x") && tokenA.length === 42) next.a = await getTokenBalance(tokenA, wallet.address);
-        if (tokenB?.startsWith("0x") && tokenB.length === 42) next.b = await getTokenBalance(tokenB, wallet.address);
-      } catch {}
-      setBalances(next);
-    }
-    async function allowLoad() {
-      if (!wallet.address || !dexAddr) { setAllowances({ a: "0", b: "0" }); return; }
-      const next = { a: "0", b: "0" };
-      try {
-        if (tokenA?.startsWith("0x") && tokenA.length === 42) next.a = await getTokenAllowance(tokenA, wallet.address, dexAddr);
-        if (tokenB?.startsWith("0x") && tokenB.length === 42) next.b = await getTokenAllowance(tokenB, wallet.address, dexAddr);
-      } catch {}
-      setAllowances(next);
-    }
-    load();
-    allowLoad();
+  // ── Refresh allowances (declared before useEffect that uses it) ───────────
+  const refreshAllowances = useCallback(async () => {
+    if (!wallet.address || !dexAddr) return;
+    const next = { a: "0", b: "0" };
+    try {
+      // Native LQD needs no approval — treat allowance as max
+      if (tokenA === "lqd") next.a = "999999999999999999";
+      else if (tokenA?.startsWith("0x") && tokenA.length === 42) next.a = await getTokenAllowance(tokenA, wallet.address, dexAddr);
+      if (tokenB === "lqd") next.b = "999999999999999999";
+      else if (tokenB?.startsWith("0x") && tokenB.length === 42) next.b = await getTokenAllowance(tokenB, wallet.address, dexAddr);
+    } catch {}
+    // Always take the max of fetched and the optimistic floor (ref persists across renders)
+    const floorA = minAllowanceRef.current.a;
+    const floorB = minAllowanceRef.current.b;
+    const resolvedA = safeBig(next.a) >= safeBig(floorA) ? next.a : floorA;
+    const resolvedB = safeBig(next.b) >= safeBig(floorB) ? next.b : floorB;
+    // Once on-chain confirms (fetched >= floor), clear the floor
+    if (safeBig(next.a) >= safeBig(floorA)) minAllowanceRef.current.a = "0";
+    if (safeBig(next.b) >= safeBig(floorB)) minAllowanceRef.current.b = "0";
+    setAllowances({ a: resolvedA, b: resolvedB });
   }, [wallet.address, tokenA, tokenB, dexAddr]);
+
+  // ── Balances ──────────────────────────────────────────────────────────────
+  const refreshBalances = useCallback(async () => {
+    if (!wallet.address) { setBalances({ a: "", b: "" }); return; }
+    const next = { a: "", b: "" };
+    try {
+      if (tokenA) next.a = await getTokenBalance(tokenA, wallet.address);
+      if (tokenB) next.b = await getTokenBalance(tokenB, wallet.address);
+    } catch {}
+    setBalances(next);
+  }, [wallet.address, tokenA, tokenB]);
+
+  useEffect(() => {
+    refreshBalances();
+    const id = setInterval(refreshBalances, 4000);
+    return () => clearInterval(id);
+  }, [refreshBalances]);
+
+  // Poll allowances every 3s so they stay fresh after Approve TXs
+  useEffect(() => {
+    refreshAllowances();
+    const id = setInterval(refreshAllowances, 3000);
+    return () => clearInterval(id);
+  }, [refreshAllowances]);
 
   // ── Base fee ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -360,17 +402,20 @@ export default function App() {
   }, [showSettings]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
-  async function sendTx(contractAddress, fn, args, successMsg) {
+  async function sendTx(contractAddress, fn, args, successMsg, nativeValue = "0") {
     setLoading(true);
     try {
       const res = await sendContractTx({
         address: wallet.address, privateKey: wallet.privateKey,
-        contractAddress, fn, args, value: "0",
-        gasPrice: baseFee ? baseFee + 1 : 0
+        contractAddress, fn, args, value: nativeValue,
+        gasPrice: baseFee ? baseFee + 1 : 0,
+        onPending: () => showToast("🔔 Open the LQD Wallet extension popup to approve this transaction", "info")
       });
       const hash = extractHash(res);
       showToast(`${successMsg}${hash ? " · " + shortAddr(hash) : ""}`, "success");
-      await refreshPool();
+      // Refresh balances + pool after TX mines
+      setTimeout(() => { refreshPool(); refreshAllowances(); refreshBalances(); }, 2000);
+      setTimeout(() => { refreshPool(); refreshAllowances(); refreshBalances(); }, 5000);
       return true;
     } catch (err) {
       showToast(err.message || "Transaction failed", "error");
@@ -383,13 +428,27 @@ export default function App() {
   // dec = token decimals so we convert human → raw before approving
   async function doApprove(tokenAddr, humanAmt, dec = 8) {
     if (!canSend || !tokenAddr) return;
-    const rawAmt = parseHuman(humanAmt, dec);
-    await sendTx(tokenAddr, "Approve", [dexAddr, rawAmt || "0"], "Approved");
+    const rawAmt = parseHuman(humanAmt, dec) || "0";
+    const ok = await sendTx(tokenAddr, "Approve", [dexAddr, rawAmt], "Approved");
+    if (ok) {
+      // Set optimistic floor in ref — survives re-renders until on-chain confirms
+      if (tokenAddr === tokenA) minAllowanceRef.current.a = rawAmt;
+      if (tokenAddr === tokenB) minAllowanceRef.current.b = rawAmt;
+      // Optimistic UI update
+      setAllowances(prev => ({
+        ...prev,
+        ...(tokenAddr === tokenA ? { a: rawAmt } : {}),
+        ...(tokenAddr === tokenB ? { b: rawAmt } : {})
+      }));
+    }
   }
 
   async function doInitPool() {
-    if (!tokenA || !tokenB) { showToast("Select both tokens first", "error"); return; }
-    await sendTx(dexAddr, "Init", [tokenA, tokenB], "Pool initialized");
+    if (!dexAddr) { showToast("Set DEX contract address in Settings first", "error"); return false; }
+    if (!tokenA || !tokenB) { showToast("Select both tokens first", "error"); return false; }
+    // Factory uses CreatePair(tokenA, tokenB)
+    const ok = await sendTx(dexAddr, "CreatePair", [tokenA, tokenB], "Pair created — waiting for confirmation…");
+    return ok;
   }
 
   async function doSwap() {
@@ -407,32 +466,62 @@ export default function App() {
       if (!ok) return;
     }
 
-    const needApprove = swapDir === "AtoB"
-      ? safeBig(allowances.a) < safeBig(rawIn)
-      : safeBig(allowances.b) < safeBig(rawIn);
-    if (needApprove) {
-      showToast(`Approve ${swapDir === "AtoB" ? symA : symB} first`, "error");
-      return;
+    const tokenIn  = swapDir === "AtoB" ? tokenA : tokenB;
+    const tokenOut = swapDir === "AtoB" ? tokenB : tokenA;
+    const isNativeIn = tokenIn === "lqd";
+
+    // Native LQD doesn't need approval
+    if (!isNativeIn) {
+      const needApprove = swapDir === "AtoB"
+        ? safeBig(allowances.a) < safeBig(rawIn)
+        : safeBig(allowances.b) < safeBig(rawIn);
+      if (needApprove) {
+        showToast(`Approve ${swapDir === "AtoB" ? symA : symB} first`, "error");
+        return;
+      }
     }
 
-    const fn = swapDir === "AtoB" ? "SwapAtoB" : "SwapBtoA";
-    const ok = await sendTx(dexAddr, fn, [rawIn], "Swap submitted");
+    // minAmountOut with slippage (raw units)
+    const outDecNow = swapDir === "AtoB" ? decB : decA;
+    const rawOutBig = safeBig(parseHuman(amtOut, outDecNow));
+    const slip = parseFloat(activeSlip) / 100;
+    const minOut = ((rawOutBig * BigInt(Math.floor((1 - slip) * 10000))) / 10000n).toString();
+
+    const nativeValue = isNativeIn ? rawIn : "0";
+    const ok = await sendTx(
+      dexAddr, "SwapExactTokensForTokens",
+      [rawIn, minOut, tokenIn, tokenOut],
+      "Swap submitted",
+      nativeValue
+    );
     if (ok) { setAmtIn(""); setAmtOut(""); }
   }
 
   async function doAddLiquidity() {
     if (!canSend) { showToast("Connect wallet first", "error"); return; }
-    if (!poolInited) {
-      const ok = window.confirm("Pool not initialized. Init it now?");
-      if (!ok) return;
-      await doInitPool();
-    }
+    if (!tokenA || !tokenB) { showToast("Select both tokens first", "error"); return; }
     if (!liqA || !liqB) { showToast("Enter both amounts", "error"); return; }
     const rawA = parseHuman(liqA, decA);
     const rawB = parseHuman(liqB, decB);
-    if (safeBig(allowances.a) < safeBig(rawA)) { showToast(`Approve ${symA} first`, "error"); return; }
-    if (safeBig(allowances.b) < safeBig(rawB)) { showToast(`Approve ${symB} first`, "error"); return; }
-    const ok = await sendTx(dexAddr, "AddLiquidity", [rawA, rawB], "Liquidity added");
+
+    // Check allowances — skip for native LQD (no approval needed)
+    await refreshAllowances();
+    if (tokenA !== "lqd") {
+      const freshA = await getTokenAllowance(tokenA, wallet.address, dexAddr).catch(() => "0");
+      if (safeBig(freshA) < safeBig(rawA)) { showToast(`Approve ${symA} first`, "error"); return; }
+    }
+    if (tokenB !== "lqd") {
+      const freshB = await getTokenAllowance(tokenB, wallet.address, dexAddr).catch(() => "0");
+      if (safeBig(freshB) < safeBig(rawB)) { showToast(`Approve ${symB} first`, "error"); return; }
+    }
+
+    // If tokenA or tokenB is native LQD, pass its amount as tx value
+    let nativeValue = "0";
+    if (tokenA === "lqd") nativeValue = rawA;
+    else if (tokenB === "lqd") nativeValue = rawB;
+
+    // Factory: AddLiquidity(tokenA, tokenB, amountA, amountB)
+    const ok = await sendTx(dexAddr, "AddLiquidity", [tokenA, tokenB, rawA, rawB], "Liquidity added", nativeValue);
     if (ok) { setLiqA(""); setLiqB(""); setLiqScreen(null); }
   }
 
@@ -440,7 +529,8 @@ export default function App() {
     if (!canSend) { showToast("Connect wallet first", "error"); return; }
     if (!lpBurn) { showToast("Enter LP amount to burn", "error"); return; }
     const rawLp = parseHuman(lpBurn, 8);  // LP tokens always 8 decimals
-    const ok = await sendTx(dexAddr, "RemoveLiquidity", [rawLp], "Liquidity removed");
+    // Factory: RemoveLiquidity(tokenA, tokenB, lpAmount)
+    const ok = await sendTx(dexAddr, "RemoveLiquidity", [tokenA, tokenB, rawLp], "Liquidity removed");
     if (ok) { setLpBurn(""); setLiqScreen(null); }
   }
 
@@ -1093,7 +1183,7 @@ export default function App() {
                 <label>DEX Address</label>
                 <input
                   value={dexAddr}
-                  onChange={e => setDexAddr(e.target.value)}
+                  onChange={e => { setDexAddr(e.target.value); localStorage.setItem("lqd_dex_address", e.target.value); }}
                   placeholder="0x... (deploy DEX contract first)"
                   style={{ borderColor: !dexAddr ? "var(--red)" : undefined }}
                 />
@@ -1119,10 +1209,37 @@ export default function App() {
                       <div className="token-row-sym">{t.symbol}</div>
                       <div className="token-row-name">{t.name} · {t.address}</div>
                     </div>
-                    <div className="token-row-bal">{t.decimals}d</div>
+                    {t.native
+                      ? <div className="token-row-bal" style={{ color: "var(--accent2)", fontSize: 11 }}>native</div>
+                      : <button
+                          style={{ background: "none", border: "none", color: "var(--red)", cursor: "pointer", fontSize: 14, padding: "0 4px" }}
+                          onClick={() => {
+                            const list = tokens.filter(x => x.address !== t.address);
+                            saveTokens(list.filter(x => !x.native));
+                            setTokens(loadTokens());
+                            if (tokenA === t.address) setTokenA("");
+                            if (tokenB === t.address) setTokenB("");
+                          }}
+                          title="Remove token"
+                        >✕</button>
+                    }
                   </div>
                 ))}
               </div>
+              {tokens.filter(t => !t.native).length > 0 && (
+                <button
+                  className="action-btn secondary"
+                  style={{ margin: "10px 0 0", borderColor: "var(--red)", color: "var(--red)" }}
+                  onClick={() => {
+                    saveTokens([]);
+                    setTokens(loadTokens());
+                    setTokenA(""); setTokenB("");
+                    showToast("Token list cleared", "success");
+                  }}
+                >
+                  Clear All Tokens
+                </button>
+              )}
             </div>
           </div>
         </main>

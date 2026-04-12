@@ -1,0 +1,25 @@
+Proof-Of-Dynamic-Liquidity (PoDL) - Explanation Pack
+
+This folder contains one file per section. Recommended reading order:
+
+01_overview.txt
+02_architecture.txt
+03_consensus_validators.txt
+04_liquidity_system.txt
+05_transactions_fees_mempool.txt
+06_blocks_rewards.txt
+07_p2p_sync.txt
+08_state_storage_db.txt
+09_contracts_vm.txt
+10_bridge_bsc.txt
+11_apis.txt
+12_wallets.txt
+13_explorer_ui.txt
+14_benchmarks_tps_scalability.txt
+15_security_production_readiness.txt
+16_unique_features.txt
+17_funding_revenue_lqd_coin.txt
+
+Notes:
+- All details are extracted from the current code in this repo.
+- Where metrics are not measured in code, the files explain how to measure them.

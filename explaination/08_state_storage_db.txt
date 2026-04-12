@@ -1,0 +1,15 @@
+State and Storage
+
+State model
+- Accounts are stored in an in-memory map (Accounts) with read/write locks.
+- Balance lookups fall back to wallet server if not cached.
+
+Persistence
+- LevelDB is used for blocks and chain state.
+- SaveBlockToDB writes blocks under keys "block_N" and tracks "latest_block".
+- PutIntoDB stores the entire Blockchain_struct snapshot.
+
+Caveats
+- Storing the full chain struct in LevelDB can be heavy and risky for compatibility changes.
+- LevelDB writes use Sync=false for performance (higher risk on power loss).
+- Many fields are in-memory only and not persisted (network, mutexes, etc).

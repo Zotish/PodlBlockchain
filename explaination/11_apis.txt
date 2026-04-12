@@ -1,0 +1,75 @@
+HTTP APIs
+
+Blockchain server (examples, see BlockchainServer/blockchain_server.go):
+- GET / -> full chain JSON
+- GET /balance?address=0x...
+- POST /send_tx
+- POST /send_tx/batch
+- GET /fetch_last_n_block
+- GET /account/{address}/nonce
+- GET /getheight
+- GET /validator/{address}
+- GET /network
+- GET /peers
+- POST /peers/add
+- POST /faucet
+- GET /block/{id}
+- GET /validators
+- GET /transactions/recent
+- POST /liquidity/lock
+- POST /liquidity/unlock
+- GET /liquidity
+- GET /liquidity/info
+- GET /liquidity/all
+- POST /liquidity/provide
+- POST /liquidity/unstake
+- GET /liquidity/pools
+- POST /liquidity/rebalance
+- POST /liquidity/pools/sync
+- POST /liquidity/pools/register
+- GET /rewards/recent
+- GET /rewards/latest
+- GET /validators/active
+- POST /validators/sync
+- GET /chain/summary
+- GET /chain/global
+- POST /rpc
+- POST /validator/new
+- POST /validator/add
+- GET /tx/{hash}
+- POST /contract/deploy
+- POST /contract/call
+- GET /contract/getAbi
+- GET /contract/list
+- POST /contract/compile
+- GET /contract/storage
+- GET /contract/code
+- GET /contract/events
+- GET /basefee
+- GET /blocktime/latest
+- GET /address/{address}/transactions
+- GET /bridge/requests
+- GET /bridge/tokens
+- POST /bridge/lock_bsc
+- POST /bridge/burn_lqd
+
+Wallet server:
+- POST /wallet/new
+- POST /wallet/import/mnemonic
+- POST /wallet/import/private-key
+- GET /wallet/balance?address=0x...
+- POST /wallet/send
+- POST /wallet/send_batch
+- POST /wallet/contract-template
+- POST /wallet/bridge/lock
+- POST /wallet/bridge/burn
+- POST /wallet/bridge/lock_bsc_token
+- POST /wallet/bridge/burn_lqd_token
+- POST /wallet/bridge/bsc_lock_tx
+- GET /wallet/token-balance
+
+Aggregator:
+- GET /chain/global (multi-node summary)
+- /wallet/* proxy to wallet server
+- /block/*, /tx/*, /contract/*, /bridge/* proxy to canonical node
+- all other GET requests can be aggregated across nodes

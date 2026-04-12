@@ -682,11 +682,22 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 			return
 		}
 
-		if ns.Blockchain.LocalValidator != "" && !strings.EqualFold(ns.Blockchain.LocalValidator, block.RewardBreakdown.Validator) {
-			ns.Blockchain.Mutex.Lock()
-			ns.Blockchain.AddBlockVote(block.CurrentHash, ns.Blockchain.LocalValidator)
-			ns.Blockchain.Mutex.Unlock()
-			ns.BroadcastVote(block.CurrentHash, ns.Blockchain.LocalValidator)
+		// Add to pending; non-proposer validators cast a vote and broadcast it
+		ns.Blockchain.Mutex.Lock()
+		ns.Blockchain.AddPendingBlock(&block)
+		localVal := ns.Blockchain.LocalValidator
+		isProposer := strings.EqualFold(localVal, block.RewardBreakdown.Validator)
+		if localVal != "" && !isProposer {
+			ns.Blockchain.AddBlockVote(block.CurrentHash, localVal)
+		}
+		finalized := ns.Blockchain.TryFinalizePending(block.CurrentHash, 0.67)
+		ns.Blockchain.Mutex.Unlock()
+
+		if localVal != "" && !isProposer {
+			ns.BroadcastVote(block.CurrentHash, localVal)
+		}
+		if finalized {
+			log.Printf("✅ Block #%d finalized on receipt (peer block)", block.BlockNumber)
 		}
 
 		ns.PeerEvents <- PeerEvent{
@@ -776,7 +787,11 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 		}
 		ns.Blockchain.Mutex.Lock()
 		ns.Blockchain.AddBlockVote(hash, validator)
+		finalized := ns.Blockchain.TryFinalizePending(hash, 0.67)
 		ns.Blockchain.Mutex.Unlock()
+		if finalized {
+			log.Printf("✅ Block finalized via vote from %s", validator)
+		}
 
 	case "peers":
 		peersData, ok := msg["peers"].([]interface{})

@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"strings"
 
-	blockchaincomponent "github.com/Zotish/DefenceProject/BlockchainComponent"
+	blockchaincomponent "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainComponent"
 )
 
 // BridgeToken is a mint/burn token used for bridged assets.

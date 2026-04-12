@@ -1,0 +1,21 @@
+P2P Networking and Sync
+
+Network service
+- Starts a TCP listener on P2P port (default = HTTP port + 1000).
+- Maintains peer list with reputation and last-seen timestamps.
+- Performs a version handshake including protocol version, best height, and HTTP port.
+
+Sync approach
+- Uses batched block sync (SyncBatchSize = 100).
+- Verifies blocks in parallel workers during sync.
+- Performs best-height comparisons and peer reputation adjustments.
+- Uses a longest chain rule (ResolveForks).
+
+Peer discovery
+- Basic peer discovery and sync interval loop.
+- Add peers manually via HTTP API.
+
+Important notes
+- There is no authenticated peer identity.
+- There is no BFT finality; chain uses a longest-chain rule.
+- Network security model should be considered experimental.

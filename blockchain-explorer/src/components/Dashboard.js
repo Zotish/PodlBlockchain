@@ -381,7 +381,7 @@ if (isBlockNumber(q)) {
   <p>
     {blockTime && typeof blockTime.mining_time_sec === "number"
       ? `#${blockTime.block_number} • ${blockTime.mining_time_sec.toFixed(5)} s`
-      : (networkStats?.height ?? "N/A")}
+      : (networkStats?.block_height ?? "N/A")}
   </p>
 </div>
 

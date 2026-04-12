@@ -1,0 +1,59 @@
+VC Pitch Deck Outline (PoDL Chain)
+
+Slide 1: Title
+- Project name, tagline, website, contact
+
+Slide 2: Problem
+- Current L1 chains: capital inefficiency + LPs not aligned with validators
+- Liquidity fragmentation and shallow depth
+
+Slide 3: Solution
+- Proof of Dynamic Liquidity (PoDL)
+- Validator selection and rewards tied to locked liquidity
+
+Slide 4: How It Works (Diagram)
+- Liquidity providers -> LiquidityPower
+- Validators selected by LiquidityPower
+- Rewards split to validators + LPs + participants
+
+Slide 5: Tech Differentiators
+- Liquidity-driven consensus
+- Long-lock LP bonus
+- Auto pool rebalancing
+- Custom contract VM (plugin + bytecode + DSL)
+- Built-in BSC bridge relayer
+
+Slide 6: Market
+- DeFi liquidity + chain infrastructure market size
+- Growth in L1/L2 competition
+
+Slide 7: Traction (Needed)
+- Testnet stats: TPS, validators, uptime
+- GitHub activity
+- Early partners and pilots
+
+Slide 8: Tokenomics
+- LQD supply, emissions, reward splits
+- Fee model and treasury
+
+Slide 9: Business Model
+- Network fees
+- Bridge fees
+- Infrastructure services
+
+Slide 10: Roadmap
+- Testnet -> audit -> mainnet
+- Ecosystem + grants
+
+Slide 11: Team
+- Core contributors, advisors
+
+Slide 12: Ask
+- Funding amount
+- Runway
+- Use of funds
+
+Appendix (Optional)
+- Security model details
+- Architecture diagrams
+- Benchmark methodology

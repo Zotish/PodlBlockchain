@@ -9,9 +9,11 @@ export default function ContractOverview({ address, setABI }) {
   useEffect(() => {
     fetch(`${API}/contract/getAbi?address=${address}`)
       .then((r) => r.json())
-      .then((abi) => {
-        setABI(abi);
-        setInfo({ abi, type: "smart-contract" });
+      .then((raw) => {
+        // Server returns { entries: [...] } — extract the array
+        const entries = Array.isArray(raw) ? raw : (raw.entries || []);
+        setABI(entries);
+        setInfo({ abi: entries, type: "smart-contract" });
       });
   }, [address]);
 

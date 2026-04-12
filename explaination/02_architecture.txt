@@ -1,0 +1,27 @@
+Architecture
+
+Entry point: main.go
+- Loads .env using loadEnvFile (only lines starting with "export " are applied).
+- Subcommands:
+  - chain: starts blockchain node + P2P + bridge relayer.
+  - wallet: starts wallet server.
+  - aggregate: starts aggregator server.
+
+Go packages:
+- BlockchainComponent/: core blockchain logic (state, blocks, txs, consensus, rewards, liquidity, bridge, contracts, DB).
+- BlockchainServer/: HTTP API for the chain.
+- WalletComponent/: wallet key management and signing.
+- WalletServer/: HTTP API for wallet operations.
+- AggregatorServer/: global gateway and multi-node summary.
+- ConstantSet/: chain constants (chain ID, gas rules, block reward split, etc).
+
+Front-end:
+- blockchain-explorer/: React UI with pages for blocks, txs, validators, liquidity, bridge, contracts, wallet.
+
+Smart contracts:
+- contract/: Go plugin contracts (compiled to .so) + Solidity for BSC bridge.
+- data/contracts/: runtime copies of plugin .so contracts deployed on-chain.
+
+Data:
+- LevelDB for chain state and blocks, located at constantset.BLOCKCHAIN_DB_PATH (default 5002/evodb; can be overridden with -db_path).
+- Contract metadata and events are stored under data/contracts_db and data/contract_events_db.

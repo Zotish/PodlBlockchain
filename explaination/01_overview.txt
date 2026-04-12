@@ -1,0 +1,20 @@
+Overview
+
+This repo implements a custom blockchain called Proof of Dynamic Liquidity (PoDL). It includes:
+- A Go chain node (HTTP API + P2P sync + validator selection + mining loop).
+- A Go wallet server (wallet creation/import + send tx + balance + bridge helpers).
+- An aggregator server that proxies requests and aggregates multi-node summaries.
+- A smart contract engine that runs three contract types: Go plugins (.so), bytecode from a Go-like subset, and a simple DSL.
+- A BSC testnet bridge relayer for locking/minting and burn/release flows.
+- A React blockchain explorer UI.
+
+Native coin:
+- The base currency used by accounts is the chain's native unit (the code uses 8 decimals).
+- There is also a contract token example named LQDToken under contract/lqd20.go, but the native coin itself is not implemented as an ERC20-like contract. It is the chain's internal accounting balance.
+
+How to run (high level):
+- Chain node: go run main.go chain -port 5000 -p2p_port 6000 -db_path 5000/evodb -validator 0x... -stake_amount 3000000 -mining=true
+- Wallet server: go run main.go wallet -port 8080 -node_address http://127.0.0.1:5000
+- Aggregator: go run main.go aggregate -port 9000 -nodes 127.0.0.1:5000,127.0.0.1:5001 -canonical http://127.0.0.1:5000 -wallet http://127.0.0.1:8080
+
+See docs/README.md for operator instructions.

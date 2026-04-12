@@ -5,19 +5,27 @@ const WALLET = "http://127.0.0.1:8080";
 
 const PLACEHOLDER = `package main
 
+import (
+    lqdctx "github.com/Zotish/lqd-sdk/context"
+)
+
 // Example: simple token contract
 type MyToken struct{}
 
-func (t *MyToken) Name(ctx interface{}, args ...string) (interface{}, error) {
-    return map[string]string{"output": "MyToken"}, nil
+func (t *MyToken) Name(ctx *lqdctx.Context) {
+    ctx.Set("output", "MyToken")
 }
 
-func (t *MyToken) Symbol(ctx interface{}, args ...string) (interface{}, error) {
-    return map[string]string{"output": "MTK"}, nil
+func (t *MyToken) Symbol(ctx *lqdctx.Context) {
+    ctx.Set("output", "MTK")
 }
 
-func (t *MyToken) TotalSupply(ctx interface{}, args ...string) (interface{}, error) {
-    return map[string]string{"output": "1000000000000000"}, nil
+func (t *MyToken) TotalSupply(ctx *lqdctx.Context) {
+    ctx.Set("output", "1000000000000000")
+}
+
+func (t *MyToken) Decimals(ctx *lqdctx.Context) {
+    ctx.Set("output", "8")
 }
 
 var Contract = &MyToken{}
@@ -101,7 +109,7 @@ export default function ContractCompiler({ walletAddress, privateKey, onDeployed
       form.append("contract_file", compiledBlob, fileName);
       form.append("owner", walletAddress);
       form.append("private_key", privateKey);
-      form.append("contract_type", compiledType);
+      form.append("type", compiledType);   // server expects "type" not "contract_type"
       form.append("gas", "500000");
 
       const res = await fetch(`${NODE}/contract/deploy`, { method: "POST", body: form });

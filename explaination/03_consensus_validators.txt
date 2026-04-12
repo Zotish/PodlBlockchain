@@ -1,0 +1,36 @@
+Consensus and Validators (PoDL)
+
+Model
+- This chain uses a validator selection model based on "Liquidity Power" rather than pure stake weight.
+- Liquidity Power is derived from stake amount and lock duration. See BlockchainComponent/validator.go and liquidity system in blockchain_struct.go.
+
+Validator registration
+- A node becomes a validator by starting the chain with:
+  - -validator 0x... (Ethereum-style address)
+  - -stake_amount N
+  - -min_stake M (optional)
+- The node calls AddNewValidators() to register itself on-chain and broadcasts the validator to peers.
+
+Selection
+- SelectValidator() computes weight = LiquidityPower * (1 - PenaltyScore).
+- Validators with weight <= 0 are excluded.
+- Selection uses weighted randomness (see validator.go).
+
+Slashing and penalties
+- Monitors for inactivity, poor performance, double signing, lock expiration.
+- Penalties reduce LPStakeAmount and increase PenaltyScore.
+- If stake drops below MinStake, validator is removed.
+
+Min stake dynamics
+- MinStake is updated based on mempool size (UpdateMinStake).
+- This ties network load to validator entry cost.
+
+Mining loop
+- In main.go, if mining is enabled, the node continuously:
+  - Syncs chain
+  - Syncs validators
+  - Selects a validator
+  - Mines a block and broadcasts it
+
+Notes
+- The docs recommend one miner for stable consensus. This implies production-grade multi-validator BFT consensus is not implemented yet.

@@ -1,0 +1,30 @@
+Unique Features in This Codebase (Differentiators)
+
+Important note
+- The list below describes what is unique in this repo relative to typical PoS chains.
+- It does NOT claim market-wide novelty; external market validation is required.
+
+1) Proof of Dynamic Liquidity (PoDL)
+- Validator weight = LiquidityPower, not pure stake.
+- LiquidityPower = stake * lock duration, with penalty adjustments.
+
+2) Liquidity provider reward split with curve + long-lock bonus
+- LP rewards are distributed using sqrt(stake) weighting.
+- Additional bonus share for long-lock LPs (365-2000 days).
+
+3) Dynamic min-stake based on mempool load
+- MinStake grows when transaction pool increases.
+
+4) Automatic pool liquidity rebalancing
+- Liquidity pools are tracked by contract address.
+- RebalancePoolsEqual() spreads liquidity across pools.
+
+5) Contract engine with 3 execution modes
+- Go plugin contracts (.so), bytecode interpreter, and a simple DSL.
+- Contracts emit events that are converted into system transactions.
+
+6) Bridge auto-deploys wrapped tokens on LQD
+- When a new BSC token is locked, the chain deploys a bridge token plugin and creates a mapping automatically.
+
+7) Aggregator server for global chain views
+- Proxies and aggregates responses across multiple nodes.

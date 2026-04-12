@@ -98,6 +98,8 @@ type Blockchain_struct struct {
 	LocalValidator    string
 	BlockVotes        map[string]map[string]bool
 	PendingBlocks     map[string]*Block
+
+	DLEngine *DynamicLiquidityEngine `json:"-"`
 }
 
 func (bc *Blockchain_struct) SaveBlockToDB(block *Block) error {
@@ -163,27 +165,67 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 	if !ok || block == nil {
 		return false
 	}
-	if len(bc.Validators) == 0 {
-		return false
-	}
 
-	required := int(math.Ceil(float64(len(bc.Validators)) * quorumPercent))
-	if required < 1 {
-		required = 1
+	// Determine required votes; 0 validators = single-node mode, require just 1
+	required := 1
+	if len(bc.Validators) > 0 {
+		required = int(math.Ceil(float64(len(bc.Validators)) * quorumPercent))
+		if required < 1 {
+			required = 1
+		}
 	}
 	votes := bc.BlockVotes[blockHash]
 	if len(votes) < required {
 		return false
 	}
 
-	last := bc.Blocks[len(bc.Blocks)-1]
-	if block.BlockNumber <= last.BlockNumber {
-		delete(bc.PendingBlocks, blockHash)
-		return false
+	if len(bc.Blocks) > 0 {
+		last := bc.Blocks[len(bc.Blocks)-1]
+		if block.BlockNumber <= last.BlockNumber {
+			delete(bc.PendingBlocks, blockHash)
+			delete(bc.BlockVotes, blockHash)
+			return false
+		}
 	}
 
 	bc.Blocks = append(bc.Blocks, block)
 	delete(bc.PendingBlocks, blockHash)
+	delete(bc.BlockVotes, blockHash)
+
+	// Prune stale pending blocks at or below the finalized height
+	for h, pb := range bc.PendingBlocks {
+		if pb.BlockNumber <= block.BlockNumber {
+			delete(bc.PendingBlocks, h)
+			delete(bc.BlockVotes, h)
+		}
+	}
+
+	// Remove finalized transactions from the pool
+	used := make(map[string]struct{}, len(block.Transactions))
+	for _, tx := range block.Transactions {
+		used[tx.TxHash] = struct{}{}
+	}
+	remaining := make([]*Transaction, 0, len(bc.Transaction_pool))
+	for _, tx := range bc.Transaction_pool {
+		if _, ok := used[tx.TxHash]; !ok {
+			remaining = append(remaining, tx)
+		}
+	}
+	bc.Transaction_pool = remaining
+
+	// Persist to DB
+	if err := SaveBlockToDB(block); err != nil {
+		log.Printf("TryFinalizePending: SaveBlockToDB error: %v", err)
+	}
+
+	voteCount := len(votes)
+	hashPreview := blockHash
+	if len(hashPreview) > 10 {
+		hashPreview = hashPreview[:10]
+	}
+	log.Printf("✅ Block #%d finalized | hash=%s... | votes=%d/%d",
+		block.BlockNumber, hashPreview, voteCount, len(bc.Validators))
+
 	return true
 }
 
@@ -244,6 +286,22 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 			blockchainStruct.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
 		}
 
+		// ContractEngine is not serialised to DB — must be rebuilt on every load
+		if blockchainStruct.ContractEngine == nil {
+			engine, err := NewLQDContractEngine()
+			if err != nil {
+				log.Printf("Warning: failed to init ContractEngine on load: %v", err)
+			} else {
+				blockchainStruct.ContractEngine = engine
+				if engine.Registry != nil {
+					engine.Registry.Blockchain = blockchainStruct
+				}
+			}
+		}
+
+		// Dynamic Liquidity Engine — always recreated (not persisted)
+		blockchainStruct.DLEngine = NewDynamicLiquidityEngine()
+
 		// Start auto mempool cleanup
 		go func() {
 			ticker := time.NewTicker(2 * time.Minute)
@@ -269,7 +327,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		newBlockchain.LiquidityProviders = make(map[string]*LiquidityProvider)
 		newBlockchain.MinStake = 1000000 * 1e8
 		newBlockchain.SlashingPool = 0
-		newBlockchain.FixedBlockReward = 200
+		newBlockchain.FixedBlockReward = 20 // genesis base reward (halved by emission schedule)
 		newBlockchain.setAccountBalance(constantset.LiquidityPoolAddress, NewAmountFromUint64(0))
 
 		//newBlockchain.VM = NewVM()
@@ -291,6 +349,9 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		if newBlockchain.ContractEngine != nil && newBlockchain.ContractEngine.Registry != nil {
 			newBlockchain.ContractEngine.Registry.Blockchain = newBlockchain
 		}
+
+		// Dynamic Liquidity Engine
+		newBlockchain.DLEngine = NewDynamicLiquidityEngine()
 
 		// Save to DB
 		blockchainCopy := *newBlockchain
@@ -1216,7 +1277,7 @@ func (bc *Blockchain_struct) InitLiquiditySystem() {
 	}
 
 	// set your fixed reward for block
-	bc.FixedBlockReward = 200
+	bc.FixedBlockReward = 20 // base reward
 
 	// gas reward = gasFees * multiplier
 	bc.GasRewardMultiplier = 2

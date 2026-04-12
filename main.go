@@ -173,10 +173,9 @@ func main() {
 					bc.MonitorValidators()
 				}
 
-				interval := 100 * time.Millisecond
-				if len(bc.Transaction_pool) > 200 {
-					interval = 200 * time.Millisecond
-				}
+				// Target block time: 2 seconds
+				// High mempool pressure uses same interval (consensus bound)
+				interval := 2 * time.Second
 				time.Sleep(interval)
 			}
 		}

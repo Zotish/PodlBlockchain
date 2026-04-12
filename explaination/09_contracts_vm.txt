@@ -1,0 +1,32 @@
+Smart Contracts VM
+
+Contract types supported
+1) Go plugin contracts (.so)
+   - Loaded via Go plugin system.
+   - Contract methods are reflected and exposed through a custom ABI.
+2) Bytecode from a Go-like subset
+   - Simple VM with opcodes (SET, GET, ADD, SUB, EQ, JUMP, CALL, etc).
+3) DSL
+   - Minimal string-based DSL (key=value, key+=n, emit, call).
+
+Execution pipeline
+- Contract metadata stored in LevelDB (data/contracts_db).
+- Execution creates a Context with temporary storage.
+- Gas is consumed by operations; out-of-gas triggers revert.
+- State is committed to DB at end of execution.
+
+Events
+- Contract events are recorded in a separate Event DB.
+- Events are also converted into system transactions and appended to the mempool.
+
+Contract deploy and metadata
+- Deploy routes write metadata and storage to DB.
+- ABI is generated for plugin contracts automatically.
+
+Bridged token deployment
+- Bridge tokens are auto-deployed as plugin contracts.
+- Plugin .so is copied into data/contracts/<addr>.so and registered.
+
+Notes
+- This is not EVM; it is a custom VM.
+- Plugin contracts require server-side .so files and Go plugin support.

@@ -1,0 +1,18 @@
+Wallets and Signing
+
+Wallet generation
+- Uses BIP39 (mnemonic) + BIP32 derivation.
+- Derivation path: m/44'/60'/0'/0/0 (Ethereum-style).
+- Address is Ethereum-style (secp256k1 -> keccak -> 0x...).
+
+Signing
+- Wallet signs a JSON payload containing from/to/value/data/gas/gas_price/chain_id/timestamp.
+- Hashing is double SHA256 (not keccak).
+- Signature is ECDSA secp256k1 and includes recovery byte (V).
+
+Import
+- Import by mnemonic or private key is supported.
+
+Notes
+- Since the chain is not EVM-based, the signing scheme is custom.
+- If you change the signing payload or hashing, both wallet and chain must be updated.

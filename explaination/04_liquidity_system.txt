@@ -1,0 +1,29 @@
+Liquidity System (PoDL)
+
+Core idea
+- Liquidity Providers (LPs) lock tokens for a duration and gain Liquidity Power.
+- Liquidity Power influences validator selection and reward distribution.
+
+Key structures
+- LiquidityProvider: address, stake amount, lock time, lock days, total rewards, pending rewards, and unstake flow state.
+- LiquidityLocks: per-address lock records (amount + unlock time).
+- PoolLiquidity: tracked per pool (smart contract address).
+
+Locking/unlocking
+- LockLiquidity(): removes tokens from liquid balance and records lock.
+- UnlockLiquidity()/UnlockAvailable(): releases matured locks back to balance.
+- StartUnstake(): initiates unstake (does not release instantly).
+- ProcessUnstakeReleases(): releases 1% per day after unstake begins.
+
+Liquidity pools and routing
+- Pools are keyed by contract address.
+- RebalancePoolsEqual() equalizes liquidity across pools.
+- Unallocated liquidity is moved into the richest pool first, then rebalanced.
+
+Rewards to LPs
+- Block reward split allocates a large portion to liquidity providers.
+- A curve-weighted (sqrt) distribution is used.
+- There is an extra bonus share for long-lock LPs (365-2000 days).
+
+Notes
+- This liquidity model is central to PoDL and is a core differentiator vs pure PoS.
