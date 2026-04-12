@@ -1,0 +1,35 @@
+Blocks and Rewards
+
+Block structure
+- BlockNumber, PreviousHash, CurrentHash, Timestamp.
+- Transactions list.
+- Gas metrics: GasLimit, GasUsed, BaseFee.
+- RewardBreakdown stores detailed split of rewards.
+
+Gas limit adjustment
+- GasLimit moves up/down based on previous block usage.
+- Bounded by MinGasLimit and MaxGasLimit.
+
+Mining flow (MineNewBlock)
+- Builds a new block with dynamic gas limit and base fee.
+- Parallel transaction verification.
+- Contract calls executed through ContractEngine.
+- If tx type is system/LP and not contract_call/create, it can be forced to success.
+- Applies balance changes and appends txs.
+- Calculates rewards and appends a reward transaction.
+- Saves block to DB.
+
+Reward model (CalculateBlockRewards)
+- Fixed reward: 200 LQD (configured in InitLiquiditySystem).
+- Gas rewards: fee-based with multiplier.
+- Split of fixed+gas rewards:
+  - 40% to winning validator
+  - 20% to participants
+  - 35% to LPs (curve-weighted)
+  - 5% to long-lock LPs (365-2000 days)
+- Participant share splits into:
+  - 18% to non-winning validators (curve-weighted)
+  - 2% to tx participants (sqrt of tx value)
+
+Notes
+- Reward breakdown is stored in block and also credited to account balances.

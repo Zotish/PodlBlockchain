@@ -486,13 +486,18 @@ $("quickDeployBtn").addEventListener("click", async () => {
   if (args.some(a => a === "") && fields.length) {
     toast("Fill all required fields", "error"); return;
   }
+  if (!state.address) { toast("⚠️ Wallet not connected — please unlock your wallet first", "error"); return; }
   try {
     $("quickDeployBtn").disabled = true;
-    $("quickDeployBtn").textContent = "Deploying…";
+    $("quickDeployBtn").textContent = "Compiling & Deploying… (~15s)";
     const pk = await getPrivateKey();
-    const res = await walletPost("/wallet/deploy-builtin", {
-      address: state.address, private_key: pk,
-      contract_type: type, args
+    // Quick deploy uses builtin endpoint — compiles+deploys the template automatically
+    const res = await nodePost("/contract/deploy-builtin", {
+      template: type,
+      owner: state.address,
+      private_key: pk,
+      gas: 500000,
+      init_args: args   // name, symbol, supply etc. — passed to contract's Init()
     });
     const addr = res.address || res.contract_address || "";
     showResult("quickDeployResult",
@@ -500,21 +505,8 @@ $("quickDeployBtn").addEventListener("click", async () => {
     toast("Contract deployed: " + shortAddr(addr), "success");
     await recordLocalActivity({ type: "deploy", contract: addr, contractType: type, tx_hash: res.tx_hash || "" });
   } catch (e) {
-    // Fallback to /contract/deploy endpoint
-    try {
-      const pk = await getPrivateKey();
-      const res = await walletPost("/contract/deploy", {
-        address: state.address, private_key: pk,
-        contract_type: type, args
-      });
-      const addr = res.address || "";
-      showResult("quickDeployResult", `✓ Deployed!\nAddress: ${addr}`);
-      toast("Deployed: " + shortAddr(addr), "success");
-      await recordLocalActivity({ type: "deploy", contract: addr, contractType: type, tx_hash: res.tx_hash || "" });
-    } catch (e2) {
-      showResult("quickDeployResult", "✗ " + (e2.message || e.message), true);
-      toast("Deploy failed: " + (e2.message || e.message), "error");
-    }
+    showResult("quickDeployResult", "✗ " + e.message, true);
+    toast("Deploy failed: " + e.message, "error");
   } finally {
     $("quickDeployBtn").disabled = false;
     $("quickDeployBtn").textContent = "🚀 Deploy Contract";
@@ -542,6 +534,7 @@ function setFile(f) {
 
 $("fileDeployBtn").addEventListener("click", async () => {
   if (!_contractFile) { toast("Select a contract file first", "error"); return; }
+  if (!state.address) { toast("⚠️ Wallet not connected — please unlock your wallet first", "error"); return; }
   try {
     $("fileDeployBtn").disabled = true;
     $("fileDeployBtn").textContent = "Deploying…";
@@ -550,7 +543,7 @@ $("fileDeployBtn").addEventListener("click", async () => {
     form.append("contract_file", _contractFile);
     form.append("owner", state.address);
     form.append("private_key", pk);
-    form.append("contract_type", $("fileDeployType").value);
+    form.append("type", $("fileDeployType").value);
     form.append("gas", $("fileDeployGas").value || "50000");
 
     const r = await fetch(`${state.nodeUrl}/contract/deploy`, { method: "POST", body: form });
@@ -578,7 +571,7 @@ $("loadAbiBtn").addEventListener("click", async () => {
   try {
     $("loadAbiBtn").disabled = true;
     const data = await nodeGet(`/contract/getAbi?address=${encodeURIComponent(addr)}`);
-    _callAbi = Array.isArray(data) ? data : (data.abi || data.functions || []);
+    _callAbi = Array.isArray(data) ? data : (data.entries || data.abi || data.functions || []);
     renderCallFnSelect();
     $("callFnSection").style.display = "block";
     toast(`ABI loaded: ${_callAbi.length} function(s)`, "success");
@@ -742,6 +735,7 @@ $("doCompileBtn").addEventListener("click", async () => {
 
 $("deployCompiledBtn").addEventListener("click", async () => {
   if (!state.compiledBinary) { toast("Nothing compiled yet", "error"); return; }
+  if (!state.address) { toast("⚠️ Wallet not connected — please unlock your wallet first", "error"); return; }
   try {
     $("deployCompiledBtn").disabled = true;
     $("deployCompiledBtn").textContent = "Deploying…";
@@ -756,7 +750,7 @@ $("deployCompiledBtn").addEventListener("click", async () => {
     form.append("contract_file", fileBlob, fileName);
     form.append("owner", state.address);
     form.append("private_key", pk);
-    form.append("contract_type", _compiledType);
+    form.append("type", _compiledType);
     form.append("gas", "500000");
 
     const r = await fetch(`${state.nodeUrl}/contract/deploy`, { method: "POST", body: form });
@@ -796,7 +790,7 @@ $("exploreBtn").addEventListener("click", async () => {
       nodeGet(`/contract/events?address=${encodeURIComponent(addr)}`).catch(() => null),
     ]);
 
-    const abi = Array.isArray(abiData) ? abiData : (abiData?.abi || abiData?.functions || []);
+    const abi = Array.isArray(abiData) ? abiData : (abiData?.entries || abiData?.abi || abiData?.functions || []);
     const storage = storageData?.State?.storage ?? storageData?.State ?? storageData ?? {};
     const events  = Array.isArray(eventsData) ? eventsData : (eventsData?.events || []);
 
@@ -835,17 +829,137 @@ $("exploreBtn").addEventListener("click", async () => {
           </div>`).join("")}</div>`
       : '<div class="notice">No events emitted.</div>';
 
-    // ABI
-    $("exp-abi").innerHTML = abi.length
-      ? `<div style="display:flex;flex-direction:column;gap:8px;">${abi.map(fn => `
-          <div class="stat-box">
-            <div style="font-weight:700;font-size:14px;">${fn.name}</div>
-            <div style="font-size:12px;color:var(--muted);margin-top:4px;">
-              Inputs: ${(fn.inputs||[]).map(i=>i.type||i).join(", ") || "none"}
-              ${fn.stateMutability ? " · " + fn.stateMutability : ""}
-            </div>
-          </div>`).join("")}</div>`
-      : '<div class="notice">No ABI available.</div>';
+    // ABI — full DApp-ready view with JSON + JS client + copy buttons
+    if (!abi.length) {
+      $("exp-abi").innerHTML = '<div class="notice">No ABI available.</div>';
+    } else {
+      const jsonAbi = JSON.stringify(abi, null, 2);
+      const wrappers = abi.map(fn => {
+        const params  = (fn.inputs||[]).map((_,i) => `arg${i+1}`).join(", ");
+        const hasArgs = (fn.inputs||[]).length > 0;
+        return hasArgs
+          ? `export const ${fn.name} = (${params}, from, pk) => callWrite("${fn.name}", [${params}], from, pk);`
+          : `export const ${fn.name} = (caller="") => callRead("${fn.name}", [], caller);`;
+      }).join("\n");
+
+      const jsClient = [
+        `// LQD Contract Client — ${addr}`,
+        `const CONTRACT_ADDRESS = "${addr}";`,
+        `const NODE_URL   = "http://127.0.0.1:6500";`,
+        `const WALLET_URL = "http://127.0.0.1:8080";`,
+        ``,
+        `export const ABI = ${jsonAbi};`,
+        ``,
+        `export async function callRead(fn, args = [], caller = "") {`,
+        `  const res = await fetch(NODE_URL + "/contract/call", {`,
+        `    method: "POST", headers: { "Content-Type": "application/json" },`,
+        `    body: JSON.stringify({ address: CONTRACT_ADDRESS, fn, args, caller }),`,
+        `  });`,
+        `  return (await res.json()).output;`,
+        `}`,
+        ``,
+        `export async function callWrite(fn, args = [], fromAddress, privateKey) {`,
+        `  const res = await fetch(WALLET_URL + "/wallet/contract-template", {`,
+        `    method: "POST", headers: { "Content-Type": "application/json" },`,
+        `    body: JSON.stringify({ address: fromAddress, private_key: privateKey,`,
+        `      contract_address: CONTRACT_ADDRESS, function: fn, args }),`,
+        `  });`,
+        `  return res.json();`,
+        `}`,
+        ``,
+        `// Generated wrappers`,
+        wrappers,
+      ].join("\n");
+
+      // Store in window so onclick can access without escaping hell
+      window._lqdAbiJson = jsonAbi;
+      window._lqdAbiJs   = jsClient;
+
+      const fnRows = abi.map(fn => {
+        const isRead = (fn.inputs||[]).length === 0;
+        const badge  = isRead
+          ? `style="padding:2px 8px;border-radius:4px;font-size:11px;background:rgba(22,163,74,0.15);color:#4ade80;"`
+          : `style="padding:2px 8px;border-radius:4px;font-size:11px;background:rgba(37,99,235,0.15);color:#93c5fd;"`;
+        return `<div class="stat-box" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;">
+          <div>
+            <div style="font-weight:700;font-size:13px;font-family:monospace;">${fn.name}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px;">${(fn.inputs||[]).join(", ") || "no params"}</div>
+          </div>
+          <span ${badge}>${isRead ? "read" : "write"}</span>
+        </div>`;
+      }).join("");
+
+      // Build HTML with NO inline event handlers (CSP blocks onclick="...")
+      $("exp-abi").innerHTML = `
+        <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+          <button id="abiTabJson" style="padding:5px 14px;border-radius:6px;border:1px solid var(--border);background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">JSON ABI</button>
+          <button id="abiTabJs"   style="padding:5px 14px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;">JS Client</button>
+          <button id="abiTabTable" style="padding:5px 14px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;">Functions</button>
+        </div>
+
+        <div id="abiPanelJson">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:6px;">
+            <button id="copyJsonBtn" style="padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;">📋 Copy JSON</button>
+          </div>
+          <pre id="abiJsonPre" style="background:#1e1e2e;color:#cdd6f4;font-family:monospace;font-size:11px;padding:12px;border-radius:8px;overflow:auto;max-height:420px;white-space:pre;margin:0;"></pre>
+          <div style="margin-top:8px;padding:10px;background:rgba(37,99,235,0.1);border:1px solid rgba(37,99,235,0.3);border-radius:8px;font-size:12px;color:#93c5fd;">
+            <b>Call from DApp:</b> POST http://127.0.0.1:6500/contract/call<br>
+            Body: { "address":"${addr}", "fn":"Name", "args":[], "caller":"0x..." }
+          </div>
+        </div>
+
+        <div id="abiPanelJs" style="display:none;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span style="font-size:12px;color:var(--muted);">Paste into React / Next.js / Node</span>
+            <button id="copyJsBtn" style="padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;">📋 Copy JS</button>
+          </div>
+          <pre id="abiJsPre" style="background:#1e1e2e;color:#cdd6f4;font-family:monospace;font-size:11px;padding:12px;border-radius:8px;overflow:auto;max-height:420px;white-space:pre;margin:0;"></pre>
+        </div>
+
+        <div id="abiPanelTable" style="display:none;">
+          <div style="display:flex;flex-direction:column;gap:6px;">${fnRows}</div>
+        </div>
+      `;
+
+      // Populate <pre> elements via textContent — safe, no escaping needed
+      document.getElementById("abiJsonPre").textContent = jsonAbi;
+      document.getElementById("abiJsPre").textContent   = jsClient;
+
+      // ── Attach all event listeners here (CSP-safe, no inline onclick) ──
+      const doAbiCopy = (text, btnId) => {
+        navigator.clipboard.writeText(text).catch(() => {
+          const ta = document.createElement("textarea");
+          ta.value = text; document.body.appendChild(ta);
+          ta.select(); document.execCommand("copy");
+          document.body.removeChild(ta);
+        });
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        const orig = btn.textContent;
+        btn.textContent = "✅ Copied!";
+        setTimeout(() => { btn.textContent = orig; }, 2000);
+      };
+
+      const showAbiPanel = (active) => {
+        const panels = { json:"abiPanelJson", js:"abiPanelJs", table:"abiPanelTable" };
+        const tabs   = { json:"abiTabJson",   js:"abiTabJs",   table:"abiTabTable"   };
+        Object.keys(panels).forEach(k => {
+          const panel = document.getElementById(panels[k]);
+          const tab   = document.getElementById(tabs[k]);
+          if (panel) panel.style.display = (k === active) ? "block" : "none";
+          if (tab) {
+            tab.style.background = (k === active) ? "var(--accent)" : "var(--surface2)";
+            tab.style.color      = (k === active) ? "#fff"          : "var(--text)";
+          }
+        });
+      };
+
+      document.getElementById("abiTabJson") .addEventListener("click", () => showAbiPanel("json"));
+      document.getElementById("abiTabJs")   .addEventListener("click", () => showAbiPanel("js"));
+      document.getElementById("abiTabTable").addEventListener("click", () => showAbiPanel("table"));
+      document.getElementById("copyJsonBtn").addEventListener("click", () => doAbiCopy(jsonAbi,   "copyJsonBtn"));
+      document.getElementById("copyJsBtn")  .addEventListener("click", () => doAbiCopy(jsClient,  "copyJsBtn"));
+    }
 
     $("explorerResult").style.display = "block";
     // Reset to overview tab

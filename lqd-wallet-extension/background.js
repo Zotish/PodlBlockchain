@@ -67,6 +67,22 @@ function notifyApproval(method, origin) {
 }
 
 // ── Allowlist ─────────────────────────────────────────────────────────────────
+
+// Previously auto-trusted localhost origins — purge them from storage so
+// they go through the normal approval popup instead of auto-approving.
+const FORMERLY_TRUSTED_ORIGINS = [
+  "http://localhost:3000", "http://localhost:3001", "http://localhost:5173",
+  "http://127.0.0.1:3000", "http://127.0.0.1:3001", "http://127.0.0.1:5173"
+];
+ext.storage.local.get(["allowlist"]).then((data) => {
+  const al = data.allowlist || {};
+  let changed = false;
+  for (const origin of FORMERLY_TRUSTED_ORIGINS) {
+    if (al[origin]) { delete al[origin]; changed = true; }
+  }
+  if (changed) ext.storage.local.set({ allowlist: al });
+}).catch(() => {});
+
 async function getAllowlist() {
   const data = await ext.storage.local.get(["allowlist"]);
   return data.allowlist || {};
@@ -465,10 +481,31 @@ ext.runtime.onConnect.addListener((port) => {
 
   // Push current state to the newly-connected tab (handles page reload).
   // restoreSessionIfNeeded() ensures the session is hydrated before we push.
-  restoreSessionIfNeeded().then(() => {
+  restoreSessionIfNeeded().then(async () => {
     const accounts = session.unlocked && session.address ? [session.address] : [];
     try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch {}
     try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch {}
+
+    // Flush any pending results that were saved when this tab's port was gone (SW restart)
+    try {
+      if (ext.storage.session) {
+        const d = await ext.storage.session.get(["pendingResults"]);
+        const pr = d.pendingResults || {};
+        const remaining = {};
+        for (const [id, msg] of Object.entries(pr)) {
+          // Only forward results for requests that came from this tab
+          const savedReq = (await ext.storage.local.get(["pendingRequests"])).pendingRequests || [];
+          const matchedReq = savedReq.find((r) => r.id === id && r.tabId === tabId);
+          // Also try: if this is the reconnecting tab, forward any result for it
+          try { port.postMessage(msg); } catch { remaining[id] = msg; }
+        }
+        if (Object.keys(remaining).length === 0) {
+          await ext.storage.session.remove(["pendingResults"]);
+        } else {
+          await ext.storage.session.set({ pendingResults: remaining });
+        }
+      }
+    } catch {}
   });
 
   port.onMessage.addListener((message) => {
@@ -566,38 +603,63 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === "LQD_APPROVE") {
-    const req = pending.get(message.id);
-    if (!req) { sendResponse({ ok: false, error: "Request not found" }); return false; }
-    pending.delete(message.id);
-    storePendingList();
-    const port = portsByTab.get(req.tabId);
-    if (!message.allow) {
-      if (port) port.postMessage({ type: "LQD_RESPONSE", id: req.id, error: "User rejected" });
-      sendResponse({ ok: true });
-      return false;
-    }
-    if (message.remember && req.origin) {
-      getAllowlist().then((al) => {
-        const scope = methodScope(req.method);
-        al[req.origin] = al[req.origin] || {};
-        al[req.origin][scope] = true;
-        return setAllowlist(al);
-      });
-    }
-    resetAutoLock();
-    handleRequest({ id: req.id, method: req.method, params: req.params })
-      .then((res) => {
-        if (port) port.postMessage({ type: "LQD_RESPONSE", id: req.id, result: res.result });
-        // Push updated accounts to ALL connected tabs so dApps update reactively
-        if (req.method === "lqd_connect" || req.method === "lqd_requestAccounts") {
-          pushAccounts();
+    // Restore from storage if SW was restarted and pending Map was cleared
+    Promise.resolve().then(async () => {
+      let req = pending.get(message.id);
+      if (!req) {
+        const stored = await ext.storage.local.get(["pendingRequests"]);
+        const list = stored.pendingRequests || [];
+        req = list.find((p) => p.id === message.id);
+      }
+      if (!req) { sendResponse({ ok: false, error: "Request not found" }); return; }
+      pending.delete(message.id);
+      storePendingList();
+      const port = portsByTab.get(req.tabId);
+
+      // Helper: send result to DApp via port; if port is gone, save to session for reconnect
+      async function deliverResult(resMsg) {
+        if (port) {
+          try { port.postMessage(resMsg); return; } catch {}
         }
+        // Port gone (SW was restarted) — save result to session storage so content.js
+        // can pick it up on its next reconnect/check.
+        try {
+          if (ext.storage.session) {
+            const d = await ext.storage.session.get(["pendingResults"]);
+            const pr = d.pendingResults || {};
+            pr[resMsg.id] = resMsg;
+            await ext.storage.session.set({ pendingResults: pr });
+          }
+        } catch {}
+      }
+
+      if (!message.allow) {
+        await deliverResult({ type: "LQD_RESPONSE", id: req.id, error: "User rejected" });
         sendResponse({ ok: true });
-      })
-      .catch((err) => {
-        if (port) port.postMessage({ type: "LQD_RESPONSE", id: req.id, error: err.message });
-        sendResponse({ ok: false, error: err.message });
-      });
+        return;
+      }
+      if (message.remember && req.origin) {
+        getAllowlist().then((al) => {
+          const scope = methodScope(req.method);
+          al[req.origin] = al[req.origin] || {};
+          al[req.origin][scope] = true;
+          return setAllowlist(al);
+        });
+      }
+      resetAutoLock();
+      handleRequest({ id: req.id, method: req.method, params: req.params })
+        .then(async (res) => {
+          await deliverResult({ type: "LQD_RESPONSE", id: req.id, result: res.result });
+          if (req.method === "lqd_connect" || req.method === "lqd_requestAccounts") {
+            pushAccounts();
+          }
+          sendResponse({ ok: true });
+        })
+        .catch(async (err) => {
+          await deliverResult({ type: "LQD_RESPONSE", id: req.id, error: err.message });
+          sendResponse({ ok: false, error: err.message });
+        });
+    });
     return true;
   }
   if (message.type === "LQD_GET_ALLOWLIST") {

@@ -1,0 +1,37 @@
+Bridge (BSC Testnet)
+
+Purpose
+- Enables LQD <-> BSC asset movement using lock/mint and burn/release flows.
+
+Components
+- bridge_relayer.go: scans BSC events and mints/burns on LQD.
+- bsc_bridge.sol and bsc_token_lock.sol: on BSC side.
+- bridge_token.go: LQD-side token plugin for bridged assets.
+
+Flow A: LQD -> BSC
+1) User burns LQD-side bridged token (Burn event).
+2) Chain records BridgeRequestBurn.
+3) Relayer submits release on BSC lock contract.
+
+Flow B: BSC -> LQD
+1) User locks BSC token in lock contract.
+2) Relayer detects Locked event.
+3) Relayer deploys a bridge token on LQD if mapping not found.
+4) Relayer mints tokens on LQD via contract call.
+
+State tracking
+- BridgeRequest records status: locked, minted, burned, unlocked.
+- BridgeTokenMap maps BSC token to LQD token address.
+
+Configuration (.env)
+- BSC_TESTNET_RPC
+- BSC_TESTNET_PRIVATE_KEY
+- BSC_BRIDGE_ADDRESS
+- BSC_LOCK_ADDRESS
+- BRIDGE_BACKFILL_BLOCKS
+- BRIDGE_MAX_RANGE
+- BRIDGE_POLL_INTERVAL_SEC
+
+Notes
+- This is a centralized relayer model (single private key).
+- For production use, replace with a multi-sig or decentralized relayer set.

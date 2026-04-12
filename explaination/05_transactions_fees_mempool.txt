@@ -1,0 +1,34 @@
+Transactions, Fees, and Mempool
+
+Transaction format
+- Fields: from, to, value, data, gas, gas_price, sig, nonce, chain_id, timestamp, priority_fee, is_contract, function, args, type, extra_data, is_system.
+- Hash = SHA256(SHA256(JSON(tx))).
+- Address format must be 0x + 40 hex chars.
+
+Signature model
+- Wallet signs a structured JSON payload (no nonce in payload right now).
+- Signature is secp256k1 (Ethereum-style) but custom double SHA256 hash.
+- Chain verifies signature and recovered address.
+
+Base fee and priority fee
+- Base fee is dynamic based on gas used in prior block.
+- Minimum gas price = baseFee + priorityFee.
+
+Mempool admission
+- TTL check: tx older than 24h is rejected.
+- Gas price must meet base fee.
+- Signature must verify.
+- Basic balance check before admission (authoritative debit during block execution).
+- Tx pool sorted by effective priority fee.
+- Replacement policy: requires >=10% higher effective fee.
+
+Nonce policy
+- Nonce checks are currently commented out in VerifyTransaction.
+- GetAccountNonce exists but not enforced.
+
+System transactions
+- System tx types: stake, unstake, lp_reward, reward, bridge-related, etc.
+- These bypass most checks and are treated as internal bookkeeping.
+
+Note
+- System tx fast-path means internal logic can force success, which is convenient but must be secured for mainnet use.

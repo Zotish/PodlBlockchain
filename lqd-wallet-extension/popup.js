@@ -665,7 +665,7 @@ function switchTab(active) {
 
 on("tabTokens",   "click", () => switchTab({ tab: "tabTokens",   pane: "tokensPane"   }));
 on("tabActivity", "click", () => switchTab({ tab: "tabActivity", pane: "activityPane" }));
-on("tabDapps",    "click", () => { switchTab({ tab: "tabDapps", pane: "dappsPane" }); refreshPending(); refreshAllowlist(); });
+on("tabDapps",    "click", () => { switchTab({ tab: "tabDapps", pane: "dappsPane" }); renderDappStore(); refreshPending(); refreshAllowlist(); });
 
 // ── Tokens ────────────────────────────────────────────────────────────────────
 async function fetchTokenMeta(contractAddr, nodeUrl) {
@@ -845,6 +845,79 @@ if (ext.storage?.onChanged) {
   });
 }
 
+// ── Official dApp Registry ────────────────────────────────────────────────────
+// To add/remove dApps, edit this list. url can be absolute or relative.
+const OFFICIAL_DAPPS = [
+  {
+    name: "LQD DEX",
+    description: "Swap & provide liquidity on PosDL chain",
+    icon: "⇄",
+    iconBg: "linear-gradient(135deg,#0f172a,#7c3aed)",
+    url: "http://localhost:3001",
+    category: "DeFi",
+  },
+  {
+    name: "Block Explorer",
+    description: "Browse blocks, transactions & addresses",
+    icon: "🔍",
+    iconBg: "linear-gradient(135deg,#0c4a6e,#0369a1)",
+    url: "http://localhost:3000",
+    category: "Tools",
+  },
+  {
+    name: "LQD Bridge",
+    description: "Bridge assets between LQD and BSC",
+    icon: "⬡",
+    iconBg: "linear-gradient(135deg,#064e3b,#059669)",
+    url: "http://localhost:3002",
+    category: "Bridge",
+  },
+  {
+    name: "Liquidity Pools",
+    description: "Manage LP positions & earn rewards",
+    icon: "💧",
+    iconBg: "linear-gradient(135deg,#1e3a5f,#2563eb)",
+    url: "http://localhost:3000/pools",
+    category: "DeFi",
+  },
+  {
+    name: "Validators",
+    description: "View validators & staking statistics",
+    icon: "✦",
+    iconBg: "linear-gradient(135deg,#3b0764,#7e22ce)",
+    url: "http://localhost:3000/validators",
+    category: "Staking",
+  },
+];
+
+function renderDappStore() {
+  const container = document.getElementById("dappStoreList");
+  if (!container) return;
+  container.innerHTML = "";
+  for (const dapp of OFFICIAL_DAPPS) {
+    const card = document.createElement("div");
+    card.className = "dapp-card";
+    card.innerHTML = `
+      <div class="dapp-icon" style="background:${dapp.iconBg}">${dapp.icon}</div>
+      <div class="dapp-info">
+        <div class="dapp-name">${dapp.name}</div>
+        <div class="dapp-desc">${dapp.description}</div>
+      </div>
+      <span class="dapp-category">${dapp.category}</span>`;
+
+    const launch = document.createElement("button");
+    launch.className = "dapp-launch";
+    launch.textContent = "Open ↗";
+    launch.onclick = (e) => {
+      e.stopPropagation();
+      ext.tabs.create({ url: dapp.url });
+    };
+    card.onclick = () => ext.tabs.create({ url: dapp.url });
+    card.appendChild(launch);
+    container.appendChild(card);
+  }
+}
+
 // ── Pending approvals ─────────────────────────────────────────────────────────
 function refreshPending() {
   ext.runtime.sendMessage({ type: "LQD_GET_PENDING" }, (res) => {
@@ -855,8 +928,17 @@ function refreshPending() {
 
 function renderPending(list) {
   const container = document.getElementById("pendingList");
+  const section   = document.getElementById("pendingSection");
+  const badge     = document.getElementById("pendingCount");
   if (!container) return;
-  if (!list.length) { container.innerHTML = '<div class="empty-state">No pending requests.</div>'; return; }
+
+  // Show/hide the whole pending block based on whether requests exist
+  if (!list.length) {
+    if (section) section.classList.add("hidden");
+    return;
+  }
+  if (section) section.classList.remove("hidden");
+  if (badge)   badge.textContent = String(list.length);
   container.innerHTML = "";
   for (const item of list) {
     const div = document.createElement("div");

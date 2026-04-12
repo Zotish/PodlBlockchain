@@ -1,0 +1,25 @@
+Benchmarks, TPS, and Scalability
+
+What exists in this repo
+- scripts/load_tps.go: load generator that sends batched wallet transactions and reports approx TPS.
+- benchmark_suite/benchmark_live.py: synthetic comparisons (liquidity depth, slippage, rewards fairness) and a basic TPS loop.
+- healthcheck.sh: concurrent wallet creation + tx + confirmation test.
+
+Important: there is no authoritative TPS number baked into the chain.
+- Real TPS depends on hardware, mempool size, gas limits, and network conditions.
+- The current code does not implement advanced block production scheduling or multi-proposer parallelism.
+
+How to measure TPS properly
+1) Start a local chain node and wallet server.
+2) Run scripts/load_tps.go with different rates and batch sizes.
+3) Measure ok/failed counts and block times.
+4) Repeat under multi-node sync to measure network overhead.
+
+Scalability considerations (based on code)
+- Single process node with in-memory account cache.
+- LevelDB writes are synchronous but with Sync=false (faster but less durable).
+- P2P sync is batch-based and verifies blocks in parallel, but no sharding.
+- Contract execution is custom and not gas-metered like EVM; plugin contracts can be heavy.
+
+Conclusion
+- Treat TPS as a benchmark to measure, not a fixed claim.

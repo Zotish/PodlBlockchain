@@ -1,0 +1,66 @@
+Tokenomics Spec (Draft)
+
+Purpose
+- Define LQD as the native coin (chain balance unit).
+- Make reward, fee, and treasury flows explicit and auditable.
+
+Supply Model
+- Total supply: choose one
+  - Fixed cap: 1,000,000,000 LQD
+  - Soft cap: 2,000,000,000 LQD with emission schedule
+- Decimals: 8 (per ConstantSet.Decimals)
+
+Genesis Allocation (example)
+- Community / airdrop: 20%
+- Validator / LP bootstrap: 20%
+- Ecosystem grants: 15%
+- Treasury: 25%
+- Team + advisors (vesting): 20%
+
+Emissions
+- Block reward: 200 LQD fixed base (already in code via FixedBlockReward)
+- Gas rewards: multiplier (GasRewardMultiplier = 2)
+- Target annual issuance: set by adjusting FixedBlockReward or adding a reduction schedule
+
+Reward Split (current code)
+- 40% validator (winner)
+- 20% participants
+- 35% LP curve rewards
+- 5% long-lock LP rewards
+
+Treasury Options (recommended)
+- Add a treasury share to both fixed reward and gas fees
+  - Example: Treasury = 10% of fixed reward, 5% of gas fees
+- Treasury address set in ConstantSet (e.g., TreasuryAddress)
+
+Fee Policy
+- Base fee + priority fee required
+- Decide fee burn vs treasury vs validator allocation
+  - Example: 50% burn, 30% treasury, 20% validators
+
+Staking
+- MinStake is dynamic (based on mempool size)
+- Decide validator lock duration and penalties
+
+Inflation Control
+- Add halving schedule every N blocks or dynamic emission reduction
+
+Governance
+- On-chain governance can change reward split, min stake, treasury share
+- Requires secure admin or DAO mechanism
+
+Required Code Changes (high level)
+1) Add constants:
+   - TreasuryAddress
+   - TreasuryRewardPct
+   - FeeBurnPct / FeeTreasuryPct / FeeValidatorPct
+2) Update CalculateBlockRewards to:
+   - Split fixed + gas rewards to treasury
+   - Optional burn (reduce supply by not crediting)
+3) Add treasury balance credits in blockchain state
+4) Document supply schedule and emission rules
+
+Deliverables
+- Tokenomics whitepaper (10–15 pages)
+- On-chain params in ConstantSet
+- Explorer page showing emission stats

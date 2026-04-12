@@ -1,0 +1,53 @@
+Public Testnet Checklist and Roadmap
+
+Public Testnet Checklist (minimum)
+- Security
+  - Nonce enforcement enabled
+  - Replay protection defined
+  - Peer identity and rate limiting
+  - Basic DoS protections
+  - Threat model document
+- Stability
+  - Multiple validator nodes running
+  - Chain can sync from fresh node
+  - Crash recovery test (DB integrity)
+- Observability
+  - Metrics: block time, TPS, mempool size, peers
+  - Logs aggregated + alerting
+- Docs
+  - Setup guide
+  - API reference
+  - Bridge guide
+- Governance / Ops
+  - Upgrade procedure
+  - Incident response plan
+
+Roadmap (3–6 months example)
+
+Phase 1 (Weeks 1–4): Hardening
+- Enforce nonce checks and transaction ordering
+- Improve P2P: peer identity + ban lists
+- Reduce risk of plugin contracts (sandbox plan)
+- Write spec docs: consensus, tokenomics, bridge
+
+Phase 2 (Weeks 5–8): Testnet Launch
+- Launch multi-validator testnet
+- Add metrics and explorer dashboards
+- Publish faucet and public RPC
+- Run benchmark tests and publish TPS report
+
+Phase 3 (Weeks 9–12): Security + Audit
+- External audit of consensus + bridge
+- Fix findings and patch
+- Introduce upgrade governance process
+
+Phase 4 (Weeks 13–24): Ecosystem
+- Developer SDK and example dApps
+- Incentivized testnet program
+- Partner integrations
+
+Success Criteria
+- 99.5% uptime for 30 days
+- Stable block time and consistent sync
+- No critical security issues in audit
+- At least 10 external validators

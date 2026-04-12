@@ -8,6 +8,23 @@ function getWalletUrl() {
   return localStorage.getItem("lqd_wallet_url") || WALLET_URL;
 }
 
+// Poll until TX appears in a block (confirmed), up to timeoutMs
+export async function waitForTx(txHash, timeoutMs = 20000) {
+  if (!txHash) return null;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1200));
+    try {
+      const res = await fetch(`${getNodeUrl()}/tx/${encodeURIComponent(txHash)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && (data.tx_hash || data.TxHash || data.hash)) return data;
+      }
+    } catch {}
+  }
+  return null;
+}
+
 export async function callContract({ address, caller, fn, args = [], value = 0 }) {
   const res = await fetch(`${getNodeUrl()}/contract/call`, {
     method: "POST",
@@ -22,7 +39,8 @@ export async function callContract({ address, caller, fn, args = [], value = 0 }
     data = { raw: text };
   }
   if (!res.ok) throw new Error(data.error || text || "Contract call failed");
-  return data;
+  // Unwrap aggregator envelope if present
+  return unwrapAggregator(data);
 }
 
 export async function getContractStorage(address) {
@@ -35,7 +53,7 @@ export async function getContractStorage(address) {
     data = { raw: text };
   }
   if (!res.ok) throw new Error(data.error || text || "Storage fetch failed");
-  return data;
+  return unwrapAggregator(data);
 }
 
 export async function sendContractTx({
@@ -46,10 +64,11 @@ export async function sendContractTx({
   args = [],
   value = "0",
   gas = 0,
-  gasPrice = 0
+  gasPrice = 0,
+  onPending = null
 }) {
-  // Prefer extension provider if available and no private key supplied
-  if ((!privateKey || privateKey === "") && typeof window !== "undefined" && window.lqd) {
+  // Always prefer extension provider when available — ensures popup approval
+  if (typeof window !== "undefined" && window.lqd) {
     const res = await window.lqd.request({
       method: "lqd_contractTx",
       params: [{
@@ -59,9 +78,17 @@ export async function sendContractTx({
         value,
         gas,
         gas_price: gasPrice
-      }]
+      }],
+      onPending: onPending || (() => {
+        // Default: browser notification that approval is needed
+        try {
+          const evt = new CustomEvent("lqd_approval_needed", { detail: { fn } });
+          window.dispatchEvent(evt);
+        } catch {}
+      })
     });
-    return res;
+    // Extension wraps result in { result: ... }, unwrap it
+    return res?.result ?? res;
   }
 
   const res = await fetch(`${getWalletUrl()}/wallet/contract-template`, {
@@ -105,7 +132,25 @@ export async function getTokenMeta(token, caller) {
   return { name, symbol, decimals };
 }
 
+// Unwrap aggregator envelope: { nodes: [{ result: {...} }] } → inner result
+function unwrapAggregator(data) {
+  if (data?.nodes?.[0]?.result !== undefined) return data.nodes[0].result;
+  return data;
+}
+
+export async function getNativeBalance(address) {
+  const res = await fetch(`${getNodeUrl()}/balance?address=${encodeURIComponent(address)}`);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = null; }
+  if (!res.ok) return "0";
+  const inner = unwrapAggregator(data);
+  return inner?.balance ?? inner?.Balance ?? "0";
+}
+
 export async function getTokenBalance(token, holder) {
+  // Native LQD uses blockchain balance endpoint, not contract
+  if (token === "lqd") return getNativeBalance(holder);
   const res = await callContract({
     address: token,
     caller: holder,

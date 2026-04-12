@@ -238,6 +238,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 					newBlock.BlockNumber,
 				)
 				if err != nil {
+					log.Printf("ContractTx FAILED fn=%s addr=%s err=%v", res.Tx.Function, res.Tx.To, err)
 					res.Tx.Status = constantset.StatusFailed
 					continue
 				}
@@ -284,6 +285,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		validator.Address,
 		finalTxs,
 		totalGasCost,
+		newBlock.BlockNumber,
 	)
 	newBlock.RewardBreakdown = breakdown
 	// newBlock.RewardBreakdown.ValidatorReward=CalculateRewardForValidator(totalGasCost)[validator.Address]
@@ -308,24 +310,18 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	bc.RecordRecentTx(rewardTx)
 
 	newBlock.CurrentHash = CalculateHash(&newBlock)
+
+	// Proposer self-votes, then route through pending → quorum → finalize
 	bc.AddBlockVote(newBlock.CurrentHash, validator.Address)
-	bc.Blocks = append(bc.Blocks, &newBlock)
+	bc.AddPendingBlock(&newBlock)
+	// TryFinalizePending handles txpool cleanup and DB save.
+	// On a single-validator node this finalizes immediately (1/1 votes met).
+	// On multi-validator nodes finalization waits for peer votes via network.go.
+	bc.TryFinalizePending(newBlock.CurrentHash, 0.67)
 
-	used := make(map[string]struct{})
-	for _, t := range finalTxs {
-		used[t.TxHash] = struct{}{}
-	}
-
-	remaining := make([]*Transaction, 0, len(txPool))
-	for _, t := range txPool {
-		if _, ok := used[t.TxHash]; !ok {
-			remaining = append(remaining, t)
-		}
-	}
-	bc.Transaction_pool = remaining
-
-	if err := SaveBlockToDB(&newBlock); err != nil {
-		log.Printf("SaveBlockToDB error: %v", err)
+	// Dynamic Liquidity Engine — runs every EpochBlocks, no-op otherwise.
+	if bc.DLEngine != nil {
+		bc.DLEngine.RunEpoch(bc, newBlock.BlockNumber)
 	}
 
 	bc.LastBlockMiningTime = time.Since(start)

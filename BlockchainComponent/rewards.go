@@ -263,30 +263,64 @@ func (bc *Blockchain_struct) CalculateRewardForValidator(totalRewards uint64) ma
 	return out
 }
 
-// FIXED PARAMETERS FROM YOUR CONFIG
-// ==========================================================
-// Fixed reward = 200 LQD
-// Split: Validator=40%, LP=40%, Participant=20%
-// GasMultiplier = 2×
+// ══════════════════════════════════════════════════════════════════════════════
+// EMISSION SCHEDULE
+// ══════════════════════════════════════════════════════════════════════════════
+//
+//  Block time   : 2 seconds
+//  Halving every: 4 years  = 63,115,200 blocks  (4 × 365.25 × 24 × 1800)
+//  Genesis base : 10 LQD/block  (= 1_000_000_000 satoshis)
+//  50 % cut each halving epoch → converges toward 1 B LQD max supply
+//
+//  Year  0– 4  : 10.000000000 LQD/block
+//  Year  4– 8  :  5.000000000 LQD/block
+//  Year  8–12  :  2.500000000 LQD/block
+//  Year 12–16  :  1.250000000 LQD/block
+//  … (reaches 1 B supply ~year 27)
 
-// ==========================================================
-// BLOCK REWARD CALCULATOR
-// ==========================================================
+const (
+	BlocksPerHalving  = uint64(63_115_200)   // 4 years at 2 s/block
+	GenesisRewardSats = uint64(2_000_000_000) // 20 LQD in satoshis
+)
 
-// *** LP REWARD ADD START ***
+// EmissionReward returns the block reward in satoshis for a given block number.
+// Each halving epoch halves the reward (right-shift by 1).
+// Returns 1 satoshi as the absolute floor so miners are always incentivised.
+func EmissionReward(blockNumber uint64) *big.Int {
+	halvings := blockNumber / BlocksPerHalving
+	if halvings >= 64 {
+		return big.NewInt(1) // floor: 1 satoshi
+	}
+	reward := GenesisRewardSats >> halvings
+	if reward == 0 {
+		reward = 1
+	}
+	return new(big.Int).SetUint64(reward)
+}
 
-// This function distributes full block rewards:
-//  - Fixed reward split (200 LQD)
-//  - Gas reward (gasUsed * gasPrice * 2×)
-//  - LP distribution
-//  - Participant distribution
-//  - Block stores breakdown
+// ══════════════════════════════════════════════════════════════════════════════
+// BLOCK REWARD DISTRIBUTION
+// ══════════════════════════════════════════════════════════════════════════════
+//
+//  Total pool = EmissionReward(block) + gas fees
+//
+//  ┌─────────────────────────────────────────────────────┐
+//  │  40 %  Proposer Validator  (block winner)           │
+//  │  30 %  LP Providers        (sqrt-curve weighted)    │
+//  │   5 %  Long-lock LP only   (365–2000 days)          │
+//  │  12 %  Other Validators    (non-winner, LP-weighted)│
+//  │   2 %  TX Participants     (sqrt(value) weighted)   │
+//  │  11 %  Treasury            (5 % LP + 6 % Validator) │
+//  └─────────────────────────────────────────────────────┘
 
 func (bc *Blockchain_struct) CalculateBlockRewards(
 	validator string,
 	txs []*Transaction,
 	gasFees uint64,
+	blockNumber uint64,
 ) BlockRewardBreakdown {
+
+	treasury := constantset.LiquidityPoolAddress
 
 	breakdown := BlockRewardBreakdown{
 		Validator:            validator,
@@ -297,54 +331,32 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 		ParticipantRewards:   make(map[string]string),
 	}
 
-	// -------------------------------
-	// 1. FIXED 200 LQD REWARD SPLIT
-	// -------------------------------
-	fixed := new(big.Int).SetUint64(bc.FixedBlockReward)
-	fixed.Mul(fixed, big.NewInt(1e8))
-
-	// -------------------------------
-	// 2. GAS FEE REWARDS (user-paid fees only)
-	// -------------------------------
+	// ── 1. Total pool = emission + gas ────────────────────────────────────────
+	emission := EmissionReward(blockNumber)
 	gasReward := new(big.Int).SetUint64(gasFees)
+	total := new(big.Int).Add(emission, gasReward)
 
-	// Split fixed and gas rewards separately
-	fixedValidatorShare := pctAmount(fixed, 40)
-	fixedParticipantShare := pctAmount(fixed, 20)
-	fixedLPCurveShare := pctAmount(fixed, 35)
-	fixedLPLongShare := pctAmount(fixed, 5)
+	// ── 2. Slice out each category ────────────────────────────────────────────
+	proposerShare    := pctAmount(total, 40) // 40 % → block winner
+	lpCurveShare     := pctAmount(total, 30) // 30 % → all LPs  (was 35%, -5% treasury)
+	lpLongLockShare  := pctAmount(total, 5)  //  5 % → long-lock LPs
+	otherValShare    := pctAmount(total, 12) // 12 % → other validators (was 18%, -6% treasury)
+	txPartShare      := pctAmount(total, 2)  //  2 % → TX senders
+	treasuryShare    := pctAmount(total, 11) // 11 % → treasury (5+6)
 
-	gasValidatorShare := pctAmount(gasReward, 40)
-	gasParticipantShare := pctAmount(gasReward, 20)
-	gasLPCurveShare := pctAmount(gasReward, 35)
-	gasLPLongShare := pctAmount(gasReward, 5)
-
-	validatorShare := new(big.Int).Add(fixedValidatorShare, gasValidatorShare)
-	participantShare := new(big.Int).Add(fixedParticipantShare, gasParticipantShare)
-	// tx participant share is included in participantShare
-	//txParticipantShare := fixedTxParticipantShare + gasTxParticipantShare
-
-	// Winner gets full 40% validator reward
-	if validatorShare.Sign() > 0 {
-		breakdown.ValidatorReward = AmountString(validatorShare)
-		breakdown.ValidatorRewards[validator] = AmountString(validatorShare)
-		bc.addAccountBalance(validator, CopyAmount(validatorShare))
+	// ── 3. Proposer (40 %) ────────────────────────────────────────────────────
+	if proposerShare.Sign() > 0 {
+		breakdown.ValidatorReward = AmountString(proposerShare)
+		breakdown.ValidatorRewards[validator] = AmountString(proposerShare)
+		bc.addAccountBalance(validator, CopyAmount(proposerShare))
 	}
-	// -------------------------------
-	// 3. DISTRIBUTE LP SHARE WITH CURVE + LONG-LOCK BONUS
-	//    - 35% curve to all LPs
-	//    - 5% curve only to long-lock LPs (365-2000 days)
-	// -------------------------------
-	lpCurveShare := new(big.Int).Add(fixedLPCurveShare, gasLPCurveShare)
-	lpLongLockShare := new(big.Int).Add(fixedLPLongShare, gasLPLongShare)
 
-	// 3a) Curve for all LPs (sqrt stake)
+	// ── 4. LP Providers — 30 % (sqrt-curve weighted) ─────────────────────────
 	totalLPWeight := 0.0
 	for _, lp := range bc.LiquidityProviders {
-		if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
-			continue
+		if lp.StakeAmount != nil && lp.StakeAmount.Sign() > 0 {
+			totalLPWeight += math.Sqrt(AmountToFloat64(lp.StakeAmount))
 		}
-		totalLPWeight += math.Sqrt(AmountToFloat64(lp.StakeAmount))
 	}
 	if totalLPWeight > 0 && lpCurveShare.Sign() > 0 {
 		for _, lp := range bc.LiquidityProviders {
@@ -357,13 +369,11 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 		}
 	}
 
-	// 3b) Extra 5% to long-lock LPs (365-2000 days), curve weighted
+	// ── 5. Long-lock LP — 5 % (365–2000 days only, sqrt-curve) ───────────────
 	totalLongWeight := 0.0
 	for _, lp := range bc.LiquidityProviders {
-		if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
-			continue
-		}
-		if lp.LockDays >= 365 && lp.LockDays <= 2000 {
+		if lp.StakeAmount != nil && lp.StakeAmount.Sign() > 0 &&
+			lp.LockDays >= 365 && lp.LockDays <= 2000 {
 			totalLongWeight += math.Sqrt(AmountToFloat64(lp.StakeAmount))
 		}
 	}
@@ -380,48 +390,44 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 		}
 	}
 
-	// -------------------------------
-	// 4. PARTICIPANT REWARD SPLIT (18% validators, 2% tx participants)
-	// -------------------------------
-	validatorPartShare := pctAmount(participantShare, 90) // 18/20 = 90%
-	participantTxShare := new(big.Int).Sub(participantShare, validatorPartShare)
-	//participantTxShare := txParticipantShare
-
-	// 4a) 18% to validators (excluding winner), curve weighted by stake
-	var validatorStakeSum float64
+	// ── 6. Other Validators — 12 % (non-winner, LP-weighted) ─────────────────
+	var otherValWeightSum float64
 	for _, v := range bc.Validators {
-		if v.Address == validator {
-			continue
-		}
-		if v.LPStakeAmount > 0 {
-			validatorStakeSum += math.Sqrt(v.LPStakeAmount)
+		if v.Address != validator && v.LPStakeAmount > 0 {
+			otherValWeightSum += math.Sqrt(v.LPStakeAmount)
 		}
 	}
-	if validatorStakeSum > 0 && validatorPartShare.Sign() > 0 {
+	if otherValWeightSum > 0 && otherValShare.Sign() > 0 {
 		for _, v := range bc.Validators {
 			if v.Address == validator || v.LPStakeAmount <= 0 {
 				continue
 			}
-			portion := portionFromWeight(validatorPartShare, math.Sqrt(v.LPStakeAmount), validatorStakeSum)
+			portion := portionFromWeight(otherValShare, math.Sqrt(v.LPStakeAmount), otherValWeightSum)
 			addStringAmount(breakdown.ValidatorPartRewards, v.Address, portion)
 			bc.addAccountBalance(v.Address, portion)
 		}
 	}
 
-	// 4b) 2% to tx participants with curve weighting (sqrt of tx value)
-	if len(txs) > 0 && participantTxShare.Sign() > 0 {
+	// ── 7. TX Participants — 2 % (sqrt(value) weighted) ──────────────────────
+	if len(txs) > 0 && txPartShare.Sign() > 0 {
 		totalTxWeight := 0.0
 		for _, tx := range txs {
 			totalTxWeight += math.Sqrt(AmountToFloat64(tx.Value) + 1)
 		}
 		if totalTxWeight > 0 {
 			for _, tx := range txs {
-				portion := portionFromWeight(participantTxShare, math.Sqrt(AmountToFloat64(tx.Value)+1), totalTxWeight)
+				portion := portionFromWeight(txPartShare, math.Sqrt(AmountToFloat64(tx.Value)+1), totalTxWeight)
 				addStringAmount(breakdown.ParticipantRewards, tx.TxHash, portion)
 				bc.AddParticipantReward(tx.From, portion)
 			}
 		}
 	}
+
+	// ── 8. Treasury — 11 % (5 % LP redirect + 6 % validator redirect) ────────
+	if treasuryShare.Sign() > 0 {
+		bc.addAccountBalance(treasury, CopyAmount(treasuryShare))
+	}
+
 	return breakdown
 }
 

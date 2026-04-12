@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"encoding/base64"
-	"runtime"
 	"sync"
 	"time"
 
@@ -2156,6 +2155,25 @@ func (bcs *BlockchainServer) ContractABI(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Deduplicate: remove lowercase duplicates (LoadPlugin stores each method twice —
+	// once with original name and once lowercased for case-insensitive lookup).
+	// Only return exported (capital-first) names in the ABI response.
+	var parsed struct {
+		Entries []blockchaincomponent.ABIEntry `json:"entries"`
+	}
+	if json.Unmarshal(abi, &parsed) == nil {
+		var deduped []blockchaincomponent.ABIEntry
+		for _, e := range parsed.Entries {
+			if len(e.Name) > 0 && e.Name[0] >= 'A' && e.Name[0] <= 'Z' {
+				deduped = append(deduped, e)
+			}
+		}
+		parsed.Entries = deduped
+		if out, err2 := json.Marshal(parsed); err2 == nil {
+			w.Write(out)
+			return
+		}
+	}
 	w.Write(abi)
 }
 
@@ -2420,38 +2438,17 @@ func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Write minimal go.mod — extract version from runtime e.g. "go1.24.2" → "1.24.2"
-	goVer := strings.TrimPrefix(runtime.Version(), "go")
-	parts := strings.Split(goVer, ".")
-	if len(parts) >= 2 {
-		goVer = parts[0] + "." + parts[1]
-	}
+	// Build from WITHIN the root module (no separate go.mod) — ensures all
+	// shared packages compile with identical build IDs to the host binary.
+	// The user-supplied source lands in a unique sub-dir of _plugin_builds/;
+	// since there is no go.mod there, Go inherits the root module automatically.
 
-	// Use relative path "../.." → no spaces problem, points to project root.
-	// Depth is: projectRoot/_plugin_builds/build_XXXX/ → ../../ = projectRoot
-	goMod := fmt.Sprintf(
-		"module lqdcontract\n\ngo %s\n\nrequire github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain v0.0.0\n\nreplace github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain => ../..\n",
-		goVer,
-	)
-	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
-		http.Error(w, `{"error":"failed to write go.mod"}`, 500)
-		return
-	}
-
-	// Copy go.sum from project root so checksums are satisfied
-	if sumBytes, e2 := os.ReadFile(filepath.Join(projectRoot, "go.sum")); e2 == nil {
-		_ = os.WriteFile(filepath.Join(tmpDir, "go.sum"), sumBytes, 0644)
-	}
-
-	// Run: go build -buildmode=plugin -o contract.so .
+	// Run: go build -buildmode=plugin -o contract.so <relPkg>
+	relPkg := "./" + strings.TrimPrefix(filepath.ToSlash(tmpDir), filepath.ToSlash(projectRoot)+"/")
 	outPath := filepath.Join(tmpDir, "contract.so")
-	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, ".")
-	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(),
-		"GONOSUMCHECK=*",
-		"GONOSUMDB=*",
-		"GOFLAGS=-mod=mod",
-	)
+	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, relPkg)
+	cmd.Dir = projectRoot
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	cmdOutput, err := cmd.CombinedOutput()
 	if err != nil {
 		// Return compiler error as JSON so frontend can display it
@@ -2476,6 +2473,283 @@ func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Reques
 		"binary":  encoded,
 		"size":    len(soBytes),
 	})
+}
+
+// DeployBuiltin compiles and deploys a named builtin contract template.
+// POST /contract/deploy-builtin
+// Body (JSON): { "template": "lqd20"|"dex_swap"|..., "owner": "0x...", "private_key": "...", "gas": 500000 }
+func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// Catch any panics (e.g., from plugin.Open ABI mismatch) and return them as JSON errors
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("deploy-builtin panic: %v", rec)
+			http.Error(w, fmt.Sprintf(`{"error":"internal panic: %v"}`, rec), 500)
+		}
+	}()
+
+	var req struct {
+		Template   string   `json:"template"`
+		Owner      string   `json:"owner"`
+		PrivateKey string   `json:"private_key"`
+		Gas        uint64   `json:"gas"`
+		InitArgs   []string `json:"init_args"` // optional: name, symbol, supply etc.
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, 400)
+		return
+	}
+
+	// Validate template name (whitelist)
+	validTemplates := map[string]bool{
+		"lqd20": true, "wlqd": true, "dex_swap": true, "dex_factory": true, "dex_pair": true,
+		"bridge_token": true, "lending_pool": true, "nft_collection": true, "dao_treasury": true,
+	}
+	if !validTemplates[req.Template] {
+		http.Error(w, `{"error":"unknown template"}`, 400)
+		return
+	}
+	if req.Owner == "" || !wallet.ValidateAddress(req.Owner) {
+		http.Error(w, `{"error":"invalid owner address"}`, 400)
+		return
+	}
+	if req.Gas == 0 {
+		req.Gas = 500000
+	}
+
+	// Read builtin source from project contract/ directory
+	projectRoot := findProjectRoot()
+	srcFile := filepath.Join(projectRoot, "contract", req.Template+".go")
+	srcBytes, err := os.ReadFile(srcFile)
+	if err != nil {
+		http.Error(w, `{"error":"builtin source not found: `+req.Template+`"}`, 500)
+		return
+	}
+	// Strip build constraints so the file compiles as a plugin
+	source := string(srcBytes)
+	source = strings.Replace(source, "//go:build ignore\n", "", 1)
+	source = strings.Replace(source, "// +build ignore\n", "", 1)
+
+	// Compile plugin from WITHIN the root module (no separate go.mod) so all
+	// shared packages have identical build IDs to the running host binary.
+	// Each deploy gets a unique sub-directory under _plugin_builds/ — no go.mod
+	// there means Go inherits the root module's go.mod automatically.
+	buildsDir := filepath.Join(projectRoot, "_plugin_builds")
+	_ = os.MkdirAll(buildsDir, 0755)
+	tmpDir, err := os.MkdirTemp(buildsDir, "builtin_*")
+	if err != nil {
+		http.Error(w, `{"error":"failed to create build dir"}`, 500)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "contract.go"), []byte(source), 0644); err != nil {
+		http.Error(w, `{"error":"failed to write source"}`, 500)
+		return
+	}
+
+	// Relative package path from project root → picks up root go.mod
+	relPkg := "./" + strings.TrimPrefix(filepath.ToSlash(tmpDir), filepath.ToSlash(projectRoot)+"/")
+	outPath := filepath.Join(tmpDir, "contract.so")
+	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, relPkg)
+	cmd.Dir = projectRoot
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		json.NewEncoder(w).Encode(map[string]any{"error": "compile failed: " + string(out)})
+		return
+	}
+	soBytes, err := os.ReadFile(outPath)
+	if err != nil {
+		http.Error(w, `{"error":"failed to read plugin"}`, 500)
+		return
+	}
+	// Deploy ─────────────────────────────────────────────────────────────────
+	addr := GenerateContractAddress(req.Owner, uint64(time.Now().UnixNano()))
+	meta := &blockchaincomponent.ContractMetadata{
+		Address:   addr,
+		Type:      "plugin",
+		Owner:     req.Owner,
+		Timestamp: time.Now().Unix(),
+	}
+	pluginDir := filepath.Join("data", "contracts")
+	_ = os.MkdirAll(pluginDir, 0o755)
+	pluginPath := filepath.Join(pluginDir, addr+".so")
+	if err := os.WriteFile(pluginPath, soBytes, 0o755); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	meta.PluginPath = pluginPath
+
+	// Nil-safety checks before touching blockchain internals
+	if b.BlockchainPtr == nil {
+		http.Error(w, `{"error":"blockchain not initialized"}`, 500); return
+	}
+	if b.BlockchainPtr.ContractEngine == nil {
+		http.Error(w, `{"error":"contract engine not initialized"}`, 500); return
+	}
+	if b.BlockchainPtr.ContractEngine.Registry == nil {
+		http.Error(w, `{"error":"contract registry not initialized"}`, 500); return
+	}
+	if b.BlockchainPtr.ContractEngine.Registry.PluginVM == nil {
+		http.Error(w, `{"error":"plugin VM not initialized"}`, 500); return
+	}
+
+	if err := b.BlockchainPtr.ContractEngine.Registry.PluginVM.LoadPlugin(addr, meta.PluginPath); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"plugin load: %v"}`, err), 500)
+		return
+	}
+	pc := b.BlockchainPtr.ContractEngine.Registry.PluginVM.GetPlugin(addr)
+	if pc == nil {
+		http.Error(w, `{"error":"plugin instance nil after load"}`, 500)
+		return
+	}
+	abi, err := blockchaincomponent.GenerateABIForPlugin(pc)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"ABI gen: %v"}`, err), 500)
+		return
+	}
+	meta.ABI = abi
+	meta.Pool, meta.PoolType = detectPoolFromABI(abi)
+
+	state := &blockchaincomponent.SmartContractState{
+		Address:   addr,
+		Balance:   "0",
+		Storage:   map[string]string{},
+		IsActive:  true,
+		CreatedAt: time.Now().Unix(),
+	}
+	if err := b.BlockchainPtr.ContractEngine.Registry.RegisterContract(meta, state); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"register: %v"}`, err), 500)
+		return
+	}
+	if meta.Pool {
+		b.BlockchainPtr.RegisterPool(addr)
+	}
+
+	// For dex_factory: auto-compile dex_pair template and call factory.Init(pairPluginPath)
+	if req.Template == "dex_factory" {
+		pairPluginPath, pairCompileErr := b.compilePairTemplate(projectRoot, buildsDir)
+		if pairCompileErr != nil {
+			log.Printf("deploy-builtin: dex_pair compile failed (non-fatal): %v", pairCompileErr)
+		} else {
+			if _, err := b.BlockchainPtr.ContractEngine.Pipeline.ApplyContractCall(
+				addr, req.Owner, "Init", []string{pairPluginPath},
+			); err != nil {
+				log.Printf("deploy-builtin: factory Init() failed (non-fatal): %v", err)
+			}
+		}
+	}
+
+	// Call Init() with user-supplied args (e.g. name, symbol, supply).
+	// Filter out empty strings so contracts with no init args skip gracefully.
+	// (skip for dex_factory — already handled above)
+	if req.Template != "dex_factory" {
+		initArgs := []string{}
+		for _, a := range req.InitArgs {
+			if strings.TrimSpace(a) != "" {
+				initArgs = append(initArgs, a)
+			}
+		}
+		if len(initArgs) > 0 {
+			if _, err := b.BlockchainPtr.ContractEngine.Pipeline.ApplyContractCall(
+				addr, req.Owner, "Init", initArgs,
+			); err != nil {
+				log.Printf("deploy-builtin: Init() call failed (non-fatal): %v", err)
+			}
+		}
+	}
+
+	// Create and submit a contract_create transaction (same as regular deploy)
+	fnPayload, _ := json.Marshal(map[string]any{"fn": "constructor", "args": []string{}})
+	deployTx := &blockchaincomponent.Transaction{
+		From:       req.Owner,
+		To:         addr,
+		Type:       "contract_create",
+		Function:   "constructor",
+		Args:       []string{},
+		Data:       fnPayload,
+		Timestamp:  uint64(time.Now().Unix()),
+		Status:     constantset.StatusPending,
+		IsSystem:   false,
+		ChainID:    uint64(constantset.ChainID),
+		Gas:        req.Gas,
+		GasPrice:   b.BlockchainPtr.CalculateBaseFee() + 1,
+		IsContract: true,
+	}
+	if req.PrivateKey != "" {
+		signer, err := wallet.ImportFromPrivateKey(req.PrivateKey)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"invalid private key: %v"}`, err), 400)
+			return
+		}
+		if !strings.EqualFold(signer.Address, req.Owner) {
+			http.Error(w, `{"error":"owner does not match private key"}`, 400)
+			return
+		}
+		_ = signer.SignTransaction(deployTx)
+	}
+	deployTx.TxHash = blockchaincomponent.CalculateTransactionHash(*deployTx)
+	b.BlockchainPtr.AddNewTxToTheTransaction_pool(deployTx)
+	deployTx.Status = constantset.StatusSuccess
+	b.BlockchainPtr.RecordRecentTx(deployTx)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":   "deployed",
+		"address":  addr,
+		"type":     "plugin",
+		"template": req.Template,
+		"tx_hash":  deployTx.TxHash,
+	})
+}
+
+// compilePairTemplate compiles the dex_pair template plugin and returns the .so path.
+// Called when deploying a dex_factory so the factory knows where to find pair plugin code.
+func (b *BlockchainServer) compilePairTemplate(projectRoot, buildsDir string) (string, error) {
+	// Strategy: build the pair plugin from WITHIN the root module so that all
+	// shared packages (ConstantSet, BlockchainComponent, …) compile with
+	// IDENTICAL build IDs as the host binary.
+	//
+	// dex_pair.go has `//go:build ignore` to keep it out of the normal build;
+	// we strip that tag and drop the file into a sub-directory of the root
+	// module that has NO go.mod of its own — inheriting root go.mod.
+	// `go build -buildmode=plugin` then compiles it with the same dependency
+	// graph as the host binary → compatible package hashes → no ABI mismatch.
+
+	srcFile := filepath.Join(projectRoot, "contract", "dex_pair.go")
+	srcBytes, err := os.ReadFile(srcFile)
+	if err != nil {
+		return "", fmt.Errorf("dex_pair source not found: %w", err)
+	}
+	source := string(srcBytes)
+	// Strip build-constraint tags that would cause `go build` to skip the file
+	source = strings.Replace(source, "//go:build ignore\n", "", 1)
+	source = strings.Replace(source, "// +build ignore\n", "", 1)
+
+	// A stable sub-directory inside the root module (no go.mod → uses root)
+	activeDir := filepath.Join(projectRoot, "_plugin_builds", "pair_active")
+	if err := os.MkdirAll(activeDir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir pair_active: %w", err)
+	}
+	defer os.RemoveAll(activeDir)
+
+	if err := os.WriteFile(filepath.Join(activeDir, "dex_pair.go"), []byte(source), 0644); err != nil {
+		return "", err
+	}
+
+	soPath := filepath.Join(projectRoot, "data", "pair_template.so")
+	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", soPath, "./_plugin_builds/pair_active")
+	cmd.Dir = projectRoot
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	out, errRun := cmd.CombinedOutput()
+	if errRun != nil {
+		return "", fmt.Errorf("compile pair plugin: %s: %w", string(out), errRun)
+	}
+	return soPath, nil
 }
 
 // findProjectRoot walks up from the current executable's directory
@@ -2682,7 +2956,8 @@ func maxBytesMiddleware(next http.HandlerFunc, maxBytes int64) http.HandlerFunc 
 func (b *BlockchainServer) Start() {
 	portStr := fmt.Sprintf("%d", b.Port)
 
-	const maxBodySize = 10 * 1024 * 1024 // 10 MB
+	const maxBodySize    = 10 * 1024 * 1024 // 10 MB  — general limit
+	const deployBodySize = 60 * 1024 * 1024 // 60 MB  — Go plugin .so files can be ~20 MB
 
 	http.HandleFunc("/", b.getBlockchain)
 	http.HandleFunc("/balance", b.GetBalance)
@@ -2714,7 +2989,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/validator/new", b.AddValidatorFromPeer)
 	http.HandleFunc("/validator/add", b.AddValidator)
 	http.HandleFunc("/tx/", b.GetTransactionByHash)
-	http.HandleFunc("/contract/deploy", b.limiter.middleware(maxBytesMiddleware(b.ContractDeploy, maxBodySize)))
+	http.HandleFunc("/contract/deploy", b.limiter.middleware(maxBytesMiddleware(b.ContractDeploy, deployBodySize)))
 	http.HandleFunc("/contract/call", b.limiter.middleware(maxBytesMiddleware(b.ContractCall, maxBodySize)))
 	http.HandleFunc("/contract/getAbi", b.ContractABI)
 	http.HandleFunc("/contract/con1", b.ContractState)
@@ -2722,9 +2997,10 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/contract/list", b.ContractList)
 	http.HandleFunc("/contract/compile", b.limiter.middleware(maxBytesMiddleware(b.CompileContract, maxBodySize)))
 	http.HandleFunc("/contract/compile-plugin", b.limiter.middleware(maxBytesMiddleware(b.CompileGoPlugin, maxBodySize)))
+	http.HandleFunc("/contract/deploy-builtin", b.limiter.middleware(maxBytesMiddleware(b.DeployBuiltin, maxBodySize)))
 	http.HandleFunc("/contract/storage", b.GetContractStorage)
 	http.HandleFunc("/contract/code", b.GetContractCode)
-	http.HandleFunc("/contract/events", b.ContractEvents)
+	http.HandleFunc("/contract/events", b.GetContractEvents) // address-only, no block required
 	http.HandleFunc("/basefee", b.BaseFee)
 	http.HandleFunc("/blocktime/latest", b.BlockTimeLatest)
 	http.HandleFunc("/address/{address}/transactions", b.GetAddressTransactions)

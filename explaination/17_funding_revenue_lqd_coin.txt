@@ -1,0 +1,31 @@
+Funding, Revenue, and LQD Coin
+
+Is it production ready for public launch?
+- No. See 15_security_production_readiness.txt for the concrete reasons.
+
+How to approach VC funding (pragmatic path)
+- You will not get large VC funding "fast" without proof. The fastest route is to build traction and de-risk the tech.
+- Minimum credible package:
+  - Public testnet with metrics (uptime, TPS benchmarks, security tests).
+  - Clear token model (supply, emissions, validator economics, treasury).
+  - Security review or independent audit plan.
+  - A pitch deck and 1-pager explaining PoDL and differentiation.
+- Build a short milestone roadmap (3-6 months) and show delivery pace.
+
+How to earn revenue from this blockchain
+- Transaction fees: base fee + priority fee.
+- Validator and LP participation: portion of fees/rewards can flow into a treasury.
+- Bridge fees: charge a fee for lock/mint/burn/release flows.
+- Infrastructure revenue: hosted nodes, API access, analytics.
+- Ecosystem revenue: grant programs + ecosystem tokens or DAO treasury growth.
+
+LQD as the native coin
+- In your code, the native balance is in the chain state (not a contract).
+- You can brand that native unit as LQD and set the monetary policy in the chain code.
+- The sample contract LQDToken is a plugin and is not the native coin.
+
+Suggested next steps to formalize LQD
+- Define total supply and emission schedule.
+- Define reward splits and treasury flows.
+- Decide whether gas fees are burned, allocated to treasury, or paid to validators/LPs.
+- Publish a tokenomics spec and integrate it into the reward logic.

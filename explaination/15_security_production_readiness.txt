@@ -1,0 +1,25 @@
+Security and Production Readiness
+
+Short answer
+- Based on the current code, this is NOT production-ready for a public mainnet.
+
+Why (key gaps observed in code)
+- Consensus: no BFT finality or slashing-backed consensus protocol. Longest-chain with a single miner is recommended.
+- Peer security: no authenticated peers, no Sybil resistance beyond stake registration.
+- Nonce enforcement: nonce checks are commented out; replay or ordering issues are possible.
+- Contract safety: plugin contracts run native Go code. This is powerful but risky without strong sandboxing and auditing.
+- Bridge model: single relayer private key = central point of failure.
+- Key management: no HSM or hardened key management in the repo.
+- DB durability: LevelDB Sync=false is faster but can lose recent writes on crash.
+
+What you would need before mainnet
+- Formal threat model + security audit.
+- Deterministic consensus algorithm with clear finality and fork choice rules.
+- Strict nonce enforcement and replay protection.
+- Secure P2P networking (peer identity, DoS protections).
+- Hardened contract execution sandbox or a safer VM.
+- Multi-sig or decentralized bridge relaying.
+- Comprehensive monitoring, metrics, and incident response plans.
+
+Recommendation
+- Treat this as a testnet / research prototype until the above are addressed.

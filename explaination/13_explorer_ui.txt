@@ -1,0 +1,23 @@
+Explorer UI
+
+Location
+- blockchain-explorer/ (React app)
+
+Main features (based on pages/components):
+- Dashboard with latest blocks/txs
+- Blocks list and detail
+- Transactions list and detail
+- Address view
+- Validators list and detail
+- Liquidity dashboard and pools
+- Bridge UI
+- Wallet UI (create/import/send)
+- Contract explorer and contract studio (compile/deploy/call)
+
+Tech stack
+- React 19 + react-router-dom 7
+- Ethers.js for crypto utilities
+
+Notes
+- The UI expects the chain and wallet APIs to be running.
+- Aggregator server can be used as a proxy for unified API access.

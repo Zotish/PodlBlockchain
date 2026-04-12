@@ -150,6 +150,30 @@ func (c *ContractDB) LoadStorage(addr, key string) (string, error) {
 	return string(b), nil
 }
 
+// ListContractAddresses returns all deployed contract addresses by scanning
+// metadata keys in the format "contract:{addr}:meta".
+func (c *ContractDB) ListContractAddresses() []string {
+	iter := c.db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	const prefix = "contract:"
+	const suffix = ":meta"
+	seen := make(map[string]bool)
+	var addrs []string
+
+	for iter.Next() {
+		k := string(iter.Key())
+		if strings.HasPrefix(k, prefix) && strings.HasSuffix(k, suffix) {
+			addr := k[len(prefix) : len(k)-len(suffix)]
+			if addr != "" && !seen[addr] {
+				seen[addr] = true
+				addrs = append(addrs, addr)
+			}
+		}
+	}
+	return addrs
+}
+
 func (c *ContractDB) LoadAllStorage(addr string) (map[string]string, error) {
 	iter := c.db.NewIterator(nil, nil)
 	defer iter.Release()
@@ -210,6 +234,95 @@ type ContractExecutionResult struct {
 	Events  []ContractEvent   `json:"events"`
 }
 
+// ── TxBuffer — atomic, re-entrancy-safe state buffer ─────────────────────────
+//
+// All state mutations within a single TX (including cross-contract calls) are
+// written here. The buffer is committed to the DB only when the top-level call
+// succeeds. On revert/panic the buffer is simply discarded — full rollback.
+
+const maxCallDepth = 16
+
+// nativeSend represents a pending native LQD transfer queued by ctx.SendNative.
+type nativeSend struct {
+	from string
+	to   string
+	amt  *big.Int
+}
+
+type TxBuffer struct {
+	changes     map[string]map[string]string // contract addr → storage key → value
+	events      []ContractEvent              // all events from all nested calls
+	callStack   map[string]bool              // re-entrancy guard
+	depth       int                          // current call depth
+	nativeValue *big.Int                     // LQD sent with the top-level TX (msg.value)
+	nativeSends []nativeSend                 // queued native LQD transfers (applied after commit)
+}
+
+func NewTxBuffer(value *big.Int) *TxBuffer {
+	v := new(big.Int)
+	if value != nil {
+		v.Set(value)
+	}
+	return &TxBuffer{
+		changes:     make(map[string]map[string]string),
+		events:      []ContractEvent{},
+		callStack:   make(map[string]bool),
+		nativeValue: v,
+	}
+}
+
+// GetStorage reads from buffer first, falls back to persistent DB.
+func (tb *TxBuffer) GetStorage(contractAddr, key string, db *ContractDB) string {
+	if c, ok := tb.changes[contractAddr]; ok {
+		if v, ok2 := c[key]; ok2 {
+			return v
+		}
+	}
+	val, _ := db.LoadStorage(contractAddr, key)
+	return val
+}
+
+// SetStorage writes into the buffer (never touches the DB).
+func (tb *TxBuffer) SetStorage(contractAddr, key, val string) {
+	if tb.changes[contractAddr] == nil {
+		tb.changes[contractAddr] = make(map[string]string)
+	}
+	tb.changes[contractAddr][key] = val
+}
+
+// CommitToDB flushes all buffered changes to the persistent DB atomically.
+func (tb *TxBuffer) CommitToDB(db *ContractDB) error {
+	for addr, kv := range tb.changes {
+		for k, v := range kv {
+			if err := db.SaveStorage(addr, k, v); err != nil {
+				return fmt.Errorf("commit failed for %s/%s: %w", addr, k, err)
+			}
+		}
+	}
+	return nil
+}
+
+// PushCall registers a contract as active; returns error on re-entrancy or depth overflow.
+func (tb *TxBuffer) PushCall(addr string) error {
+	if tb.depth >= maxCallDepth {
+		return fmt.Errorf("max call depth (%d) exceeded", maxCallDepth)
+	}
+	if tb.callStack[addr] {
+		return fmt.Errorf("re-entrancy detected for contract %s", addr)
+	}
+	tb.callStack[addr] = true
+	tb.depth++
+	return nil
+}
+
+// PopCall unregisters a contract from the active set.
+func (tb *TxBuffer) PopCall(addr string) {
+	delete(tb.callStack, addr)
+	if tb.depth > 0 {
+		tb.depth--
+	}
+}
+
 //  CONTEXT — SANDBOXED EXECUTION ENVIRONMENT
 
 type Context struct {
@@ -223,6 +336,8 @@ type Context struct {
 	tempStorage  map[string]string
 	events       []ContractEvent
 	callFunc     func(target string, fn string, args []string) (*ContractExecutionResult, error)
+	deployFunc   func(newAddr, pluginPath, owner string) error
+	txBuffer     *TxBuffer // nil for read-only calls; set for state-changing TXs
 }
 
 func NewContext(addr, caller, owner string, db *ContractDB, gas uint64) *Context {
@@ -240,9 +355,15 @@ func NewContext(addr, caller, owner string, db *ContractDB, gas uint64) *Context
 }
 
 func (ctx *Context) Get(key string) string {
+	// 1. Uncommitted writes in this call frame
 	if v, ok := ctx.tempStorage[key]; ok {
 		return v
 	}
+	// 2. Writes from earlier calls in this TX (atomic buffer)
+	if ctx.txBuffer != nil {
+		return ctx.txBuffer.GetStorage(ctx.ContractAddr, key, ctx.DB)
+	}
+	// 3. Persistent DB (read-only path)
 	val, _ := ctx.DB.LoadStorage(ctx.ContractAddr, key)
 	return val
 }
@@ -278,12 +399,19 @@ func (ctx *Context) SubBalance(addr string, amt *big.Int) {
 
 func (ctx *Context) Emit(ev string, data map[string]interface{}) {
 	ctx.consumeGas(500)
-	ctx.events = append(ctx.events, ContractEvent{
+	event := ContractEvent{
 		EventName: ev,
 		Data:      data,
 		Address:   ctx.ContractAddr,
 		Timestamp: time.Now().Unix(),
-	})
+	}
+	// In atomic TX mode events are collected in the shared buffer so all
+	// nested-call events appear together in the top-level result.
+	if ctx.txBuffer != nil {
+		ctx.txBuffer.events = append(ctx.txBuffer.events, event)
+	} else {
+		ctx.events = append(ctx.events, event)
+	}
 }
 
 func (ctx *Context) Call(target, fn string, args []string) (*ContractExecutionResult, error) {
@@ -292,6 +420,59 @@ func (ctx *Context) Call(target, fn string, args []string) (*ContractExecutionRe
 		return nil, fmt.Errorf("cross-call disabled")
 	}
 	return ctx.callFunc(target, fn, args)
+}
+
+// MsgValue returns the native LQD amount sent with this transaction (like msg.value in EVM).
+// Returns 0 for read-only calls or when no value was attached.
+func (ctx *Context) MsgValue() *big.Int {
+	if ctx.txBuffer == nil || ctx.txBuffer.nativeValue == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(ctx.txBuffer.nativeValue)
+}
+
+// SendNative queues a native LQD transfer from the contract to `to`.
+// The transfer is applied atomically after the entire TX succeeds.
+// Reverts if amount exceeds the contract's available native balance.
+func (ctx *Context) SendNative(to string, amt *big.Int) {
+	ctx.consumeGas(5000)
+	if ctx.txBuffer == nil {
+		ctx.Revert("SendNative only available in state-changing TX mode")
+	}
+	if amt == nil || amt.Sign() <= 0 {
+		ctx.Revert("SendNative: amount must be > 0")
+	}
+	to = strings.ToLower(strings.TrimSpace(to))
+	if to == "" {
+		ctx.Revert("SendNative: invalid recipient")
+	}
+	ctx.txBuffer.nativeSends = append(ctx.txBuffer.nativeSends, nativeSend{
+		from: ctx.ContractAddr,
+		to:   to,
+		amt:  new(big.Int).Set(amt),
+	})
+}
+
+// DeployContract deploys a new contract cloned from the given plugin path at newAddr.
+// The new contract is registered immediately so that ctx.Call(newAddr, ...) works in
+// the same transaction. If the TX later reverts the orphan metadata is harmless because
+// the factory's pairExists key is never committed to DB.
+// owner is set to ctx.ContractAddr (the factory) by convention.
+func (ctx *Context) DeployContract(newAddr, pluginPath string) {
+	ctx.consumeGas(50000)
+	if ctx.txBuffer == nil {
+		ctx.Revert("DeployContract only available in state-changing TX mode")
+	}
+	if ctx.deployFunc == nil {
+		ctx.Revert("DeployContract: deploy function not wired")
+	}
+	newAddr = strings.ToLower(strings.TrimSpace(newAddr))
+	if newAddr == "" {
+		ctx.Revert("DeployContract: invalid address")
+	}
+	if err := ctx.deployFunc(newAddr, pluginPath, ctx.ContractAddr); err != nil {
+		ctx.Revert("DeployContract failed: " + err.Error())
+	}
 }
 
 func (ctx *Context) consumeGas(n uint64) {
@@ -306,6 +487,15 @@ func (ctx *Context) Revert(reason string) {
 }
 
 func (ctx *Context) Commit() error {
+	if ctx.txBuffer != nil {
+		// Atomic mode: flush tempStorage into shared buffer (NOT the DB yet).
+		// The top-level ExecuteAtomic will commit the whole buffer on success.
+		for k, v := range ctx.tempStorage {
+			ctx.txBuffer.SetStorage(ctx.ContractAddr, k, v)
+		}
+		return nil
+	}
+	// Read-only / legacy path: write directly to DB.
 	for k, v := range ctx.tempStorage {
 		if err := ctx.DB.SaveStorage(ctx.ContractAddr, k, v); err != nil {
 			return err
@@ -758,6 +948,11 @@ func (ep *ExecutionPipeline) ApplyContractCall(addr, caller, fn string, args []s
 	return ep.Execute(addr, caller, fn, args, 5_000_000)
 }
 
+// ApplyContractCallWithValue is like ApplyContractCall but for state-changing calls with native value.
+func (ep *ExecutionPipeline) ApplyContractCallWithValue(addr, caller, fn string, args []string, value *big.Int) (*ContractExecutionResult, error) {
+	return ep.ExecuteAtomic(addr, caller, fn, args, 5_000_000, value)
+}
+
 func InitEventDB() (*EventDB, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -861,6 +1056,23 @@ func (r *ContractRegistry) LoadContract(addr string) (*ContractRecord, error) {
 	return &ContractRecord{Metadata: meta, State: state}, nil
 }
 
+// DeployClone registers a new contract at newAddr using the given plugin path.
+// The new contract shares the same compiled plugin (.so) as the template but
+// has its own isolated storage namespace in the DB.
+func (r *ContractRegistry) DeployClone(newAddr, pluginPath, owner string) error {
+	meta := &ContractMetadata{
+		Address:    newAddr,
+		Owner:      owner,
+		Type:       "plugin",
+		PluginPath: pluginPath,
+	}
+	if err := r.DB.SaveContractMetadata(newAddr, meta); err != nil {
+		return fmt.Errorf("save metadata: %w", err)
+	}
+	// Load plugin (Go plugin.Open caches same path — safe to call multiple times)
+	return r.EnsurePluginLoaded(newAddr, meta)
+}
+
 func (r *ContractRegistry) LoadABI(addr string) ([]byte, error) {
 	m, err := r.DB.LoadContractMetadata(addr)
 	if err != nil {
@@ -891,6 +1103,8 @@ func NewExecutionPipeline(reg *ContractRegistry) *ExecutionPipeline {
 	return &ExecutionPipeline{Registry: reg}
 }
 
+// Execute is the read-only call path (GetPoolInfo, BalanceOf, etc.).
+// It commits directly to DB and does NOT use a TxBuffer.
 func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas uint64) (res *ContractExecutionResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -905,11 +1119,91 @@ func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas
 	}
 
 	ctx := NewContext(addr, caller, rec.Metadata.Owner, ep.Registry.DB, gas)
+	// No txBuffer — writes go directly to DB (read-only semantics).
 
 	ctx.callFunc = func(tgt, method string, a []string) (*ContractExecutionResult, error) {
 		return ep.Execute(tgt, addr, method, a, gas/2)
 	}
 
+	return ep.dispatchVM(addr, fn, ctx, args, rec)
+}
+
+// ExecuteAtomic is the state-changing TX path.
+// ALL state changes (including cross-contract calls) are buffered and committed
+// only when the entire call tree succeeds. On any revert the buffer is discarded.
+// value is the native LQD attached to this TX (msg.value); pass nil for 0.
+func (ep *ExecutionPipeline) ExecuteAtomic(addr, caller, fn string, args []string, gas uint64, value *big.Int) (res *ContractExecutionResult, err error) {
+	txBuf := NewTxBuffer(value)
+	res, err = ep.executeInner(addr, caller, fn, args, gas, txBuf)
+	if err != nil {
+		return nil, err // buffer discarded — full rollback
+	}
+
+	// Commit all buffered storage changes atomically
+	if commitErr := txBuf.CommitToDB(ep.Registry.DB); commitErr != nil {
+		return nil, fmt.Errorf("atomic commit failed: %w", commitErr)
+	}
+
+	// Apply queued native LQD sends (after storage commit so state is consistent)
+	if ep.Registry.Blockchain != nil {
+		for _, send := range txBuf.nativeSends {
+			if !ep.Registry.Blockchain.subAccountBalance(send.from, send.amt) {
+				return nil, fmt.Errorf("native send failed: insufficient balance in %s", send.from)
+			}
+			ep.Registry.Blockchain.addAccountBalance(send.to, send.amt)
+		}
+	}
+
+	// Attach all collected events to the result
+	res.Events = txBuf.events
+	return res, nil
+}
+
+// executeInner is the recursive implementation shared by ExecuteAtomic and
+// cross-contract calls within the same TX.
+func (ep *ExecutionPipeline) executeInner(addr, caller, fn string, args []string, gas uint64, txBuf *TxBuffer) (res *ContractExecutionResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("%v", r)
+			// Distinguish explicit REVERT from unexpected panics
+			if strings.HasPrefix(msg, "REVERT:") {
+				err = fmt.Errorf("%s", msg)
+			} else {
+				err = fmt.Errorf("contract panic: %s", msg)
+			}
+			res = nil
+		}
+	}()
+
+	// Re-entrancy guard + depth check
+	if pushErr := txBuf.PushCall(addr); pushErr != nil {
+		return nil, pushErr
+	}
+	defer txBuf.PopCall(addr)
+
+	rec, err := ep.Registry.LoadContract(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := NewContext(addr, caller, rec.Metadata.Owner, ep.Registry.DB, gas)
+	ctx.txBuffer = txBuf // atomic mode
+
+	// Cross-contract calls within this TX share the same buffer
+	ctx.callFunc = func(tgt, method string, a []string) (*ContractExecutionResult, error) {
+		return ep.executeInner(tgt, addr, method, a, gas/2, txBuf)
+	}
+
+	// Contracts can deploy new contracts (e.g., factory creating pair contracts)
+	ctx.deployFunc = func(newAddr, pluginPath, owner string) error {
+		return ep.Registry.DeployClone(newAddr, pluginPath, owner)
+	}
+
+	return ep.dispatchVM(addr, fn, ctx, args, rec)
+}
+
+// dispatchVM routes to the correct VM for the contract type.
+func (ep *ExecutionPipeline) dispatchVM(addr, fn string, ctx *Context, args []string, rec *ContractRecord) (*ContractExecutionResult, error) {
 	switch rec.Metadata.Type {
 
 	case "plugin":
@@ -936,7 +1230,7 @@ func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas
 		return nil, fmt.Errorf("builtin contract - native handler required")
 	}
 
-	return nil, fmt.Errorf("invalid contract type")
+	return nil, fmt.Errorf("invalid contract type: %s", rec.Metadata.Type)
 }
 
 // SECTION 12: BLOCKCHAIN INTEGRATION
@@ -962,8 +1256,10 @@ func (ep *ExecutionPipeline) ExecuteContractTx(tx *Transaction, block uint64) (*
 		return nil, fmt.Errorf("tx missing function selector")
 	}
 
-	// Execute contract
-	res, err := ep.Execute(tx.To, tx.From, fn, args, 5_000_000)
+	// Execute contract atomically — all state changes are buffered and only
+	// committed to DB if the entire call tree succeeds (re-entrancy protected).
+	// Pass tx.Value so contracts can read msg.value and send native LQD back.
+	res, err := ep.ExecuteAtomic(tx.To, tx.From, fn, args, 5_000_000, tx.Value)
 	if err != nil {
 		return nil, err
 	}
