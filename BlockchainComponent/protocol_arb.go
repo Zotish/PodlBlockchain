@@ -23,6 +23,7 @@ package blockchaincomponent
 import (
 	"log"
 	"math/big"
+	"sort"
 	"strings"
 	"sync"
 
@@ -97,9 +98,7 @@ func (pa *ProtocolArb) RunArbitrage(bc *Blockchain_struct, metrics []PoolMetrics
 	}
 
 	treasury := constantset.LiquidityPoolAddress
-	bc.AccountsMu.RLock()
 	treasuryBal, hasTreasury := bc.getAccountBalance(treasury)
-	bc.AccountsMu.RUnlock()
 
 	if !hasTreasury || treasuryBal == nil || treasuryBal.Sign() == 0 {
 		return
@@ -138,6 +137,7 @@ func (pa *ProtocolArb) findTriangularPaths(metrics []PoolMetrics, maxCapital *bi
 	for _, m := range metrics {
 		pairMap[sortedPairKey(m.Token0, m.Token1)] = m
 	}
+	seen := make(map[string]bool)
 
 	// Test input = 10% of maxCapital for initial simulation
 	testInput := new(big.Int).Div(maxCapital, big.NewInt(10))
@@ -231,6 +231,11 @@ func (pa *ProtocolArb) findTriangularPaths(metrics []PoolMetrics, maxCapital *bi
 			if best.ProfitLQD == nil || best.ProfitLQD.Sign() <= 0 {
 				continue
 			}
+			sig := triangularPathKey(best.Leg1.PairAddr, best.Leg2.PairAddr, best.Leg3.PairAddr)
+			if seen[sig] {
+				continue
+			}
+			seen[sig] = true
 			_ = path
 			results = append(results, best)
 		}
@@ -327,14 +332,13 @@ func (pa *ProtocolArb) executeArb(bc *Blockchain_struct, treasury string, path A
 	}
 
 	// Debit treasury
-	bc.AccountsMu.Lock()
 	bal, hasBal := bc.getAccountBalance(treasury)
 	if !hasBal || bal == nil || bal.Cmp(path.InputLQD) < 0 {
-		bc.AccountsMu.Unlock()
 		return false
 	}
-	bc.subAccountBalance(treasury, path.InputLQD)
-	bc.AccountsMu.Unlock()
+	if !bc.subAccountBalance(treasury, path.InputLQD) {
+		return false
+	}
 
 	// Build new reserves
 	newR1In := new(big.Int).Add(r1In, path.InputLQD)
@@ -346,9 +350,7 @@ func (pa *ProtocolArb) executeArb(bc *Blockchain_struct, treasury string, path A
 
 	// Safety: no reserve should go ≤ 0
 	if newR1Out.Sign() <= 0 || newR2Out.Sign() <= 0 || newR3Out.Sign() <= 0 {
-		bc.AccountsMu.Lock()
 		bc.addAccountBalance(treasury, path.InputLQD)
-		bc.AccountsMu.Unlock()
 		return false
 	}
 
@@ -364,18 +366,14 @@ func (pa *ProtocolArb) executeArb(bc *Blockchain_struct, treasury string, path A
 	}
 	for _, w := range writes {
 		if err := db.SaveStorage(w.addr, w.key, w.val); err != nil {
-			bc.AccountsMu.Lock()
 			bc.addAccountBalance(treasury, path.InputLQD)
-			bc.AccountsMu.Unlock()
 			log.Printf("⚡ ProtocolArb: reserve write failed: %v", err)
 			return false
 		}
 	}
 
 	// Credit treasury with output (includes profit)
-	bc.AccountsMu.Lock()
 	bc.addAccountBalance(treasury, lqdOut)
-	bc.AccountsMu.Unlock()
 
 	log.Printf("⚡ ProtocolArb ✅  LQD→%s→%s→LQD  in=%s out=%s profit=%s",
 		path.Leg1.TokenOut, path.Leg2.TokenOut,
@@ -431,4 +429,14 @@ func sortedPairKey(a, b string) string {
 		return a + ":" + b
 	}
 	return b + ":" + a
+}
+
+func triangularPathKey(a, b, c string) string {
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(a)),
+		strings.ToLower(strings.TrimSpace(b)),
+		strings.ToLower(strings.TrimSpace(c)),
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "|")
 }

@@ -30,6 +30,41 @@ type WalletServer struct {
 	BlockchainNodeAddress string
 }
 
+func (ws *WalletServer) fetchNextNonce(client *http.Client, addr string) (uint64, error) {
+	nonceURL := fmt.Sprintf("%s/account/%s/nonce", ws.BlockchainNodeAddress, url.QueryEscape(addr))
+	resp, err := client.Get(nonceURL)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		if len(body) > 0 {
+			return 0, fmt.Errorf("nonce lookup failed: %s", strings.TrimSpace(string(body)))
+		}
+		return 0, fmt.Errorf("nonce lookup failed: %s", resp.Status)
+	}
+
+	var nonceResp struct {
+		Nonce          uint64 `json:"nonce"`
+		NextNonce      uint64 `json:"next_nonce"`
+		ConfirmedNonce uint64 `json:"confirmed_nonce"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&nonceResp); err != nil {
+		return 0, err
+	}
+
+	switch {
+	case nonceResp.NextNonce > 0:
+		return nonceResp.NextNonce, nil
+	case nonceResp.Nonce > 0:
+		return nonceResp.Nonce, nil
+	default:
+		return nonceResp.ConfirmedNonce + 1, nil
+	}
+}
+
 func NewWalletServer(port uint64, blockchainNodeAddress string) *WalletServer {
 	return &WalletServer{
 		Port:                  port,
@@ -278,59 +313,13 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	txNonce, err := ws.fetchNextNonce(client, request.From)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to get nonce from blockchain: %v"}`, err), http.StatusBadGateway)
+		return
+	}
 
 	// 4) Get NONCE (next usable)
-	// nonceURL := fmt.Sprintf("%s/account/%s/nonce", ws.BlockchainNodeAddress, request.From)
-	// resp, err := client.Get(nonceURL)
-	// if err != nil {
-	// 	http.Error(w, `{"error":"Failed to get nonce from blockchain"}`, http.StatusBadGateway)
-	// 	return
-	// }
-	// defer resp.Body.Close()
-	// if resp.StatusCode != http.StatusOK {
-	// 	body, _ := io.ReadAll(resp.Body)
-	// 	http.Error(w, string(body), resp.StatusCode)
-	// 	return
-	// }
-	// var nonceResp struct {
-	// 	Nonce          uint64 `json:"nonce"`
-	// 	NextNonce      uint64 `json:"next_nonce"`
-	// 	ConfirmedNonce uint64 `json:"confirmed_nonce"`
-	// }
-	// if err := json.NewDecoder(resp.Body).Decode(&nonceResp); err != nil {
-	// 	http.Error(w, `{"error":"Failed to decode nonce response"}`, http.StatusInternalServerError)
-	// 	return
-	// }
-
-	// // Prefer next_nonce; fallback to nonce (which our node also sets to next)
-	// txNonce := nonceResp.NextNonce
-	// if txNonce == 0 {
-	// 	txNonce = nonceResp.Nonce
-	// }
-
-	// 4) Get NONCE (if your endpoint returns CURRENT nonce, uncomment the ++)
-	// nonceURL := fmt.Sprintf("%s/account/%s/nonce", ws.BlockchainNodeAddress, request.From)
-	// resp, err := client.Get(nonceURL)
-	// if err != nil {
-	// 	http.Error(w, `{"error":"Failed to get nonce from blockchain"}`, http.StatusBadGateway)
-	// 	return
-	// }
-	// defer resp.Body.Close()
-	// if resp.StatusCode != http.StatusOK {
-	// 	body, _ := io.ReadAll(resp.Body)
-	// 	http.Error(w, string(body), resp.StatusCode)
-	// 	return
-	// }
-	// var nonceResp struct {
-	// 	Nonce uint64 `json:"nonce"`
-	// }
-	// if err := json.NewDecoder(resp.Body).Decode(&nonceResp); err != nil {
-	// 	http.Error(w, `{"error":"Failed to decode nonce response"}`, http.StatusInternalServerError)
-	// 	return
-	// }
-	// If your nonce API returns CURRENT nonce, use the next:
-	//nonceResp.Nonce++
-
 	// 5) Enforce sane gas & price (avoid underpriced txs)
 	minBaseFee := uint64(constantset.InitialBaseFee) // your chain’s base fee constant
 	gas := request.Gas
@@ -385,10 +374,10 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 		request.To,
 		valueAmt,
 		dataBytes,
-		//nonceResp.Nonce,
 	)
 	tx.Gas = gas
 	tx.GasPrice = gasPrice
+	tx.Nonce = txNonce
 	tx.ChainID = uint64(constantset.ChainID)
 
 	// 8) Sign
@@ -906,6 +895,11 @@ func (ws *WalletServer) SendTransactionBatch(w http.ResponseWriter, r *http.Requ
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
+	baseNonce, err := ws.fetchNextNonce(client, request.From)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to get nonce from blockchain: %v"}`, err), http.StatusBadGateway)
+		return
+	}
 	balResp, err := client.Get(fmt.Sprintf("%s/balance?address=%s", ws.BlockchainNodeAddress, url.QueryEscape(request.From)))
 	if err != nil {
 		http.Error(w, `{"error":"Failed to get balance from blockchain"}`, http.StatusBadGateway)
@@ -955,6 +949,7 @@ func (ws *WalletServer) SendTransactionBatch(w http.ResponseWriter, r *http.Requ
 		)
 		tx.Gas = gas
 		tx.GasPrice = gasPrice
+		tx.Nonce = baseNonce + uint64(i)
 		tx.ChainID = uint64(constantset.ChainID)
 
 		if err := signer.SignTransaction(tx); err != nil {
@@ -1070,6 +1065,12 @@ func (ws *WalletServer) ContractTemplate(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
+	txNonce, err := ws.fetchNextNonce(&http.Client{Timeout: 10 * time.Second}, req.Address)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to get nonce from blockchain: %v"}`, err), http.StatusBadGateway)
+		return
+	}
+	tx.Nonce = txNonce
 
 	if err := signer.SignTransaction(tx); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"Failed to sign tx: %v"}`, err), http.StatusBadRequest)

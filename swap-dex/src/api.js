@@ -125,6 +125,30 @@ export async function getBaseFee() {
   return (data && data.base_fee) ? data.base_fee : 0;
 }
 
+export async function getCurrentDexFactory() {
+  const res = await fetch(`${getNodeUrl()}/dex/current`);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || text || "Failed to fetch current DEX factory");
+  return data?.address || "";
+}
+
+export async function getContractAbi(address) {
+  const res = await fetch(`${getNodeUrl()}/contract/getAbi?address=${encodeURIComponent(address)}`);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || text || "ABI fetch failed");
+  const inner = unwrapAggregator(data);
+  if (Array.isArray(inner)) return inner;
+  if (Array.isArray(inner?.entries)) return inner.entries;
+  if (Array.isArray(inner?.abi)) return inner.abi;
+  if (Array.isArray(data?.entries)) return data.entries;
+  if (Array.isArray(data?.abi)) return data.abi;
+  return [];
+}
+
 export async function getTokenMeta(token, caller) {
   const name = await tryFn(token, caller, "Name");
   const symbol = await tryFn(token, caller, "Symbol");

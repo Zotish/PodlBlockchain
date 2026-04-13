@@ -151,6 +151,7 @@
 // src/components/SendTransaction.jsx
 import React, { useState, useEffect } from 'react';
 import { parseLQD, formatLQD, LQD_DECIMALS } from "./lqdUnits";
+import { waitForTx } from "../../utils/api";
 
 const NODE_URL = "http://127.0.0.1:9000";
 
@@ -281,13 +282,19 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
       setSuccess(`Transaction sent! Hash: ${hash}`);
       setToAddress('');
       setAmount('');
-      // refresh live balance display
-      setTimeout(() => {
-        fetch(`${NODE_URL}/balance?address=${encodeURIComponent(fromAddress)}`)
-          .then(r => r.json())
-          .then(d => setRawBalance(d.balance || d.Balance || "0"))
-          .catch(() => {});
-      }, 2000);
+      if (hash) {
+        await waitForTx(hash, 5000).catch(() => null);
+      }
+      // refresh live balance display after confirmation
+      fetch(`${NODE_URL}/balance?address=${encodeURIComponent(fromAddress)}`)
+        .then(r => r.json())
+        .then(d => {
+          setRawBalance(d.balance || d.Balance || "0");
+          try {
+            window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: fromAddress, txHash: hash } }));
+          } catch {}
+        })
+        .catch(() => {});
       
     } catch (err) {
       setError(err.message);

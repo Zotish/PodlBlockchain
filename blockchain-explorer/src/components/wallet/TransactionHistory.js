@@ -13,21 +13,24 @@ const TransactionHistory = ({ address }) => {
   const fetchTransactionHistory = async () => {
     try {
       setError('');
-      
-      // Preferred: direct address history (does not disappear)
-      let allTransactions = [];
+      const allTransactions = [];
+
+      // Direct address history, if available.
       try {
         const data = await fetchJSON(`/address/${address}/transactions`);
         const items = mergeArrayResults(data, 'tx_hash');
-        if (Array.isArray(items) && items.length > 0) {
-          allTransactions = items.map((tx) => ({
+        if (Array.isArray(items)) {
+          allTransactions.push(...items.map((tx) => ({
             ...tx,
             blockNumber: tx.block_number ?? tx.blockNumber,
             timestamp: tx.timestamp ?? tx.time,
-          }));
+          })));
         }
-      } catch {
-        // Fallback to recent blocks if endpoint not available
+      } catch {}
+
+      // Always merge recent blocks too, so we still show txs if address history
+      // is missing or lags behind.
+      try {
         const data = await fetchJSON('/fetch_last_n_block');
         const blocks = mergeArrayResults(data, 'block_number');
         blocks.forEach(block => {
@@ -36,18 +39,24 @@ const TransactionHistory = ({ address }) => {
               if (tx.from === address || tx.to === address) {
                 allTransactions.push({
                   ...tx,
-                  blockNumber: block.block_number,
-                  timestamp: block.timestamp
+                  blockNumber: block.block_number ?? block.BlockNumber,
+                  timestamp: block.timestamp ?? block.TimeStamp
                 });
               }
             });
           }
         });
-      }
+      } catch {}
+
+      const seen = new Map();
+      allTransactions.forEach((tx) => {
+        const key = tx.tx_hash || tx.txHash || `${tx.blockNumber || ""}:${tx.from || ""}:${tx.to || ""}:${tx.value || ""}`;
+        if (!seen.has(key)) seen.set(key, tx);
+      });
 
       // Sort by timestamp (newest first)
-      allTransactions.sort((a, b) => b.timestamp - a.timestamp);
-      setTransactions(allTransactions);
+      const merged = Array.from(seen.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      setTransactions(merged);
       setPage(1); // reset to first page on refresh
       
     } catch (err) {
@@ -59,6 +68,12 @@ const TransactionHistory = ({ address }) => {
 
   useEffect(() => {
     fetchTransactionHistory();
+  }, [address]);
+
+  useEffect(() => {
+    const onWalletUpdated = () => fetchTransactionHistory();
+    window.addEventListener('lqd:wallet-updated', onWalletUpdated);
+    return () => window.removeEventListener('lqd:wallet-updated', onWalletUpdated);
   }, [address]);
 
   const formatTime = (timestamp) => {

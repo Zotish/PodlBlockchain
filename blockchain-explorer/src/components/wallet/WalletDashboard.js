@@ -13,11 +13,12 @@ import TransactionHistory from './TransactionHistory';
 import ContractManager from '../contracts/ContractManager';
 
 import './Wallet.css';
-import { lock } from 'ethers';
 import LiquidityDashboard from './LiquidityDashboard';
 import BridgePanel from './BridgePanel';
 
 const STORAGE_KEY = 'liquidityChainWallet';
+const TOKENS_STORAGE_KEY = 'liquidity_tokens_v1';
+const INACTIVITY_LIMIT = 60 * 1000; // 1 minute
 
 // Helpers for encrypting/decrypting private key using Web Crypto
 const enc = new TextEncoder();
@@ -96,13 +97,14 @@ const WalletDashboard = () => {
   const [savedWalletMeta, setSavedWalletMeta] = useState(null);
   const [unlockPassword, setUnlockPassword] = useState('');
   const [unlockError, setUnlockError] = useState('');
+  const [backupMessage, setBackupMessage] = useState('');
   const navigate = useNavigate();
   const sentConnectRef = useRef(false);
+  const backupInputRef = useRef(null);
 
   // --------------------------------------------------
   // 🔐 AUTO-LOCK HOOKS (always at top, non-conditional)
   // --------------------------------------------------
-  const INACTIVITY_LIMIT = 60 * 1000; // 1 minute
   const inactivityRef = useRef(null);
   const lockWallet = useCallback(() => {
     setPrivateKey('');
@@ -119,6 +121,54 @@ const WalletDashboard = () => {
     setUnlockError('');
     localStorage.removeItem(STORAGE_KEY);
     sentConnectRef.current = false;
+  }, []);
+
+  const exportBackup = useCallback(() => {
+    if (!walletAddress) return;
+    const walletRaw = localStorage.getItem(STORAGE_KEY);
+    const tokensRaw = localStorage.getItem(`${TOKENS_STORAGE_KEY}_${walletAddress.toLowerCase()}`) || '[]';
+    let wallet = { address: walletAddress };
+    try {
+      wallet = walletRaw ? JSON.parse(walletRaw) : wallet;
+    } catch {}
+    let tokens = [];
+    try {
+      tokens = JSON.parse(tokensRaw);
+    } catch {}
+    const backup = {
+      exportedAt: new Date().toISOString(),
+      wallet,
+      tokens,
+      app: 'blockchain-explorer-wallet',
+      version: 1,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `lqd-wallet-backup-${walletAddress.slice(2, 8)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setBackupMessage('Backup exported.');
+  }, [walletAddress]);
+
+  const importBackupFile = useCallback(async (file) => {
+    if (!file) return;
+    const parsed = JSON.parse(await file.text());
+    const wallet = parsed.wallet || parsed;
+    if (!wallet?.address) {
+      throw new Error('Backup file missing wallet address');
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(wallet));
+    if (Array.isArray(parsed.tokens)) {
+      localStorage.setItem(`${TOKENS_STORAGE_KEY}_${wallet.address.toLowerCase()}`, JSON.stringify(parsed.tokens));
+    }
+    setSavedWalletMeta(wallet);
+    setWalletAddress(wallet.address);
+    setIsWalletLoaded(false);
+    setPrivateKey('');
+    setUnlockPassword('');
+    setBackupMessage('Backup imported. Unlock the wallet to continue.');
   }, []);
 
   const resetInactivityTimer = useCallback(() => {
@@ -365,6 +415,12 @@ const WalletDashboard = () => {
         >
         Bridge
       </button>
+      <button
+       className={`tab ${activeTab === 'settings' ? 'active' : ''}`}
+        onClick={() => setActiveTab('settings')}
+        >
+        Settings
+      </button>
       </div>
 
 
@@ -383,6 +439,62 @@ const WalletDashboard = () => {
        <LiquidityDashboard address={walletAddress} />)}
         {activeTab === 'bridge' && (
           <BridgePanel lqdAddress={walletAddress} lqdPrivateKey={privateKey} />
+        )}
+        {activeTab === 'settings' && (
+          <div style={{ display: 'grid', gap: 16 }}>
+            <div className="balance-card">
+              <h3>Wallet Backup</h3>
+              <p style={{ color: '#6b7280', marginTop: 0 }}>
+                Export or import encrypted wallet metadata and the local token watchlist.
+              </p>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <button className="btn-primary" style={{ width: 'auto' }} onClick={exportBackup}>
+                  Export Backup
+                </button>
+                <button className="btn-secondary" style={{ width: 'auto' }} onClick={() => backupInputRef.current?.click()}>
+                  Import Backup
+                </button>
+                <button className="btn-secondary" style={{ width: 'auto' }} onClick={() => navigator.clipboard.writeText(walletAddress)}>
+                  Copy Address
+                </button>
+              </div>
+              <input
+                ref={backupInputRef}
+                type="file"
+                accept="application/json"
+                style={{ display: 'none' }}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  try {
+                    await importBackupFile(file);
+                  } catch (err) {
+                    setBackupMessage(err.message || 'Backup import failed');
+                  } finally {
+                    e.target.value = '';
+                  }
+                }}
+              />
+              {backupMessage && <div style={{ marginTop: 12, color: '#166534' }}>{backupMessage}</div>}
+            </div>
+
+            <div className="balance-card">
+              <h3>Wallet Details</h3>
+              <div className="balance-details" style={{ marginTop: 8 }}>
+                <div className="balance-item">
+                  <span>Address</span>
+                  <span style={{ wordBreak: 'break-all' }}>{walletAddress}</span>
+                </div>
+                <div className="balance-item">
+                  <span>Token watchlist key</span>
+                  <span style={{ wordBreak: 'break-all' }}>{`${TOKENS_STORAGE_KEY}_${walletAddress.toLowerCase()}`}</span>
+                </div>
+                <div className="balance-item">
+                  <span>Recovery</span>
+                  <span>Encrypted local backup</span>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
       </div>

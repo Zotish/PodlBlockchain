@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
 )
 
 const (
@@ -84,84 +86,104 @@ func (ns *NetworkService) syncWithPeer(peer *Peer, ourHeight int) error {
 		peer.HTTPPort = int(httpPort)
 	}
 
-	// Pipeline stages
-	type batch struct {
-		start, end int
-		blocks     []*Block
-		err        error
-	}
-
-	batchChan := make(chan batch)
-	resultChan := make(chan batch)
-
-	// Start verifier workers
-	var wg sync.WaitGroup
-	for i := 0; i < runtime.NumCPU(); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for b := range batchChan {
-				for _, block := range b.blocks {
-					if !ns.Blockchain.VerifySingleBlock(block) {
-						b.err = fmt.Errorf("invalid block at height %d", block.BlockNumber)
-						break
-					}
-				}
-				resultChan <- b
-			}
-		}()
-	}
-
-	// Start batched requests
-	go func() {
-		defer close(batchChan)
-		for start := ourHeight; start < peer.Height; start += SyncBatchSize {
-			end := start + SyncBatchSize
-			if end > peer.Height {
-				end = peer.Height
-			}
-
-			request := map[string]interface{}{
-				"type":        "sync",
-				"start_block": start,
-				"end_block":   end,
-			}
-
-			if err := json.NewEncoder(conn).Encode(request); err != nil {
-				batchChan <- batch{err: fmt.Errorf("encode failed: %v", err)}
-				return
-			}
-
-			var blocks []*Block
-			for i := start; i < end; i++ {
-				var block Block
-				if err := decoder.Decode(&block); err != nil {
-					batchChan <- batch{err: fmt.Errorf("decode failed at height %d: %v", i, err)}
-					return
-				}
-				blocks = append(blocks, &block)
-			}
-
-			batchChan <- batch{start: start, end: end, blocks: blocks}
-		}
-	}()
-
-	// Close resultChan after all workers exit.
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Process results
-	for b := range resultChan {
-		if b.err != nil {
-			return b.err
+	for start := ourHeight; start < peer.Height; start += SyncBatchSize {
+		end := start + SyncBatchSize
+		if end > peer.Height {
+			end = peer.Height
 		}
 
-		ns.Blockchain.Mutex.Lock()
-		ns.Blockchain.Blocks = append(ns.Blockchain.Blocks[:b.start], b.blocks...)
-		ns.Blockchain.Transaction_pool = []*Transaction{}
-		ns.Blockchain.Mutex.Unlock()
+		request := map[string]interface{}{
+			"type":        "sync",
+			"start_block": start,
+			"end_block":   end,
+		}
+
+		if err := json.NewEncoder(conn).Encode(request); err != nil {
+			return fmt.Errorf("encode failed: %v", err)
+		}
+
+		blocks := make([]*Block, 0, end-start)
+		for i := start; i < end; i++ {
+			_ = conn.SetReadDeadline(time.Now().Add(PeerResponseThreshold))
+			var block Block
+			if err := decoder.Decode(&block); err != nil {
+				return fmt.Errorf("decode failed at height %d: %v", i, err)
+			}
+			_ = conn.SetReadDeadline(time.Time{})
+			blocks = append(blocks, &block)
+		}
+
+		if err := ns.applySyncedBlocks(blocks, start); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (ns *NetworkService) applySyncedBlocks(blocks []*Block, start int) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	ns.Blockchain.Mutex.Lock()
+	defer ns.Blockchain.Mutex.Unlock()
+
+	if start > len(ns.Blockchain.Blocks) {
+		return fmt.Errorf("sync start %d beyond local height %d", start, len(ns.Blockchain.Blocks))
+	}
+
+	chain := append([]*Block(nil), ns.Blockchain.Blocks[:start]...)
+	for _, block := range blocks {
+		if err := ns.verifySyncedBlock(chain, block); err != nil {
+			return err
+		}
+		chain = append(chain, block)
+	}
+
+	ns.Blockchain.Blocks = chain
+	ns.Blockchain.Transaction_pool = []*Transaction{}
+	return nil
+}
+
+func (ns *NetworkService) verifySyncedBlock(chain []*Block, block *Block) error {
+	if block == nil {
+		return fmt.Errorf("nil block in sync stream")
+	}
+	if len(chain) == 0 {
+		return fmt.Errorf("cannot sync onto empty chain")
+	}
+
+	prev := chain[len(chain)-1]
+	if block.BlockNumber != prev.BlockNumber+1 {
+		return fmt.Errorf("unexpected block number %d after %d", block.BlockNumber, prev.BlockNumber)
+	}
+	if block.PreviousHash != prev.CurrentHash {
+		return fmt.Errorf("previous hash mismatch at height %d", block.BlockNumber)
+	}
+
+	tempHash := block.CurrentHash
+	block.CurrentHash = ""
+	calculatedHash := CalculateHash(block)
+	block.CurrentHash = tempHash
+	if calculatedHash != tempHash {
+		return fmt.Errorf("invalid hash at height %d", block.BlockNumber)
+	}
+
+	if block.TimeStamp < prev.TimeStamp {
+		return fmt.Errorf("non-monotonic timestamp at height %d", block.BlockNumber)
+	}
+	now := uint64(time.Now().Unix())
+	if block.TimeStamp > now+30 {
+		return fmt.Errorf("future timestamp at height %d", block.BlockNumber)
+	}
+
+	totalGas := uint64(0)
+	for _, tx := range block.Transactions {
+		totalGas += tx.Gas * tx.GasPrice
+		if totalGas > uint64(constantset.MaxBlockGas) {
+			return fmt.Errorf("gas overflow at height %d", block.BlockNumber)
+		}
 	}
 
 	return nil
@@ -240,6 +262,9 @@ func (ns *NetworkService) fetchPeerHeight(peer *Peer) error {
 	if httpPort, ok := peerVersion["http_port"].(float64); ok {
 		peer.HTTPPort = int(httpPort)
 	}
+	peer.IsActive = true
+	peer.LastSeen = time.Now()
+	peer.LastUpdated = time.Now()
 	return nil
 }
 func (ns *NetworkService) processPeerEvents() {
@@ -247,7 +272,7 @@ func (ns *NetworkService) processPeerEvents() {
 
 		ns.Mutex.Lock()
 
-	peer, exists := ns.Peers[peerKey(event.Peer)]
+		peer, exists := ns.Peers[peerKey(event.Peer)]
 		if exists {
 			switch event.Type {
 			case "block":
@@ -479,42 +504,17 @@ func (ns *NetworkService) handleConnection(conn net.Conn) {
 			"best_height": len(ns.Blockchain.Blocks),
 			"timestamp":   time.Now().Unix(),
 			"listen_port": toIntPort(ns.ListenPort),
+			"http_port":   ns.HTTPPort,
 		}
 
 		if err := json.NewEncoder(conn).Encode(ourVersion); err != nil {
 			log.Printf("Error sending our version: %v", err)
 			return
 		}
+		peer.IsActive = true
 		handledHandshake = true
 	} else {
 		// No handshake provided; treat first message as regular message.
-	}
-
-	// 4. Exchange peer lists if this is a bootstrap node
-	if peer.IsActive {
-		// Request peer list
-		if err := json.NewEncoder(conn).Encode(map[string]string{"type": "getpeers"}); err != nil {
-			log.Printf("Error requesting peer list: %v", err)
-			return
-		}
-
-		// Receive peer list
-		var peerList struct {
-			Peers []struct {
-				Address string `json:"address"`
-				Port    int    `json:"port"`
-			} `json:"peers"`
-		}
-
-		if err := decoder.Decode(&peerList); err != nil {
-			log.Printf("Error reading peer list: %v", err)
-			return
-		}
-
-		// Add new peers
-		for _, p := range peerList.Peers {
-			ns.AddPeer(p.Address, p.Port, false)
-		}
 	}
 
 	// Handshake complete, reset deadline
@@ -618,12 +618,21 @@ func (ns *NetworkService) handleConnection(conn net.Conn) {
 		}
 	}
 
-	// Clean up disconnected peer
+	// Keep the peer record for future reconnect / gossip. Health checks and
+	// reputation decay will prune dead peers later; dropping here breaks
+	// proposer->follower broadcasts because most exchanges are short-lived.
 	ns.Mutex.Lock()
-	delete(ns.Peers, peerKey(peer))
+	if existing, ok := ns.Peers[peerKey(peer)]; ok && existing != nil {
+		existing.IsActive = true
+		existing.LastUpdated = time.Now()
+	}
 	ns.Mutex.Unlock()
 }
 func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) {
+	if peer != nil {
+		peer.LastSeen = time.Now()
+		peer.LastUpdated = time.Now()
+	}
 
 	msgType, ok := msg["type"].(string)
 	if !ok {
@@ -652,10 +661,25 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 		}
 
 		ns.Blockchain.Mutex.Lock()
-		localHeight := len(ns.Blockchain.Blocks) - 1
+		localHeight := uint64(0)
+		if len(ns.Blockchain.Blocks) > 0 {
+			localHeight = ns.Blockchain.Blocks[len(ns.Blockchain.Blocks)-1].BlockNumber
+		}
 		ns.Blockchain.Mutex.Unlock()
-		if int(block.BlockNumber) <= localHeight {
+		if block.BlockNumber <= localHeight {
 			log.Printf("Stale block received from %s (height %d <= %d)", peer.Address, block.BlockNumber, localHeight)
+			return
+		}
+		if block.BlockNumber > localHeight+1 {
+			if peer != nil && int(block.BlockNumber)+1 > peer.Height {
+				peer.Height = int(block.BlockNumber) + 1
+			}
+			log.Printf("Future block received from %s (height %d > %d+1), triggering sync", peer.Address, block.BlockNumber, localHeight)
+			go func() {
+				if err := ns.SyncChain(); err != nil {
+					log.Printf("SyncChain after future block failed: %v", err)
+				}
+			}()
 			return
 		}
 
@@ -786,9 +810,18 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 			return
 		}
 		ns.Blockchain.Mutex.Lock()
+		alreadySeen := false
+		if ns.Blockchain.BlockVotes != nil {
+			if voters, ok := ns.Blockchain.BlockVotes[hash]; ok && voters != nil {
+				alreadySeen = voters[validator]
+			}
+		}
 		ns.Blockchain.AddBlockVote(hash, validator)
 		finalized := ns.Blockchain.TryFinalizePending(hash, 0.67)
 		ns.Blockchain.Mutex.Unlock()
+		if !alreadySeen {
+			go ns.BroadcastVote(hash, validator)
+		}
 		if finalized {
 			log.Printf("✅ Block finalized via vote from %s", validator)
 		}
@@ -948,7 +981,7 @@ func (ns *NetworkService) BroadcastBlock(block *Block) error {
 		if len(targets) >= 3 { // Fan-out of 3
 			break
 		}
-		if p.IsActive && time.Since(p.LastSeen) < time.Minute {
+		if p != nil && !ns.isSelfPeer(p) && time.Since(p.LastSeen) < time.Minute {
 			targets = append(targets, p)
 		}
 	}
@@ -975,6 +1008,9 @@ func (ns *NetworkService) BroadcastTransaction(tx *Transaction) error {
 	defer ns.Mutex.Unlock()
 
 	for _, peer := range ns.Peers {
+		if peer == nil || ns.isSelfPeer(peer) {
+			continue
+		}
 		go ns.sendData(peer, data)
 	}
 
@@ -996,7 +1032,7 @@ func (ns *NetworkService) BroadcastVote(blockHash string, validator string) {
 	ns.Mutex.Lock()
 	defer ns.Mutex.Unlock()
 	for _, peer := range ns.Peers {
-		if peer == nil {
+		if peer == nil || ns.isSelfPeer(peer) {
 			continue
 		}
 		go ns.sendData(peer, data)
@@ -1009,35 +1045,39 @@ func (ns *NetworkService) SyncChain() error {
 	defer func() {
 		log.Printf("Sync completed in %v", time.Since(startTime))
 	}()
-	ns.Mutex.Lock()
-	defer ns.Mutex.Unlock()
 
 	// Apply reputation decay
 	now := time.Now()
+	ns.Mutex.Lock()
+	peers := make([]*Peer, 0, len(ns.Peers))
 	for _, peer := range ns.Peers {
-		if peer.LastUpdated.IsZero() {
+		if peer.Reputation <= 0 || peer.LastUpdated.IsZero() {
 			peer.Reputation = 1.0 // Initial reputation
 		} else {
 			hours := now.Sub(peer.LastUpdated).Hours()
-			peer.Reputation *= PeerReputationDecay * hours
+			if hours < 0 {
+				hours = 0
+			}
+			peer.Reputation *= math.Pow(PeerReputationDecay, hours)
 			if peer.Reputation < 0.1 {
 				peer.Reputation = 0.1 // Minimum reputation
 			}
 		}
 		peer.LastUpdated = now
+		peers = append(peers, peer)
 	}
+	ns.Mutex.Unlock()
 
+	ns.Blockchain.Mutex.Lock()
 	ourHeight := len(ns.Blockchain.Blocks)
+	ns.Blockchain.Mutex.Unlock()
 	var bestPeer *Peer
 	bestScore := 0.0
 
-	for _, peer := range ns.Peers {
-		if peer.Height == 0 {
-			go func(p *Peer) { // async — don't block mining loop
-				if err := ns.fetchPeerHeight(p); err != nil {
-					log.Printf("Failed to fetch peer height from %s:%d: %v", p.Address, p.Port, err)
-				}
-			}(peer)
+	for _, peer := range peers {
+		if err := ns.fetchPeerHeight(peer); err != nil {
+			log.Printf("Failed to fetch peer height from %s:%d: %v", peer.Address, peer.Port, err)
+			continue
 		}
 		// Skip peers with low reputation
 		if peer.Reputation < MinReputationThreshold {
@@ -1070,14 +1110,18 @@ func (ns *NetworkService) SyncChain() error {
 		if err := ns.syncWithPeer(bestPeer, ourHeight); err != nil {
 			lastErr = err
 			// Penalize peer for failed sync
+			ns.Mutex.Lock()
 			bestPeer.Reputation *= 0.8
+			ns.Mutex.Unlock()
 			log.Printf("Sync attempt %d failed: %v (peer reputation now: %.2f)",
 				attempt, err, bestPeer.Reputation)
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
 		// Reward peer for successful sync
+		ns.Mutex.Lock()
 		bestPeer.Reputation = min(1.0, bestPeer.Reputation*1.1)
+		ns.Mutex.Unlock()
 		return nil
 	}
 
@@ -1099,12 +1143,10 @@ func (ns *NetworkService) BroadcastValidator(v *Validator) {
 	defer ns.Mutex.Unlock()
 
 	for peerKey, peer := range ns.Peers {
-		// Skip dead/inactive peers if you track that
-		if peer == nil || !peer.IsActive {
+		if peer == nil || peer.HTTPPort == 0 || ns.isSelfPeer(peer) {
 			continue
 		}
-
-		url := fmt.Sprintf("http://%s:%d/validator/new", peer.Address, peer.Port)
+		url := fmt.Sprintf("http://%s:%d/validator/new", peer.Address, peer.HTTPPort)
 
 		go func(k string, p *Peer, u string, body []byte) {
 			req, _ := http.NewRequest(http.MethodPost, u, bytes.NewBuffer(body))
@@ -1275,4 +1317,26 @@ func (ns *NetworkService) StartHealthCheck() {
 			}
 		}
 	}()
+}
+
+func (ns *NetworkService) isSelfPeer(peer *Peer) bool {
+	if peer == nil {
+		return false
+	}
+	return isLocalAddress(peer.Address) && peer.Port == toIntPort(ns.ListenPort)
+}
+
+func (ns *NetworkService) HasHealthyRemotePeer() bool {
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+
+	for _, peer := range ns.Peers {
+		if peer == nil || ns.isSelfPeer(peer) {
+			continue
+		}
+		if peer.IsActive && peer.HTTPPort != 0 && time.Since(peer.LastSeen) < 2*PingInterval {
+			return true
+		}
+	}
+	return false
 }

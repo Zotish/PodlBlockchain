@@ -81,3 +81,16 @@ export function mergeArrayResults(data, key) {
   });
   return Array.from(seen.values());
 }
+
+export async function waitForTx(txHash, timeoutMs = 20000) {
+  if (!txHash) return null;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1200));
+    try {
+      const res = await fetchJSON(`/tx/${encodeURIComponent(txHash)}`);
+      if (res && (res.tx_hash || res.TxHash || res.hash)) return res;
+    } catch {}
+  }
+  return null;
+}

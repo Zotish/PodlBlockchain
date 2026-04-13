@@ -74,6 +74,19 @@ async function nodeGet(path) {
   return r.json();
 }
 
+async function waitForTx(txHash, timeoutMs = 30000) {
+  if (!txHash) return null;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1200));
+    try {
+      const res = await nodeGet(`/tx/${encodeURIComponent(txHash)}`);
+      if (res && (res.tx_hash || res.TxHash || res.hash)) return res;
+    } catch {}
+  }
+  return null;
+}
+
 async function nodePost(path, body) {
   const r = await fetch(state.nodeUrl + path, {
     method: "POST",
@@ -282,11 +295,13 @@ $("doSendBtn").addEventListener("click", async () => {
       gas: gl, gas_price: gp
     });
     const hash = res.tx_hash || res.TxHash || res.hash || "";
+    if (hash) { await waitForTx(hash, 5000).catch(() => null); }
     showResult("sendResult", `✓ Sent ${amt} LQD! Tx: ${hash}`);
     toast(`Sent ${amt} LQD!`, "success");
     await recordLocalActivity({ type: "send", to, value: rawValue, tx_hash: hash });
     $("sendTo").value = ""; $("sendAmt").value = "";
-    setTimeout(refreshBalance, 2000);
+    await refreshBalance();
+    try { window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: state.address } })); } catch {}
   } catch (e) { showResult("sendResult", "✗ " + e.message, true); toast(e.message, "error"); }
   finally { $("doSendBtn").disabled = false; }
 });
@@ -439,10 +454,13 @@ $("doSendTokenBtn").addEventListener("click", async () => {
     $("doSendTokenBtn").disabled = true;
     const res = await contractTx(_sendTokenAddr, "Transfer", [to, rawAmt]);
     const hash = res.tx_hash || res.TxHash || "";
+    if (hash) { await waitForTx(hash, 5000).catch(() => null); }
     showResult("sendTokenResult", `✓ Sent ${amt} tokens! Tx: ${hash}`);
     toast("Token sent!", "success");
     await recordLocalActivity({ type: "token", to, contract: _sendTokenAddr, value: rawAmt, tx_hash: hash });
-    setTimeout(() => refreshTokenBal(_sendTokenAddr), 2000);
+    await refreshTokenBal(_sendTokenAddr);
+    await refreshBalance();
+    try { window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: state.address, token: _sendTokenAddr } })); } catch {}
   } catch (e) { showResult("sendTokenResult", "✗ " + e.message, true); }
   finally { $("doSendTokenBtn").disabled = false; }
 });

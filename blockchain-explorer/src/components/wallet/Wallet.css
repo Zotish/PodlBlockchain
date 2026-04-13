@@ -450,6 +450,39 @@
   .wallet-address {
     justify-content: center;
   }
+
+  .wallet-content {
+    padding: 14px;
+  }
+
+  .balance-card {
+    padding: 20px 14px;
+  }
+
+  .wallet-tabs {
+    gap: 4px;
+    padding: 4px;
+    flex-wrap: wrap;
+  }
+
+  .wallet-tabs .tab {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 120px;
+    padding: 12px 10px;
+    font-size: 14px;
+  }
+
+  .wallet-header .btn-secondary,
+  .wallet-header .btn-disconnect,
+  .wallet-header .btn-copy {
+    width: 100%;
+  }
+
+  .wallet-header > div:last-child {
+    width: 100%;
+    display: grid !important;
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 /* Add to Wallet.css */
@@ -762,4 +795,3 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
-

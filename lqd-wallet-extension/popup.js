@@ -581,6 +581,9 @@ on("sendSubmit", "click", async () => {
       document.getElementById("sendAmount").value = "";
       refreshBalance();
       refreshActivity();
+      try {
+        window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: toAddr } }));
+      } catch {}
     }
   });
 });
@@ -632,7 +635,7 @@ on("tokenSendSubmit", "click", async () => {
       method: "lqd_contractTx",
       params: [{
         contract_address: activeTokenForSend.address,
-        function: "transfer",
+        function: "Transfer",
         args: [toAddr, rawAmount],
         value: "0",
         gas: GAS,
@@ -647,6 +650,11 @@ on("tokenSendSubmit", "click", async () => {
       const hash = res?.result?.tx_hash || res?.result?.TxHash || "";
       if (statusEl) statusEl.textContent = hash ? `✓ Sent! Tx: ${hash.slice(0, 18)}…` : "✓ Submitted";
       refreshActivity();
+      refreshBalance();
+      ext.storage.local.get(["tokenWatchlist"]).then((d) => renderTokens(d.tokenWatchlist || [])).catch(() => {});
+      try {
+        window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: toAddr, token: activeTokenForSend.address } }));
+      } catch {}
     }
   });
 });
@@ -681,7 +689,11 @@ async function fetchTokenMeta(contractAddr, nodeUrl) {
       return json.output || "";
     } catch { return ""; }
   };
-  const [symbol, name, decimalsStr] = await Promise.all([call("symbol"), call("name"), call("decimals")]);
+  const [symbol, name, decimalsStr] = await Promise.all([
+    call("Symbol").then((v) => v || call("symbol")),
+    call("Name").then((v) => v || call("name")),
+    call("Decimals").then((v) => v || call("decimals")),
+  ]);
   return {
     symbol: symbol || "TOKEN",
     name: name || symbol || "Token",
@@ -691,14 +703,20 @@ async function fetchTokenMeta(contractAddr, nodeUrl) {
 
 async function fetchTokenBalance(contractAddr, walletAddr, nodeUrl) {
   const base = (nodeUrl || "http://127.0.0.1:6500").replace(/\/$/, "");
+  const call = async (fn) => {
+    try {
+      const res = await fetch(`${base}/contract/call`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: contractAddr, fn, args: [walletAddr], caller: walletAddr, value: 0 })
+      });
+      const json = await res.json();
+      return json.output || "0";
+    } catch { return "0"; }
+  };
   try {
-    const res = await fetch(`${base}/contract/call`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address: contractAddr, fn: "balanceOf", args: [walletAddr], caller: walletAddr, value: 0 })
-    });
-    const json = await res.json();
-    return json.output || "0";
+    const upper = await call("BalanceOf");
+    return upper || await call("balanceOf");
   } catch { return "0"; }
 }
 
