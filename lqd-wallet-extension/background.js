@@ -129,6 +129,11 @@ async function loadConfig() {
     session.nodeUrl = net.nodeUrl;
     session.walletUrl = net.walletUrl;
   }
+  // Live dev environment uses 6500, not the legacy 5000/9000 defaults.
+  if (session.nodeUrl && (session.nodeUrl.includes(":5000") || session.nodeUrl.includes(":9000"))) {
+    session.nodeUrl = "http://127.0.0.1:6500";
+    await ext.storage.local.set({ nodeUrl: session.nodeUrl });
+  }
   const data = await ext.storage.local.get(["address"]);
   if (data.address) session.address = data.address;
 }
@@ -396,6 +401,38 @@ async function handleRequest({ id, method, params }) {
         const res = await callNodeGet(`/tx/${encodeURIComponent(hash)}`);
         return { result: res };
       } catch { return { result: null }; }
+    }
+
+    case "lqd_getPrivateKey": {
+      if (!session.unlocked || !session.privateKey) {
+        throw new Error("Wallet locked");
+      }
+      return { result: session.privateKey };
+    }
+
+    case "lqd_deployBuiltin": {
+      if (!session.unlocked || !session.privateKey) throw new Error("Wallet locked");
+      const [payload] = params || [];
+      if (!payload?.template) throw new Error("Missing template");
+      const gas = payload.gas || 500000;
+      const owner = payload.owner || session.address;
+      const initArgs = Array.isArray(payload.init_args) ? payload.init_args : [];
+      const res = await callNode("/contract/deploy-builtin", {
+        template: payload.template,
+        owner,
+        private_key: session.privateKey,
+        gas,
+        init_args: initArgs
+      });
+      await recordActivity({
+        type: "contract",
+        tx_hash: res.tx_hash || res.TxHash || res.hash || "",
+        to: res.address || res.contract_address || res.result?.address || "",
+        function: `deploy:${payload.template}`,
+        args: initArgs,
+        value: "0"
+      });
+      return { result: res };
     }
 
     case "lqd_getNetworks": {

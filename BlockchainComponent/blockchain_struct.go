@@ -485,8 +485,12 @@ func (bc *Blockchain_struct) AddNewTxToTheTransaction_pool(tx *Transaction) erro
 	replaced := false
 
 	for i, existing := range bc.Transaction_pool {
-		if strings.EqualFold(existing.From, tx.From) {
-			// && existing.Nonce == tx.Nonce  // if you re-enable nonce
+		if strings.EqualFold(existing.From, tx.From) && existing.Nonce == tx.Nonce {
+			if strings.EqualFold(existing.Status, constantset.StatusFailed) {
+				bc.Transaction_pool[i] = tx
+				replaced = true
+				break
+			}
 			oldEff := bc.BaseFee + existing.PriorityFee
 
 			// Require >= 10% bump
@@ -575,33 +579,33 @@ func (bc *Blockchain_struct) AddNewTxBatch(txs []*Transaction) (int, int) {
 		// Effective priority fee used for replacement logic
 		eff := bc.BaseFee + tx.PriorityFee
 		replaced := false
-		replacementChecked := false
 
-		if tx.Nonce != 0 {
-			for i, existing := range bc.Transaction_pool {
-				if strings.EqualFold(existing.From, tx.From) && existing.Nonce == tx.Nonce {
-					replacementChecked = true
-					oldEff := bc.BaseFee + existing.PriorityFee
-					if eff*100 >= oldEff*110 {
-						bc.Transaction_pool[i] = tx
-						replaced = true
-						changed = true
-					} else {
-						failed++
-					}
+		for i, existing := range bc.Transaction_pool {
+			if strings.EqualFold(existing.From, tx.From) && existing.Nonce == tx.Nonce {
+				if strings.EqualFold(existing.Status, constantset.StatusFailed) {
+					bc.Transaction_pool[i] = tx
+					replaced = true
+					changed = true
 					break
 				}
-			}
-
-			if replacementChecked {
-				if replaced {
-					tx.Status = constantset.StatusPending
-					tx.TxHash = CalculateTransactionHash(*tx)
-					bc.RecordRecentTx(tx)
-					accepted++
+				oldEff := bc.BaseFee + existing.PriorityFee
+				if eff*100 >= oldEff*110 {
+					bc.Transaction_pool[i] = tx
+					replaced = true
+					changed = true
+				} else {
+					failed++
 				}
-				continue
+				break
 			}
+		}
+
+		if replaced {
+			tx.Status = constantset.StatusPending
+			tx.TxHash = CalculateTransactionHash(*tx)
+			bc.RecordRecentTx(tx)
+			accepted++
+			continue
 		}
 
 		if bc.countTxsFrom(tx.From) >= constantset.MaxTxsPerAccount {
@@ -1006,7 +1010,10 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	}
 
 	// 4) Nonce policy - proper nonce validation
-	expected := bc.GetAccountNonce(tx.From) + 1
+	expected := bc.GetAccountNonce(tx.From)
+	if expected > 0 {
+		expected--
+	}
 	if tx.Nonce != 0 && tx.Nonce != expected {
 		tx.Status = constantset.StatusFailed
 		log.Printf("TX %s failed: bad nonce (got %d want %d)", tx.TxHash, tx.Nonce, expected)

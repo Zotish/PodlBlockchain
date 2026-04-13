@@ -1,7 +1,7 @@
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 import { API_BASE } from "../../utils/api";
 
-const NODE = API_BASE;
+const NODE_CANDIDATES = ["http://127.0.0.1:6500", API_BASE];
 
 const PLACEHOLDER = `package main
 
@@ -40,10 +40,47 @@ export default function ContractCompiler({ walletAddress, privateKey, onDeployed
   const [deploying, setDeploying]   = useState(false);
   const [compiledBlob, setCompiledBlob] = useState(null);
   const [compiledType, setCompiledType] = useState("plugin");
-  const [compiledSize, setCompiledSize] = useState(0);
   const [deployedAddr, setDeployedAddr] = useState("");
 
   const show = (msg, err = false) => { setStatus(msg); setIsError(err); };
+
+  const postJson = async (path, payload, { timeoutMs = 120000 } = {}) => {
+    let lastErr = null;
+    for (const base of NODE_CANDIDATES) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(`${base}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          lastErr = new Error(data.error || `Request failed (${res.status})`);
+          continue;
+        }
+        return data;
+      } catch (e) {
+        clearTimeout(timer);
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error("Request failed");
+  };
+
+  const buildDeployForm = () => {
+    const form = new FormData();
+    const fileName = compiledType === "plugin" ? "contract.so" : "contract.lqd";
+    form.append("contract_file", compiledBlob, fileName);
+    form.append("owner", walletAddress);
+    form.append("private_key", privateKey);
+    form.append("type", compiledType);
+    form.append("gas", "500000");
+    return form;
+  };
 
   const compile = async () => {
     if (!source.trim()) { show("⚠️ Enter source code first", true); return; }
@@ -55,12 +92,7 @@ export default function ContractCompiler({ walletAddress, privateKey, onDeployed
     try {
       if (type === "goplugin") {
         show("⏳ Building Go plugin… (may take ~10s)");
-        const res = await fetch(`${NODE}/contract/compile-plugin`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ source }),
-        });
-        const data = await res.json();
+        const data = await postJson("/contract/compile-plugin", { source }, { timeoutMs: 180000 });
         if (!data.success) {
           show("❌ Compile error:\n\n" + (data.error || "unknown"), true);
           return;
@@ -72,21 +104,14 @@ export default function ContractCompiler({ walletAddress, privateKey, onDeployed
         const blob = new Blob([bytes], { type: "application/octet-stream" });
         setCompiledBlob(blob);
         setCompiledType("plugin");
-        setCompiledSize(data.size);
         show(`✅ Go Plugin compiled! Size: ${(data.size / 1024).toFixed(1)} KB — Ready to deploy`);
       } else {
-        const res = await fetch(`${NODE}/contract/compile`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type, source }),
-        });
-        const data = await res.json();
+        const data = await postJson("/contract/compile", { type, source });
         if (data.error) { show("❌ " + data.error, true); return; }
         const raw = JSON.stringify(data);
         const blob = new Blob([raw], { type: "application/octet-stream" });
         setCompiledBlob(blob);
         setCompiledType(type);
-        setCompiledSize(raw.length);
         show(`✅ Compiled! Type: ${type} — Ready to deploy`);
       }
     } catch (e) {
@@ -104,17 +129,20 @@ export default function ContractCompiler({ walletAddress, privateKey, onDeployed
     setDeploying(true);
     show("📦 Deploying to chain…");
     try {
-      const form = new FormData();
-      const fileName = compiledType === "plugin" ? "contract.so" : "contract.lqd";
-      form.append("contract_file", compiledBlob, fileName);
-      form.append("owner", walletAddress);
-      form.append("private_key", privateKey);
-      form.append("type", compiledType);   // server expects "type" not "contract_type"
-      form.append("gas", "500000");
-
-      const res = await fetch(`${NODE}/contract/deploy`, { method: "POST", body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Deploy failed");
+      let data = null;
+      let lastErr = null;
+      for (const base of NODE_CANDIDATES) {
+        try {
+          const res = await fetch(`${base}/contract/deploy`, { method: "POST", body: buildDeployForm() });
+          data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || "Deploy failed");
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (lastErr) throw lastErr;
 
       setDeployedAddr(data.address || "");
       show(`🎉 Deployed!\nAddress: ${data.address}\nType: ${compiledType}`);

@@ -3,6 +3,7 @@ package blockchaincomponent
 import (
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -56,7 +57,6 @@ func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lo
 	}
 
 	newVal := new(Validator)
-	lp := amount * (lockDuration.Hours() / 8760)
 
 	if amount < bc.MinStake {
 		return fmt.Errorf("staking amount is lower than min stake %f", bc.MinStake)
@@ -65,7 +65,7 @@ func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lo
 	newVal.Address = address
 	newVal.LPStakeAmount = amount
 	newVal.LockTime = time.Now().Add(lockDuration)
-	newVal.LiquidityPower = lp
+	newVal.LiquidityPower = legacyLiquidityPower(newVal.LPStakeAmount, newVal.LockTime)
 	newVal.LastActive = time.Now()
 	bc.Validators = append(bc.Validators, newVal)
 
@@ -137,14 +137,20 @@ func (bc *Blockchain_struct) UpdateLiquidityPower() {
 			// True PosDL: power comes from DEX LP position value
 			v.LiquidityPower = bc.getDEXLPPower(v)
 		} else {
-			// Legacy PoS: time-weighted single-asset stake
-			remainingLock := time.Until(v.LockTime).Hours()
-			if remainingLock < 0 {
-				remainingLock = 0
-			}
-			v.LiquidityPower = v.LPStakeAmount * (remainingLock / 8760)
+			// Legacy PoS: time-weighted single-asset stake, rounded to whole
+			// lock days so small node start-time differences do not fork winner selection.
+			v.LiquidityPower = legacyLiquidityPower(v.LPStakeAmount, v.LockTime)
 		}
 	}
+}
+
+func legacyLiquidityPower(stakeAmount float64, lockTime time.Time) float64 {
+	remainingHours := time.Until(lockTime).Hours()
+	if remainingHours <= 0 {
+		return 0
+	}
+	remainingDays := math.Ceil(remainingHours / 24.0)
+	return stakeAmount * ((remainingDays * 24.0) / 8760.0)
 }
 
 // getDEXLPPower reads the validator's locked LP position directly from contract

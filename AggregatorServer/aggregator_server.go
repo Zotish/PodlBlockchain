@@ -151,6 +151,10 @@ func (a *AggregatorServer) ProxyOrAggregate(w http.ResponseWriter, r *http.Reque
 		a.proxyRequest(w, r, a.Canonical)
 		return
 	}
+	if strings.HasPrefix(path, "/dex/") {
+		a.proxyRequest(w, r, a.Canonical)
+		return
+	}
 	if path == "/basefee" {
 		a.proxyRequest(w, r, a.Canonical)
 		return

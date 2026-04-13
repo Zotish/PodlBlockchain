@@ -4,6 +4,8 @@ import TransactionList from '../components/TransactionList';
 import { formatLQD } from "../utils/lqdUnits";
 import { fetchJSON, mergeArrayResults, firstNodeResult } from "../utils/api";
 
+const REFRESH_MS = 5000;
+
 const AddressPage = () => {
   const { address } = useParams();
   const [addressData, setAddressData] = useState(null);
@@ -39,6 +41,8 @@ const AddressPage = () => {
     };
 
     fetchAddressData();
+    const id = setInterval(fetchAddressData, REFRESH_MS);
+    return () => clearInterval(id);
   }, [address]);
 
   if (loading) return <div className="loading">Loading address details...</div>;

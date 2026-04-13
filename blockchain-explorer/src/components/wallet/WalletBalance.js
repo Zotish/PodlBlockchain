@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from "react";
 import { formatLQD } from "./lqdUnits";
-import { fetchJSON, firstNodeResult } from "../../utils/api";
+import { fetchJSON, firstNodeResult, waitForTx } from "../../utils/api";
 
 const NODE_URL = "http://127.0.0.1:9000";
 const TOKENS_STORAGE_KEY = "liquidity_tokens_v1";
@@ -68,7 +68,7 @@ const TokenCard = ({ token, address, privateKey, onRefresh, onRemove }) => {
       const body = {
         address,
         contract_address: token.contract,
-        function: "transfer",
+        function: "Transfer",
         args: [to.trim(), rawAmount],
         value: 0,
         private_key: privateKey || "",
@@ -90,9 +90,17 @@ const TokenCard = ({ token, address, privateKey, onRefresh, onRemove }) => {
         throw new Error(data?.error || data?.output || text || "Token transfer failed");
       }
 
+      const hash = data?.tx_hash || data?.TxHash || data?.hash || "";
+      if (hash) {
+        await waitForTx(hash, 5000).catch(() => null);
+      }
+
       setStatus(`Success: sent ${amount} ${token.symbol} to ${to.trim()}`);
       setAmount("");
       setTo("");
+      try {
+        window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address, token: token.contract } }));
+      } catch {}
 
       await onRefresh(token.contract);
     } catch (err) {
@@ -330,9 +338,9 @@ const WalletBalance = ({ address, privateKey }) => {
   };
 
   const fetchTokenMetadata = async (contractAddr) => {
-    const symbolRes = await callContract(contractAddr, "symbol", []);
-    const decimalsRes = await callContract(contractAddr, "decimals", []);
-    const nameRes = await callContract(contractAddr, "name", []);
+    const symbolRes = await callContract(contractAddr, "Symbol", []).catch(() => callContract(contractAddr, "symbol", []));
+    const decimalsRes = await callContract(contractAddr, "Decimals", []).catch(() => callContract(contractAddr, "decimals", []));
+    const nameRes = await callContract(contractAddr, "Name", []).catch(() => callContract(contractAddr, "name", []));
 
     const sym = symbolRes.output || "TOKEN";
     const decimalsStr =
@@ -350,7 +358,7 @@ const WalletBalance = ({ address, privateKey }) => {
   };
 
   const fetchTokenBalance = async (contractAddr, symbol, decimals) => {
-    const data = await callContract(contractAddr, "balanceOf", [address]);
+    const data = await callContract(contractAddr, "BalanceOf", [address]).catch(() => callContract(contractAddr, "balanceOf", [address]));
     const raw = data.output || "0";
     const formatted = formatTokenAmount(raw, decimals);
     return { raw, formatted };
@@ -585,6 +593,19 @@ const WalletBalance = ({ address, privateKey }) => {
       }
     })();
   }, [address]);
+
+  useEffect(() => {
+    const refreshAll = () => {
+      fetchBalance();
+      tokens.forEach((tok) => {
+        if (tok.type !== "dapp") {
+          refreshSingleToken(tok.contract);
+        }
+      });
+    };
+    window.addEventListener("lqd:wallet-updated", refreshAll);
+    return () => window.removeEventListener("lqd:wallet-updated", refreshAll);
+  }, [tokens]);
 
   const autoImport = async () => {
     setAutoImporting(true);

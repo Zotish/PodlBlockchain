@@ -22,6 +22,9 @@ import (
 func init() {
 	log.SetPrefix("Blockchain: ")
 }
+
+const canonicalGenesisTimestamp = uint64(1700000000)
+
 func main() {
 	loadEnvFile(".env")
 	chainCmdSet := flag.NewFlagSet("chain", flag.ExitOnError)
@@ -67,7 +70,7 @@ func main() {
 			if *dbPath != "" {
 				constantset.BLOCKCHAIN_DB_PATH = *dbPath
 			}
-			genesisBlock := blockchaincomponent.NewBlock(0, "0x_Genesis")
+			genesisBlock := canonicalGenesisBlock()
 			bc := blockchaincomponent.NewBlockchain(genesisBlock)
 			bc.InitLiquiditySystem()
 			bc.MinStake = *minStake
@@ -102,8 +105,22 @@ func main() {
 				bc.Network.AddPeer(host, port, true)
 			}
 
-			if err := bc.Network.SyncChain(); err != nil {
-				log.Printf("Initial sync error: %v", err)
+			if *remoteNode != "" {
+				for !bc.Network.HasHealthyRemotePeer() {
+					if err := bc.Network.SyncChain(); err != nil {
+						log.Printf("Initial sync error: %v", err)
+					}
+					bc.Network.SyncAllValidators()
+					if bc.Network.HasHealthyRemotePeer() {
+						break
+					}
+					log.Printf("Waiting for remote peer %s before validator registration", *remoteNode)
+					time.Sleep(2 * time.Second)
+				}
+			} else {
+				if err := bc.Network.SyncChain(); err != nil {
+					log.Printf("Initial sync error: %v", err)
+				}
 			}
 
 			// ── Validator Registration ──────────────────────────────────────────
@@ -125,6 +142,7 @@ func main() {
 			for _, v := range bc.Validators {
 				bc.Network.BroadcastValidator(v)
 			}
+			bc.Network.SyncAllValidators()
 
 			lastValidatorsSync := time.Time{}
 			for {
@@ -150,6 +168,12 @@ func main() {
 				}
 
 				if *miningEnabled {
+					if *remoteNode != "" && !bc.Network.HasHealthyRemotePeer() {
+						log.Printf("Remote peer unavailable, pausing mining until sync recovers")
+						time.Sleep(2 * time.Second)
+						continue
+					}
+
 					validator, err := bc.SelectValidator()
 					if err != nil {
 						log.Printf("Validator selection error: %v", err)
@@ -157,13 +181,17 @@ func main() {
 						continue
 					}
 
-					newBlock := bc.MineNewBlock()
-					if newBlock != nil {
-						log.Printf("Mined block #%d", newBlock.BlockNumber)
+					if strings.EqualFold(validator.Address, bc.LocalValidator) {
+						newBlock := bc.MineNewBlock()
+						if newBlock != nil {
+							log.Printf("Mined block #%d", newBlock.BlockNumber)
 
-						if err := bc.Network.BroadcastBlock(newBlock); err != nil {
-							log.Printf("Failed to broadcast block: %v", err)
+							if err := bc.Network.BroadcastBlock(newBlock); err != nil {
+								log.Printf("Failed to broadcast block: %v", err)
+							}
 						}
+					} else {
+						log.Printf("Selected validator is remote: %s (local=%s) — waiting for peer block", validator.Address, bc.LocalValidator)
 					}
 
 					bc.ProcessUnstakeReleases()
@@ -213,6 +241,12 @@ func main() {
 		fmt.Println("Expected 'chain' or 'wallet' subcommands")
 		os.Exit(1)
 	}
+}
+
+func canonicalGenesisBlock() blockchaincomponent.Block {
+	genesis := blockchaincomponent.NewBlock(0, "0x_Genesis")
+	genesis.TimeStamp = canonicalGenesisTimestamp
+	return genesis
 }
 
 // loadEnvFile reads simple export-based .env files and sets env vars if not already set.

@@ -2205,6 +2205,62 @@ func (b *BlockchainServer) ContractList(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(out)
 }
 
+func (b *BlockchainServer) CurrentDEXFactory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	addrs := b.BlockchainPtr.ContractEngine.Registry.List()
+	type candidate struct {
+		addr      string
+		timestamp int64
+	}
+	best := candidate{}
+
+	for _, addr := range addrs {
+		rec, err := b.BlockchainPtr.ContractEngine.Registry.LoadContract(addr)
+		if err != nil || rec == nil || rec.Metadata == nil {
+			continue
+		}
+		meta := rec.Metadata
+		isFactory := strings.EqualFold(meta.BuiltinName, "dex_factory")
+		if !isFactory && len(meta.ABI) > 0 {
+			var entries []map[string]any
+			if err := json.Unmarshal(meta.ABI, &entries); err == nil {
+				names := map[string]struct{}{}
+				for _, e := range entries {
+					if n, ok := e["name"].(string); ok {
+						names[strings.ToLower(n)] = struct{}{}
+					}
+				}
+				has := func(n string) bool {
+					_, ok := names[strings.ToLower(n)]
+					return ok
+				}
+				isFactory = has("CreatePair") || has("GetPair") || has("AllPairs")
+			}
+		}
+		if !isFactory {
+			continue
+		}
+		if meta.Timestamp >= best.timestamp {
+			best = candidate{addr: addr, timestamp: meta.Timestamp}
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"address": best.addr,
+		"kind":    "factory",
+	})
+}
+
 func (b *BlockchainServer) BaseFee(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
@@ -2571,10 +2627,11 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 	// Deploy ─────────────────────────────────────────────────────────────────
 	addr := GenerateContractAddress(req.Owner, uint64(time.Now().UnixNano()))
 	meta := &blockchaincomponent.ContractMetadata{
-		Address:   addr,
-		Type:      "plugin",
-		Owner:     req.Owner,
-		Timestamp: time.Now().Unix(),
+		Address:     addr,
+		Type:        "plugin",
+		Owner:       req.Owner,
+		Timestamp:   time.Now().Unix(),
+		BuiltinName: req.Template,
 	}
 	pluginDir := filepath.Join("data", "contracts")
 	_ = os.MkdirAll(pluginDir, 0o755)
@@ -2995,6 +3052,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/contract/con1", b.ContractState)
 	http.HandleFunc("/contract/con2", b.ContractEvents)
 	http.HandleFunc("/contract/list", b.ContractList)
+	http.HandleFunc("/dex/current", b.CurrentDEXFactory)
 	http.HandleFunc("/contract/compile", b.limiter.middleware(maxBytesMiddleware(b.CompileContract, maxBodySize)))
 	http.HandleFunc("/contract/compile-plugin", b.limiter.middleware(maxBytesMiddleware(b.CompileGoPlugin, maxBodySize)))
 	http.HandleFunc("/contract/deploy-builtin", b.limiter.middleware(maxBytesMiddleware(b.DeployBuiltin, maxBodySize)))

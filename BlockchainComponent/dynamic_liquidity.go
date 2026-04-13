@@ -191,26 +191,29 @@ func (e *DynamicLiquidityEngine) applyDemandStrategy(metrics []PoolMetrics) {
 // PriceBonus — routing more swaps their way closes the arbitrage gap naturally.
 
 func (e *DynamicLiquidityEngine) applyPriceStrategy(metrics []PoolMetrics) {
-	// Collect implied price per token0 across all pairs that share the same token0.
-	// ImpliedPrice = reserve1 / reserve0  (how many token1 per token0).
-	// map: token0 → list of (index, impliedPrice)
+	// Collect implied price per token across all pairs that share that asset.
+	// We score both sides of each pair so sorted token order does not weaken
+	// price discovery for a token that commonly appears as token1.
+	//
+	// map: token → list of (index, impliedPrice)
 	byToken := make(map[string][]priceEntry)
 
 	for i := range metrics {
 		m := &metrics[i]
 		m.PriceBonus = 0
 
-		if m.Reserve0.Sign() == 0 {
+		if m.Reserve0.Sign() == 0 || m.Reserve1.Sign() == 0 {
 			m.ImpliedPrice = 0
 			continue
 		}
 		r0f, _ := new(big.Float).SetInt(m.Reserve0).Float64()
 		r1f, _ := new(big.Float).SetInt(m.Reserve1).Float64()
-		if r0f == 0 {
+		if r0f == 0 || r1f == 0 {
 			continue
 		}
 		m.ImpliedPrice = r1f / r0f
-		byToken[m.Token0] = append(byToken[m.Token0], priceEntry{i, m.ImpliedPrice})
+		byToken[strings.ToLower(m.Token0)] = append(byToken[strings.ToLower(m.Token0)], priceEntry{i, m.ImpliedPrice})
+		byToken[strings.ToLower(m.Token1)] = append(byToken[strings.ToLower(m.Token1)], priceEntry{i, 1.0/m.ImpliedPrice})
 	}
 
 	// For each token that appears in 2+ pairs, find median and apply bonus.
