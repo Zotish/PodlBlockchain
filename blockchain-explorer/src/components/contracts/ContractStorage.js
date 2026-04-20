@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from "react";
+import { API_BASE, apiUrl } from "../../utils/api";
 
-const API = "http://127.0.0.1:9000";
+const API = API_BASE;
 
 export default function ContractStorage({ address }) {
   const [storage, setStorage] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/contract/storage?address=${address}`)
+    fetch(apiUrl(API, `/contract/storage?address=${address}`))
       .then((res) => res.json())
       .then((data) => setStorage(data));
   }, [address]);

@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect } from "react";
 import { formatLQD } from "./lqdUnits";
-import { fetchJSON, firstNodeResult, waitForTx } from "../../utils/api";
+import { API_BASE, apiUrl, fetchJSON, firstNodeResult, waitForTx } from "../../utils/api";
 
-const NODE_URL = "http://127.0.0.1:9000";
+const NODE_URL = API_BASE;
 const TOKENS_STORAGE_KEY = "liquidity_tokens_v1";
 
 // Helper: build a per-address storage key
@@ -74,7 +74,7 @@ const TokenCard = ({ token, address, privateKey, onRefresh, onRemove }) => {
         private_key: privateKey || "",
       };
 
-      const res = await fetch(`${NODE_URL}/wallet/contract-template`, {
+      const res = await fetch(apiUrl(NODE_URL, "/wallet/contract-template"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -264,7 +264,7 @@ const WalletBalance = ({ address, privateKey }) => {
       value: 0,
       caller: address,
     };
-    const res = await fetch(`${NODE_URL}/contract/call`, {
+    const res = await fetch(apiUrl(NODE_URL, "/contract/call"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -286,7 +286,7 @@ const WalletBalance = ({ address, privateKey }) => {
   };
 
   const fetchContractABI = async (contractAddr) => {
-    const res = await fetch(`${NODE_URL}/contract/getAbi?address=${contractAddr}`);
+    const res = await fetch(apiUrl(NODE_URL, `/contract/getAbi?address=${contractAddr}`));
     const text = await res.text();
     let data = null;
     try {
@@ -510,7 +510,7 @@ const WalletBalance = ({ address, privateKey }) => {
       setLoading(true);
       setError("");
 
-      const response = await fetch(`${NODE_URL}/faucet`, {
+      const response = await fetch(apiUrl(NODE_URL, "/faucet"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ address }),

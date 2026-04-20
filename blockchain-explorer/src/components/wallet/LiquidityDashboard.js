@@ -2,9 +2,9 @@
 import React, { useEffect, useState } from "react";
 import './Wallet.css'
 import { formatLQD, parseLQD } from "./lqdUnits";
-import { fetchJSON, firstNodeResult } from "../../utils/api";
+import { API_BASE, fetchJSON, firstNodeResult } from "../../utils/api";
 
-const API = "http://127.0.0.1:9000";
+const API = API_BASE;
 
 export default function LiquidityDashboard({ address }) {
   const [lp, setLP] = useState(null);

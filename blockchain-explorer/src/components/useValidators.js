@@ -1,6 +1,6 @@
 // src/hooks/useValidators.js
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { mergeArrayResults } from '../utils/api';
+import { API_BASE, mergeArrayResults } from '../utils/api';
 
 function normalizeValidator(v) {
   // Accept both styles returned by your APIs
@@ -29,7 +29,7 @@ function normalizeValidator(v) {
   };
 }
 
-export default function useValidators(nodeUrls = ['http://127.0.0.1:9000'], { intervalMs = 3000 } = {}) {
+export default function useValidators(nodeUrls = [API_BASE], { intervalMs = 3000 } = {}) {
   const [validators, setValidators] = useState([]);
   const [loading, setLoading] = useState(true);
   const [errors, setErrors] = useState([]);

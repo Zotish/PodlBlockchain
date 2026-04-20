@@ -1,7 +1,8 @@
 // src/components/contract/ContractDeploy.jsx
 import React, { useState } from "react";
+import { API_BASE, apiUrl } from "../../utils/api";
 
-const NODE = "http://127.0.0.1:9000";
+const NODE = API_BASE;
 
 const ContractDeploy = ({ walletAddress, privateKey }) => {
   const [contractType, setContractType] = useState("plugin");
@@ -31,7 +32,7 @@ const ContractDeploy = ({ walletAddress, privateKey }) => {
     setLog("📦 Uploading...");
 
     try {
-      const res = await fetch(`${NODE}/contract/deploy`, {
+      const res = await fetch(apiUrl(NODE, "/contract/deploy"), {
         method: "POST",
         body: formData,
       });

@@ -1,5 +1,6 @@
 // DebugComponent.jsx
 import React, { useState, useEffect } from 'react';
+import { API_BASE, apiUrl } from '../utils/api';
 
 const DebugComponent = () => {
   const [apiData, setApiData] = useState({});
@@ -7,9 +8,9 @@ const DebugComponent = () => {
   useEffect(() => {
     const fetchDebugData = async () => {
       const endpoints = [
-        'http://127.0.0.1:9000/network',
-        'http://127.0.0.1:9000/validators',
-        'http://127.0.0.1:9000/fetch_last_n_block'
+        apiUrl(API_BASE, '/network'),
+        apiUrl(API_BASE, '/validators'),
+        apiUrl(API_BASE, '/fetch_last_n_block')
       ];
 
       const results = {};

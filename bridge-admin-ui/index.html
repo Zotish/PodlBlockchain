@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LQD Bridge Admin</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="gate" id="gate">
+    <div class="gate-card">
+      <div class="badge">LQD</div>
+      <h1>Bridge Admin</h1>
+      <p>Unlock the admin console with your local password.</p>
+      <input id="adminPassword" type="password" placeholder="Admin password" />
+      <button id="unlockBtn">Unlock Console</button>
+      <div class="hint">This password protects the UI only. The backend still requires your API key.</div>
+    </div>
+  </div>
+
+  <main class="app hidden" id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">L</div>
+        <div>
+          <div class="title">LQD Bridge Admin</div>
+          <div class="sub">Registry control panel</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <label>Node URL</label>
+        <input id="nodeUrl" placeholder="https://your-chain-domain" />
+
+        <label>Admin API key</label>
+        <input id="apiKey" type="password" placeholder="LQD_API_KEY" />
+
+        <label>Admin password</label>
+        <input id="password" type="password" placeholder="Local UI password" />
+
+        <div class="row">
+          <button id="saveLocalBtn" class="secondary">Save UI</button>
+          <button id="refreshBtn" class="secondary">Refresh</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <button class="nav active" data-tab="chains">Bridge Chains</button>
+        <button class="nav" data-tab="tokens">Bridge Tokens</button>
+        <button class="nav" data-tab="families">Families</button>
+      </div>
+
+      <div class="panel small">
+        <div class="label">Status</div>
+        <div id="status" class="status">Ready.</div>
+      </div>
+    </aside>
+
+    <section class="content">
+      <section class="tab active" id="tab-chains">
+        <div class="card">
+          <h2>Bridge Chains</h2>
+          <p>Chains are grouped by family so EVM and non-EVM presets stay easy to scan.</p>
+          <div id="chainsList" class="list"></div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <h3>Upsert Chain</h3>
+            <div class="form-grid">
+              <input id="chainId" placeholder="id (e.g. bsc-mainnet)" />
+              <input id="chainName" placeholder="name" />
+              <input id="chainNumber" placeholder="chain_id / network id" />
+              <input id="chainFamily" placeholder="family (evm, cosmos, utxo, ...)" />
+              <input id="chainAdapter" placeholder="adapter" />
+              <input id="chainRpc" placeholder="rpc url" />
+              <input id="chainBridge" placeholder="bridge address" />
+              <input id="chainLock" placeholder="lock address" />
+              <input id="chainExplorer" placeholder="explorer url" />
+              <input id="chainSymbol" placeholder="native symbol" />
+            </div>
+            <div class="row wrap">
+              <label><input type="checkbox" id="chainEnabled" checked /> Enabled</label>
+              <label><input type="checkbox" id="chainPublic" checked /> Public</label>
+              <label><input type="checkbox" id="chainPrivate" checked /> Private</label>
+            </div>
+            <div class="row">
+              <button id="saveChainBtn">Save Chain</button>
+              <button id="removeChainBtn" class="danger">Remove Chain</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Selected Chain JSON</h3>
+            <pre id="selectedChainJson">{}</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-tokens">
+        <div class="card">
+          <h2>Bridge Tokens</h2>
+          <p>Map source assets to LQD bridge assets. Admin only.</p>
+          <div id="tokensList" class="list"></div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <h3>Upsert Token Mapping</h3>
+            <div class="form-grid">
+              <input id="tokenChainId" placeholder="chain_id" />
+              <input id="tokenSource" placeholder="source token / asset" />
+              <input id="tokenLqd" placeholder="lqd token / target token" />
+              <input id="tokenName" placeholder="name" />
+              <input id="tokenSymbol" placeholder="symbol" />
+              <input id="tokenDecimals" placeholder="decimals" />
+            </div>
+            <div class="row">
+              <button id="saveTokenBtn">Save Token</button>
+              <button id="removeTokenBtn" class="danger">Remove Token</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Selected Token JSON</h3>
+            <pre id="selectedTokenJson">{}</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-families">
+        <div class="card">
+          <h2>Supported Families</h2>
+          <p>This is read-only. It explains what the bridge layer recognizes.</p>
+          <div id="familiesList" class="family-grid"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="runtime-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

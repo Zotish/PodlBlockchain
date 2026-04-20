@@ -1,6 +1,8 @@
 package blockchaincomponent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -8,8 +10,10 @@ import (
 	"path/filepath"
 	"plugin"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
@@ -94,18 +98,12 @@ func ensureDir(path string) error {
 }
 
 func InitContractDB() (*ContractDB, error) {
-	// base under current working dir: ./data/contracts_db
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-
-	base := filepath.Join(cwd, "data")
+	base := appDataDir()
 	if err := ensureDir(base); err != nil {
 		return nil, err
 	}
 
-	path := filepath.Join(base, "contracts_db")
+	path := appDataPath("contracts_db")
 	d, err := leveldb.OpenFile(path, nil)
 	if err != nil {
 		return nil, err
@@ -194,16 +192,90 @@ func (c *ContractDB) LoadAllStorage(addr string) (map[string]string, error) {
 //  CORE TYPES
 
 type ContractMetadata struct {
-	Address     string `json:"address"`
-	Type        string `json:"type"` // plugin | gocode | dsl | builtin
-	Owner       string `json:"owner"`
-	ABI         []byte `json:"abi"`
-	Timestamp   int64  `json:"timestamp"`
-	Pool        bool   `json:"pool"`
-	PoolType    string `json:"pool_type,omitempty"`
-	PluginPath  string `json:"plugin_path,omitempty"`
-	Code        []byte `json:"code,omitempty"`
-	BuiltinName string `json:"builtin_name,omitempty"`
+	Address            string `json:"address"`
+	Type               string `json:"type"` // plugin | gocode | dsl | builtin
+	Owner              string `json:"owner"`
+	ABI                []byte `json:"abi"`
+	Timestamp          int64  `json:"timestamp"`
+	Pool               bool   `json:"pool"`
+	PoolType           string `json:"pool_type,omitempty"`
+	PluginPath         string `json:"plugin_path,omitempty"`
+	RuntimeFingerprint string `json:"runtime_fingerprint,omitempty"`
+	Code               []byte `json:"code,omitempty"`
+	BuiltinName        string `json:"builtin_name,omitempty"`
+}
+
+var (
+	pluginRuntimeFingerprintOnce sync.Once
+	pluginRuntimeFingerprint     string
+	pluginRuntimeFingerprintErr  error
+)
+
+func CurrentPluginRuntimeFingerprint() (string, error) {
+	pluginRuntimeFingerprintOnce.Do(func() {
+		pluginRuntimeFingerprint, pluginRuntimeFingerprintErr = computePluginRuntimeFingerprint()
+	})
+	return pluginRuntimeFingerprint, pluginRuntimeFingerprintErr
+}
+
+func computePluginRuntimeFingerprint() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	paths := []string{
+		"go.mod",
+		"go.sum",
+		"main.go",
+	}
+	dirs := []string{
+		"BlockchainComponent",
+		"BlockchainServer",
+		"WalletServer",
+		"AggregatorServer",
+		"ConstantSet",
+		"contract",
+	}
+
+	files := make([]string, 0, 256)
+	for _, path := range paths {
+		full := filepath.Join(cwd, path)
+		if info, err := os.Stat(full); err == nil && !info.IsDir() {
+			files = append(files, path)
+		}
+	}
+	for _, dir := range dirs {
+		root := filepath.Join(cwd, dir)
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil || info == nil || info.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(info.Name(), ".go") {
+				return nil
+			}
+			rel, err := filepath.Rel(cwd, path)
+			if err != nil {
+				return nil
+			}
+			files = append(files, filepath.ToSlash(rel))
+			return nil
+		})
+	}
+
+	sort.Strings(files)
+	hasher := sha256.New()
+	for _, rel := range files {
+		content, err := os.ReadFile(filepath.Join(cwd, rel))
+		if err != nil {
+			return "", err
+		}
+		_, _ = hasher.Write([]byte(rel))
+		_, _ = hasher.Write([]byte{'\n'})
+		_, _ = hasher.Write(content)
+		_, _ = hasher.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 type SmartContractState struct {
@@ -658,6 +730,9 @@ func (p *PluginVM) LoadPlugin(addr, path string) error {
 				}
 			}
 		}
+		if strings.Contains(err.Error(), "different version of package") {
+			return fmt.Errorf("plugin binary is incompatible with the current runtime; recompile or redeploy this contract plugin: %w", err)
+		}
 		return err
 	}
 
@@ -1059,17 +1134,12 @@ func (ep *ExecutionPipeline) ApplyContractCallWithValue(addr, caller, fn string,
 }
 
 func InitEventDB() (*EventDB, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-
-	base := filepath.Join(cwd, "data")
+	base := appDataDir()
 	if err := ensureDir(base); err != nil {
 		return nil, err
 	}
 
-	path := filepath.Join(base, "contract_events_db")
+	path := appDataPath("contract_events_db")
 	d, err := leveldb.OpenFile(path, nil)
 	if err != nil {
 		return nil, err
@@ -1165,11 +1235,16 @@ func (r *ContractRegistry) LoadContract(addr string) (*ContractRecord, error) {
 // The new contract shares the same compiled plugin (.so) as the template but
 // has its own isolated storage namespace in the DB.
 func (r *ContractRegistry) DeployClone(newAddr, pluginPath, owner string) error {
+	fingerprint, err := CurrentPluginRuntimeFingerprint()
+	if err != nil {
+		return fmt.Errorf("runtime fingerprint: %w", err)
+	}
 	meta := &ContractMetadata{
-		Address:    newAddr,
-		Owner:      owner,
-		Type:       "plugin",
-		PluginPath: pluginPath,
+		Address:            newAddr,
+		Owner:              owner,
+		Type:               "plugin",
+		PluginPath:         pluginPath,
+		RuntimeFingerprint: fingerprint,
 	}
 	if err := r.DB.SaveContractMetadata(newAddr, meta); err != nil {
 		return fmt.Errorf("save metadata: %w", err)
@@ -1193,6 +1268,19 @@ func (r *ContractRegistry) EnsurePluginLoaded(addr string, meta *ContractMetadat
 	}
 	if _, ok := r.PluginVM.plugins[addr]; ok {
 		return nil
+	}
+	currentFingerprint, err := CurrentPluginRuntimeFingerprint()
+	if err != nil {
+		return fmt.Errorf("runtime fingerprint: %w", err)
+	}
+	if meta.RuntimeFingerprint != "" && meta.RuntimeFingerprint != currentFingerprint {
+		return fmt.Errorf("plugin runtime fingerprint mismatch for %s; redeploy or recompile the plugin against the current node runtime", addr)
+	}
+	if meta.RuntimeFingerprint == "" {
+		meta.RuntimeFingerprint = currentFingerprint
+		if err := r.DB.SaveContractMetadata(addr, meta); err != nil {
+			return fmt.Errorf("persist runtime fingerprint: %w", err)
+		}
 	}
 
 	return r.PluginVM.LoadPlugin(addr, meta.PluginPath)

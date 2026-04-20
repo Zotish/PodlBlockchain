@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
+import { API_BASE, CHAIN_BASE, WALLET_BASE } from "../../utils/api";
 
-const NODE = "http://127.0.0.1:6500";
+const NODE = CHAIN_BASE;
 
 export default function ContractABI({ address }) {
   const [entries, setEntries] = useState(null);
@@ -30,8 +31,8 @@ export default function ContractABI({ address }) {
 // Copy this file into your DApp project.
 
 const CONTRACT_ADDRESS = "${address}";
-const NODE_URL   = "http://127.0.0.1:6500"; // chain node
-const WALLET_URL = "http://127.0.0.1:8080"; // wallet server
+const NODE_URL   = "${CHAIN_BASE}"; // chain node
+const WALLET_URL = "${WALLET_BASE}"; // wallet server
 
 // ABI (full list of functions)
 export const ABI = ${JSON.stringify(entries, null, 2)};
@@ -158,7 +159,7 @@ ${entries.map((fn) => {
           <div style={{ marginTop:8, padding:"10px 14px", background:"#eff6ff",
               border:"1px solid #bfdbfe", borderRadius:8, fontSize:12, color:"#1e40af" }}>
             <strong>Usage in your DApp:</strong><br/>
-            <code>POST {NODE}/contract/call</code><br/>
+            <code>POST {API_BASE}/contract/call</code><br/>
             <code>{`{ "address": "${address}", "fn": "FunctionName", "args": [...], "caller": "0x..." }`}</code>
           </div>
         </>

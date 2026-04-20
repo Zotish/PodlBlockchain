@@ -26,7 +26,7 @@ func (bc *Blockchain_struct) DeployBridgeToken(name, symbol, decimals, bscToken 
 	if _, err := os.Stat(pluginSrc); err != nil {
 		return "", fmt.Errorf("bridge_token.so not found (compile contract/bridge_token.go)")
 	}
-	pluginDir := filepath.Join("data", "contracts")
+	pluginDir := contractArtifactsDir()
 	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
 		return "", err
 	}
@@ -36,12 +36,17 @@ func (bc *Blockchain_struct) DeployBridgeToken(name, symbol, decimals, bscToken 
 	}
 
 	meta := &ContractMetadata{
-		Address:   addr,
-		Type:      "plugin",
-		Owner:     owner,
-		Timestamp: time.Now().Unix(),
+		Address:    addr,
+		Type:       "plugin",
+		Owner:      owner,
+		Timestamp:  time.Now().Unix(),
 		PluginPath: pluginPath,
 	}
+	runtimeFingerprint, err := CurrentPluginRuntimeFingerprint()
+	if err != nil {
+		return "", err
+	}
+	meta.RuntimeFingerprint = runtimeFingerprint
 
 	if err := bc.ContractEngine.Registry.PluginVM.LoadPlugin(addr, pluginPath); err != nil {
 		return "", err

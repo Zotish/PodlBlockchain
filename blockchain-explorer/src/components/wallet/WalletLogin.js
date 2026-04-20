@@ -1,5 +1,6 @@
 
 import React, { useState } from 'react';
+import { API_BASE, apiUrl } from '../../utils/api';
 
 // Simple password strength validator
 function validatePasswordStrength(pw) {
@@ -41,7 +42,7 @@ const WalletLogin = ({ onWalletCreate, onWalletImport }) => {
 
     try {
       // 🔥 changed (8080 → 5000)
-      const response = await fetch('http://127.0.0.1:9000/wallet/new', { 
+      const response = await fetch(apiUrl(API_BASE, '/wallet/new'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -78,7 +79,7 @@ const WalletLogin = ({ onWalletCreate, onWalletImport }) => {
 
     try {
       // 🔥 changed (8080 → 5000)
-      const response = await fetch('http://127.0.0.1:9000/wallet/import/mnemonic', { 
+      const response = await fetch(apiUrl(API_BASE, '/wallet/import/mnemonic'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -115,7 +116,7 @@ const WalletLogin = ({ onWalletCreate, onWalletImport }) => {
 
     try {
       // 🔥 changed (8080 → 5000)
-      const response = await fetch('http://127.0.0.1:9000/wallet/import/private-key', { 
+      const response = await fetch(apiUrl(API_BASE, '/wallet/import/private-key'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

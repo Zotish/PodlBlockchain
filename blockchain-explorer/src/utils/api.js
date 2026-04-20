@@ -1,7 +1,35 @@
-export const API_BASE = "http://127.0.0.1:9000";
+function normalizeBaseUrl(value, fallback) {
+  const raw = (value || fallback || "").trim();
+  return raw.replace(/\/+$/, "");
+}
+
+export const API_BASE = normalizeBaseUrl(
+  process.env.REACT_APP_API_BASE,
+  "http://127.0.0.1:9000"
+);
+
+export const CHAIN_BASE = normalizeBaseUrl(
+  process.env.REACT_APP_CHAIN_BASE,
+  "http://127.0.0.1:6500"
+);
+
+export const WALLET_BASE = normalizeBaseUrl(
+  process.env.REACT_APP_WALLET_BASE,
+  "http://127.0.0.1:8080"
+);
+
+export const WEB_WALLET_BASE = normalizeBaseUrl(
+  process.env.REACT_APP_WEB_WALLET_BASE,
+  "http://127.0.0.1:3000"
+);
+
+export function apiUrl(base, path) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${normalizedPath}`;
+}
 
 export async function fetchJSON(path, options) {
-  const res = await fetch(`${API_BASE}${path}`, options);
+  const res = await fetch(apiUrl(API_BASE, path), options);
   if (!res.ok) {
     // Try to read the JSON error body for a friendly message
     try {

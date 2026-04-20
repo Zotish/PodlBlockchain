@@ -1,8 +1,25 @@
-export const NODE_URL    = "http://127.0.0.1:9000"; // aggregator (or 5000 for single node)
-export const WALLET_URL  = "http://127.0.0.1:8080"; // wallet server
-export const WEB_WALLET_URL = "http://127.0.0.1:3000"; // optional web wallet UI
+function normalizeBaseUrl(value, fallback) {
+  const raw = (value || fallback || "").trim();
+  return raw.replace(/\/+$/, "");
+}
 
-export const DEX_CONTRACT_ADDRESS = ""; // set after deploying fresh Factory contract
+export const NODE_URL = normalizeBaseUrl(
+  process.env.REACT_APP_NODE_URL,
+  "http://127.0.0.1:9000"
+); // aggregator (or 5000 for single node)
+
+export const WALLET_URL = normalizeBaseUrl(
+  process.env.REACT_APP_WALLET_URL,
+  "http://127.0.0.1:8080"
+); // wallet server
+
+export const WEB_WALLET_URL = normalizeBaseUrl(
+  process.env.REACT_APP_WEB_WALLET_URL,
+  "http://127.0.0.1:3000"
+); // optional web wallet UI
+
+export const DEX_CONTRACT_ADDRESS =
+  (process.env.REACT_APP_DEX_CONTRACT_ADDRESS || "").trim(); // set after deploying fresh Factory contract
 
 // LQD DEX Factory + Router ABI
 // Single contract manages ALL pairs — Uniswap v2 Factory + Router combined

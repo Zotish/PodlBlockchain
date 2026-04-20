@@ -151,9 +151,9 @@
 // src/components/SendTransaction.jsx
 import React, { useState, useEffect } from 'react';
 import { parseLQD, formatLQD, LQD_DECIMALS } from "./lqdUnits";
-import { waitForTx } from "../../utils/api";
+import { API_BASE, apiUrl, waitForTx } from "../../utils/api";
 
-const NODE_URL = "http://127.0.0.1:9000";
+const NODE_URL = API_BASE;
 
 const SendTransaction = ({ fromAddress, privateKey }) => {
   const [toAddress, setToAddress] = useState('');
@@ -168,7 +168,7 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
 
   useEffect(() => {
     if (!fromAddress) return;
-    fetch(`${NODE_URL}/balance?address=${encodeURIComponent(fromAddress)}`)
+    fetch(apiUrl(NODE_URL, `/balance?address=${encodeURIComponent(fromAddress)}`))
       .then(r => r.json())
       .then(d => setRawBalance(d.balance || d.Balance || "0"))
       .catch(() => {});
@@ -262,7 +262,7 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
         private_key: privateKey
       };
 
-      const response = await fetch(`${NODE_URL}/wallet/send`, {
+      const response = await fetch(apiUrl(NODE_URL, "/wallet/send"), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -286,7 +286,7 @@ const SendTransaction = ({ fromAddress, privateKey }) => {
         await waitForTx(hash, 5000).catch(() => null);
       }
       // refresh live balance display after confirmation
-      fetch(`${NODE_URL}/balance?address=${encodeURIComponent(fromAddress)}`)
+      fetch(apiUrl(NODE_URL, `/balance?address=${encodeURIComponent(fromAddress)}`))
         .then(r => r.json())
         .then(d => {
           setRawBalance(d.balance || d.Balance || "0");

@@ -1,13 +1,14 @@
 // src/components/contracts/ContractOverview.js
 import React, { useEffect, useState } from "react";
+import { API_BASE, apiUrl } from "../../utils/api";
 
-const API = "http://127.0.0.1:9000";
+const API = API_BASE;
 
 export default function ContractOverview({ address, setABI }) {
   const [info, setInfo] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/contract/getAbi?address=${address}`)
+    fetch(apiUrl(API, `/contract/getAbi?address=${address}`))
       .then((r) => r.json())
       .then((raw) => {
         // Server returns { entries: [...] } — extract the array

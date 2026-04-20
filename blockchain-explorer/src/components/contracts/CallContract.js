@@ -37,8 +37,9 @@
 // src/components/contract/CallContract.js
 import React, { useState } from "react";
 import { parseLQD, isAmountParam } from "../../utils/lqdUnits";
+import { API_BASE, apiUrl } from "../../utils/api";
 
-const NODE = "http://127.0.0.1:9000";
+const NODE = API_BASE;
 
 export default function CallContract({ walletAddress, privateKey }) {
   const [contractAddress, setContractAddress] = useState("");
@@ -51,7 +52,7 @@ export default function CallContract({ walletAddress, privateKey }) {
 
   // Load ABI from backend
   const loadABI = async () => {
-    const res = await fetch(`${NODE}/contract/getAbi?address=${contractAddress}`);
+    const res = await fetch(apiUrl(NODE, `/contract/getAbi?address=${contractAddress}`));
     const data = await res.json();
     const entries = Array.isArray(data) ? data : data?.entries;
     if (Array.isArray(entries)) {
@@ -121,7 +122,7 @@ export default function CallContract({ walletAddress, privateKey }) {
         caller: walletAddress,
         value: 0,
       };
-      res = await fetch(`${NODE}/contract/call`, {
+      res = await fetch(apiUrl(NODE, "/contract/call"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -134,7 +135,7 @@ export default function CallContract({ walletAddress, privateKey }) {
         args,
         private_key: privateKey || "",
       };
-      res = await fetch(`${NODE}/wallet/contract-template`, {
+      res = await fetch(apiUrl(NODE, "/wallet/contract-template"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

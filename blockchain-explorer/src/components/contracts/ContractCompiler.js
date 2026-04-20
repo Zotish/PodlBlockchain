@@ -1,7 +1,7 @@
 import React, { useState } from "react";
-import { API_BASE } from "../../utils/api";
+import { API_BASE, CHAIN_BASE } from "../../utils/api";
 
-const NODE_CANDIDATES = ["http://127.0.0.1:6500", API_BASE];
+const NODE_CANDIDATES = [CHAIN_BASE, API_BASE];
 
 const PLACEHOLDER = `package main
 

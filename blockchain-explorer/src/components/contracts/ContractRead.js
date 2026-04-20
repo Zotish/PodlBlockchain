@@ -1,6 +1,7 @@
 import React, { useState } from "react";
+import { API_BASE, apiUrl } from "../../utils/api";
 
-const API = "http://127.0.0.1:9000";
+const API = API_BASE;
 
 export default function ContractRead({ address, abi }) {
   // Show all non-payable functions (our ABI has no stateMutability; payable:false = read/write)
@@ -16,7 +17,7 @@ export default function ContractRead({ address, abi }) {
   const callRead = async (fn, argValues) => {
     const args = (fn.inputs || []).map((_, i) => argValues[i] || "");
     try {
-      const res = await fetch(`${API}/contract/call`, {
+      const res = await fetch(apiUrl(API, "/contract/call"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ address, fn: fn.name, args, caller: "" }),

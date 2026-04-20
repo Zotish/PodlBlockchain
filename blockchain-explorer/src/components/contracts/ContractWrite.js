@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { parseLQD, isAmountParam } from "../../utils/lqdUnits";
+import { API_BASE, apiUrl } from "../../utils/api";
 
-const API = "http://127.0.0.1:9000";
+const API = API_BASE;
 
 export default function ContractWrite({ address, walletAddress, abi, privateKey }) {
   // Show functions that have inputs (state-changing functions)
@@ -41,7 +42,7 @@ export default function ContractWrite({ address, walletAddress, abi, privateKey 
 
     setStatus("⏳ Sending...");
     try {
-      const res = await fetch(`${API}/wallet/contract-template`, {
+      const res = await fetch(apiUrl(API, "/wallet/contract-template"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

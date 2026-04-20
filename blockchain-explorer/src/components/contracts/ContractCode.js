@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from "react";
+import { API_BASE, apiUrl } from "../../utils/api";
 
-const API = "http://127.0.0.1:9000";
+const API = API_BASE;
 
 export default function ContractCode({ address }) {
   const [info, setInfo] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/contract/code?address=${address}`)
+    fetch(apiUrl(API, `/contract/code?address=${address}`))
       .then((r) => r.json())
       .then((d) => setInfo(d));
   }, [address]);

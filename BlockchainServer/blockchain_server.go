@@ -2,6 +2,7 @@ package blockchainserver
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"encoding/base64"
 	"sync"
 	"time"
 
@@ -259,7 +259,20 @@ func (bcs *BlockchainServer) GetBridgeRequests(w http.ResponseWriter, r *http.Re
 		return
 	}
 	addr := r.URL.Query().Get("address")
-	list := bcs.BlockchainPtr.ListBridgeRequests(addr)
+	mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	list := bcs.BlockchainPtr.ListBridgeRequestsView(addr)
+	if mode == "public" || mode == "private" {
+		filtered := make([]*blockchaincomponent.BridgeRequest, 0, len(list))
+		for _, req := range list {
+			if req == nil {
+				continue
+			}
+			if strings.EqualFold(req.Mode, mode) {
+				filtered = append(filtered, req)
+			}
+		}
+		list = filtered
+	}
 	json.NewEncoder(w).Encode(list)
 }
 
@@ -278,6 +291,297 @@ func (bcs *BlockchainServer) GetBridgeTokens(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(list)
 }
 
+func (bcs *BlockchainServer) persistBridgeTokenState() error {
+	bcs.BlockchainPtr.Mutex.Lock()
+	dbCopy := *bcs.BlockchainPtr
+	dbCopy.Mutex = sync.Mutex{}
+	bcs.BlockchainPtr.Mutex.Unlock()
+	return blockchaincomponent.PutIntoDB(dbCopy)
+}
+
+func persistBridgeTokenRegistry(info *blockchaincomponent.BridgeTokenInfo) error {
+	reg, err := blockchaincomponent.LoadBridgeTokenRegistry()
+	if err != nil {
+		return err
+	}
+	reg.Upsert(info)
+	return blockchaincomponent.SaveBridgeTokenRegistry(reg)
+}
+
+func removeBridgeTokenRegistry(chainID, sourceToken, lqdToken string) error {
+	reg, err := blockchaincomponent.LoadBridgeTokenRegistry()
+	if err != nil {
+		return err
+	}
+	reg.Remove(chainID, sourceToken, lqdToken)
+	return blockchaincomponent.SaveBridgeTokenRegistry(reg)
+}
+
+func (bcs *BlockchainServer) UpsertBridgeToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !bridgeAdminKeyMatches(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		ChainID         string `json:"chain_id"`
+		ChainName       string `json:"chain_name"`
+		SourceToken     string `json:"source_token"`
+		TargetChainID   string `json:"target_chain_id"`
+		TargetChainName string `json:"target_chain_name"`
+		TargetToken     string `json:"target_token"`
+		Name            string `json:"name"`
+		Symbol          string `json:"symbol"`
+		Decimals        string `json:"decimals"`
+		BscToken        string `json:"bsc_token"`
+		LqdToken        string `json:"lqd_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	sourceToken := req.SourceToken
+	if sourceToken == "" {
+		sourceToken = req.BscToken
+	}
+	lqdToken := req.LqdToken
+	if lqdToken == "" {
+		lqdToken = req.TargetToken
+	}
+	if req.ChainID == "" || sourceToken == "" || lqdToken == "" {
+		http.Error(w, `{"error":"missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	info := &blockchaincomponent.BridgeTokenInfo{
+		ChainID:         req.ChainID,
+		ChainName:       req.ChainName,
+		SourceToken:     sourceToken,
+		TargetChainID:   req.TargetChainID,
+		TargetChainName: req.TargetChainName,
+		TargetToken:     lqdToken,
+		BscToken:        sourceToken,
+		LqdToken:        lqdToken,
+		Name:            req.Name,
+		Symbol:          req.Symbol,
+		Decimals:        req.Decimals,
+	}
+	bcs.BlockchainPtr.SetBridgeTokenMappingForChain(req.ChainID, sourceToken, info)
+	if err := persistBridgeTokenRegistry(info); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if err := bcs.persistBridgeTokenState(); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "token": info})
+}
+
+func (bcs *BlockchainServer) RemoveBridgeToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !bridgeAdminKeyMatches(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		ChainID     string `json:"chain_id"`
+		SourceToken string `json:"source_token"`
+		LqdToken    string `json:"lqd_token"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.ChainID == "" {
+		req.ChainID = r.URL.Query().Get("chain_id")
+	}
+	if req.SourceToken == "" {
+		req.SourceToken = r.URL.Query().Get("source_token")
+	}
+	if req.LqdToken == "" {
+		req.LqdToken = r.URL.Query().Get("lqd_token")
+	}
+	if req.ChainID == "" || (req.SourceToken == "" && req.LqdToken == "") {
+		http.Error(w, `{"error":"missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if req.SourceToken != "" {
+		bcs.BlockchainPtr.RemoveBridgeTokenMappingForChain(req.ChainID, req.SourceToken)
+	}
+	if req.LqdToken != "" {
+		bcs.BlockchainPtr.RemoveBridgeTokenMappingByLqdForChain(req.ChainID, req.LqdToken)
+	}
+	if err := removeBridgeTokenRegistry(req.ChainID, req.SourceToken, req.LqdToken); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if err := bcs.persistBridgeTokenState(); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+}
+
+func bridgeAdminKeyMatches(r *http.Request) bool {
+	requiredKey := strings.TrimSpace(os.Getenv("LQD_API_KEY"))
+	if requiredKey == "" {
+		return true
+	}
+	clientKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
+	if clientKey == "" {
+		clientKey = strings.TrimSpace(r.URL.Query().Get("api_key"))
+	}
+	return clientKey != "" && clientKey == requiredKey
+}
+
+func bridgeLookupChain(chainID string) *blockchaincomponent.BridgeChainConfig {
+	reg, err := blockchaincomponent.LoadBridgeChainRegistry()
+	if err != nil || reg == nil {
+		return nil
+	}
+	if cfg := reg.ChainByID(chainID); cfg != nil {
+		return cfg
+	}
+	if cfg := reg.ChainByName(chainID); cfg != nil {
+		return cfg
+	}
+	if cfg := reg.AnyEnabled(); cfg != nil {
+		return cfg
+	}
+	return nil
+}
+
+func (bcs *BlockchainServer) GetBridgeFamilies(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	json.NewEncoder(w).Encode(blockchaincomponent.SupportedBridgeFamilies())
+}
+
+func (bcs *BlockchainServer) GetBridgeChains(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	reg, err := blockchaincomponent.LoadBridgeChainRegistry()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(reg.List())
+}
+
+func (bcs *BlockchainServer) UpsertBridgeChain(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !bridgeAdminKeyMatches(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	var cfg blockchaincomponent.BridgeChainConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	reg, err := blockchaincomponent.LoadBridgeChainRegistry()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	reg.Upsert(&cfg)
+	if err := blockchaincomponent.SaveBridgeChainRegistry(reg); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "chain": cfg})
+}
+
+func (bcs *BlockchainServer) RemoveBridgeChain(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !bridgeAdminKeyMatches(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && r.Method != http.MethodDelete {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		req.ID = r.URL.Query().Get("id")
+	}
+	if req.ID == "" {
+		http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+		return
+	}
+	reg, err := blockchaincomponent.LoadBridgeChainRegistry()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	reg.Remove(req.ID)
+	if err := blockchaincomponent.SaveBridgeChainRegistry(reg); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "removed": req.ID})
+}
+
+func bridgeNormalizeMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != "private" {
+		return "public"
+	}
+	return "private"
+}
+
 // BridgeLockBsc registers a BSC lock request directly (fallback when RPC log scan misses).
 func (bcs *BlockchainServer) BridgeLockBsc(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -292,11 +596,13 @@ func (bcs *BlockchainServer) BridgeLockBsc(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		BscTx  string `json:"bsc_tx"`
-		Token  string `json:"token"`
-		From   string `json:"from"`
-		ToLqd  string `json:"to_lqd"`
-		Amount string `json:"amount"`
+		ChainID string `json:"chain_id"`
+		BscTx   string `json:"bsc_tx"`
+		Token   string `json:"token"`
+		From    string `json:"from"`
+		ToLqd   string `json:"to_lqd"`
+		Amount  string `json:"amount"`
+		Mode    string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
@@ -315,10 +621,99 @@ func (bcs *BlockchainServer) BridgeLockBsc(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"invalid amount"}`, http.StatusBadRequest)
 		return
 	}
-	bcs.BlockchainPtr.AddBridgeRequestBSC(req.BscTx, req.Token, req.From, req.ToLqd, amt)
+	if req.BscTx != "" {
+		endpoints := blockchaincomponent.BridgeRPCEndpoints(os.Getenv("BSC_TESTNET_RPC"))
+		if len(endpoints) > 0 {
+			if consensus, rerr := blockchaincomponent.ConsensusReceipt(endpoints, req.BscTx, 2*time.Minute, 2*time.Second); rerr != nil || !blockchaincomponent.ReceiptSuccessful(consensus.Receipt) {
+				msg := "bridge lock pending"
+				if rerr != nil {
+					msg = fmt.Sprintf("bridge lock receipt wait failed: %v", rerr)
+				}
+				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, msg), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	chainID := strings.TrimSpace(req.ChainID)
+	if chainID == "" {
+		chainID = "bsc-testnet"
+	}
+	if strings.EqualFold(req.Mode, "private") {
+		bcs.BlockchainPtr.AddPrivateBridgeRequestChain(chainID, req.BscTx, req.Token, req.From, req.ToLqd, amt)
+	} else {
+		bcs.BlockchainPtr.AddBridgeRequestChain(chainID, req.BscTx, req.Token, req.From, req.ToLqd, amt)
+	}
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
 	})
+}
+
+func (bcs *BlockchainServer) BridgeLockChain(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ChainID        string `json:"chain_id"`
+		Family         string `json:"family"`
+		Adapter        string `json:"adapter"`
+		BscTx          string `json:"tx_hash"`
+		SourceTxHash   string `json:"source_tx_hash"`
+		SourceAddress  string `json:"source_address"`
+		SourceMemo     string `json:"source_memo"`
+		SourceSequence string `json:"source_sequence"`
+		SourceOutput   string `json:"source_output"`
+		Token          string `json:"token"`
+		From           string `json:"from"`
+		ToLqd          string `json:"to_lqd"`
+		Amount         string `json:"amount"`
+		Mode           string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if req.ChainID == "" || req.BscTx == "" || req.Token == "" || req.ToLqd == "" || req.Amount == "" {
+		http.Error(w, `{"error":"missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if req.SourceTxHash == "" {
+		req.SourceTxHash = req.BscTx
+	}
+	amt, err := blockchaincomponent.NewAmountFromString(req.Amount)
+	if err != nil || amt.Sign() <= 0 {
+		http.Error(w, `{"error":"invalid amount"}`, http.StatusBadRequest)
+		return
+	}
+	family := strings.ToLower(strings.TrimSpace(req.Family))
+	if family == "" {
+		if cfg := bridgeLookupChain(req.ChainID); cfg != nil {
+			family = strings.ToLower(strings.TrimSpace(cfg.Family))
+		}
+	}
+	reqBridge := &blockchaincomponent.BridgeRequest{
+		SourceTxHash:   req.SourceTxHash,
+		SourceAddress:  req.SourceAddress,
+		SourceMemo:     req.SourceMemo,
+		SourceSequence: req.SourceSequence,
+		SourceOutput:   req.SourceOutput,
+	}
+	if err := blockchaincomponent.ValidateBridgeRequestMetadata(family, reqBridge); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	if strings.EqualFold(req.Mode, "private") {
+		bcs.BlockchainPtr.AddPrivateBridgeRequestChainWithMetadata(req.ChainID, req.BscTx, req.Token, req.From, req.ToLqd, amt, req.SourceAddress, req.SourceMemo, req.SourceSequence, req.SourceOutput)
+	} else {
+		bcs.BlockchainPtr.AddBridgeRequestChainWithMetadata(req.ChainID, req.BscTx, req.Token, req.From, req.ToLqd, amt, req.SourceAddress, req.SourceMemo, req.SourceSequence, req.SourceOutput)
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // BridgeBurnLqd executes a burn on LQD and registers a release request for BSC.
@@ -339,6 +734,7 @@ func (bcs *BlockchainServer) BridgeBurnLqd(w http.ResponseWriter, r *http.Reques
 		From   string `json:"from"`
 		ToBsc  string `json:"to_bsc"`
 		Amount string `json:"amount"`
+		Mode   string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
@@ -385,12 +781,100 @@ func (bcs *BlockchainServer) BridgeBurnLqd(w http.ResponseWriter, r *http.Reques
 	tx.TxHash = blockchaincomponent.CalculateTransactionHash(*tx)
 	bcs.BlockchainPtr.RecordRecentTx(tx)
 
-	bcs.BlockchainPtr.AddBridgeRequestBurn(tx.TxHash, info.BscToken, req.From, req.ToBsc, amt)
+	if strings.EqualFold(req.Mode, "private") {
+		bcs.BlockchainPtr.AddPrivateBridgeRequestBurn(tx.TxHash, info.BscToken, req.From, req.ToBsc, amt)
+	} else {
+		bcs.BlockchainPtr.AddBridgeRequestBurn(tx.TxHash, info.BscToken, req.From, req.ToBsc, amt)
+	}
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"tx_hash": tx.TxHash,
 		"status":  "burned",
 	})
+}
+
+func (bcs *BlockchainServer) BridgeBurnChain(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ChainID        string `json:"chain_id"`
+		Family         string `json:"family"`
+		Adapter        string `json:"adapter"`
+		Token          string `json:"token"`
+		From           string `json:"from"`
+		ToAddr         string `json:"to_addr"`
+		ToBsc          string `json:"to_bsc"`
+		Amount         string `json:"amount"`
+		SourceTxHash   string `json:"source_tx_hash"`
+		SourceAddress  string `json:"source_address"`
+		SourceMemo     string `json:"source_memo"`
+		SourceSequence string `json:"source_sequence"`
+		SourceOutput   string `json:"source_output"`
+		Mode           string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if req.ChainID == "" || req.Token == "" || req.From == "" || req.Amount == "" {
+		http.Error(w, `{"error":"missing fields"}`, http.StatusBadRequest)
+		return
+	}
+	if req.ToAddr == "" {
+		req.ToAddr = req.ToBsc
+	}
+	if req.ToAddr == "" {
+		http.Error(w, `{"error":"missing destination address"}`, http.StatusBadRequest)
+		return
+	}
+	amt, err := blockchaincomponent.NewAmountFromString(req.Amount)
+	if err != nil || amt.Sign() <= 0 {
+		http.Error(w, `{"error":"invalid amount"}`, http.StatusBadRequest)
+		return
+	}
+	family := strings.ToLower(strings.TrimSpace(req.Family))
+	if family == "" {
+		if cfg := bridgeLookupChain(req.ChainID); cfg != nil {
+			family = strings.ToLower(strings.TrimSpace(cfg.Family))
+		}
+	}
+	reqBridge := &blockchaincomponent.BridgeRequest{
+		SourceTxHash:   req.SourceTxHash,
+		SourceAddress:  req.SourceAddress,
+		SourceMemo:     req.SourceMemo,
+		SourceSequence: req.SourceSequence,
+		SourceOutput:   req.SourceOutput,
+	}
+	if err := blockchaincomponent.ValidateBridgeRequestMetadata(family, reqBridge); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	chainID := strings.TrimSpace(req.ChainID)
+	if chainID == "" {
+		chainID = "bsc-testnet"
+	}
+	if strings.EqualFold(req.Mode, "private") {
+		bcs.BlockchainPtr.AddPrivateBridgeRequestBurnToChainWithMetadata(chainID, "generic-lqd-burn", req.Token, req.From, req.ToAddr, amt, req.SourceAddress, req.SourceMemo, req.SourceSequence, req.SourceOutput)
+	} else {
+		bcs.BlockchainPtr.AddBridgeRequestBurnToChainWithMetadata(chainID, "generic-lqd-burn", req.Token, req.From, req.ToAddr, amt, req.SourceAddress, req.SourceMemo, req.SourceSequence, req.SourceOutput)
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "burned"})
+}
+
+func (bcs *BlockchainServer) BridgePrivateLockBsc(w http.ResponseWriter, r *http.Request) {
+	bcs.BridgeLockBsc(w, r)
+}
+
+func (bcs *BlockchainServer) BridgePrivateBurnLqd(w http.ResponseWriter, r *http.Request) {
+	bcs.BridgeBurnLqd(w, r)
 }
 
 func (bcs *BlockchainServer) Faucet(w http.ResponseWriter, r *http.Request) {
@@ -1923,6 +2407,12 @@ func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Reque
 	// 3. Save code/plugin
 	switch req.Type {
 	case "plugin":
+		fingerprint, err := blockchaincomponent.CurrentPluginRuntimeFingerprint()
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		meta.RuntimeFingerprint = fingerprint
 		if req.PluginPath != "" {
 			meta.PluginPath = req.PluginPath
 			break
@@ -1931,7 +2421,7 @@ func (bcs *BlockchainServer) ContractDeploy(w http.ResponseWriter, r *http.Reque
 			http.Error(w, "plugin file required", 400)
 			return
 		}
-		pluginDir := filepath.Join("data", "contracts")
+		pluginDir := blockchaincomponent.ContractArtifactsDir()
 		_ = os.MkdirAll(pluginDir, 0o755)
 		pluginPath := filepath.Join(pluginDir, addr+".so")
 		if err := os.WriteFile(pluginPath, codeBytes, 0o755); err != nil {
@@ -2633,7 +3123,13 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 		Timestamp:   time.Now().Unix(),
 		BuiltinName: req.Template,
 	}
-	pluginDir := filepath.Join("data", "contracts")
+	fingerprint, err := blockchaincomponent.CurrentPluginRuntimeFingerprint()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"runtime fingerprint: %v"}`, err), 500)
+		return
+	}
+	meta.RuntimeFingerprint = fingerprint
+	pluginDir := blockchaincomponent.ContractArtifactsDir()
 	_ = os.MkdirAll(pluginDir, 0o755)
 	pluginPath := filepath.Join(pluginDir, addr+".so")
 	if err := os.WriteFile(pluginPath, soBytes, 0o755); err != nil {
@@ -2644,16 +3140,20 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 
 	// Nil-safety checks before touching blockchain internals
 	if b.BlockchainPtr == nil {
-		http.Error(w, `{"error":"blockchain not initialized"}`, 500); return
+		http.Error(w, `{"error":"blockchain not initialized"}`, 500)
+		return
 	}
 	if b.BlockchainPtr.ContractEngine == nil {
-		http.Error(w, `{"error":"contract engine not initialized"}`, 500); return
+		http.Error(w, `{"error":"contract engine not initialized"}`, 500)
+		return
 	}
 	if b.BlockchainPtr.ContractEngine.Registry == nil {
-		http.Error(w, `{"error":"contract registry not initialized"}`, 500); return
+		http.Error(w, `{"error":"contract registry not initialized"}`, 500)
+		return
 	}
 	if b.BlockchainPtr.ContractEngine.Registry.PluginVM == nil {
-		http.Error(w, `{"error":"plugin VM not initialized"}`, 500); return
+		http.Error(w, `{"error":"plugin VM not initialized"}`, 500)
+		return
 	}
 
 	if err := b.BlockchainPtr.ContractEngine.Registry.PluginVM.LoadPlugin(addr, meta.PluginPath); err != nil {
@@ -2947,18 +3447,30 @@ func (b *BlockchainServer) GetMempool(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-var allowedOrigins = []string{
-	"http://localhost:3000",
-	"http://localhost:3001",
-	"http://127.0.0.1:3000",
-	"http://127.0.0.1:3001",
-	"chrome-extension://",
+func configuredAllowedOrigins() []string {
+	origins := []string{
+		"http://localhost:3000",
+		"http://localhost:3001",
+		"http://localhost:4173",
+		"http://127.0.0.1:3000",
+		"http://127.0.0.1:3001",
+		"http://127.0.0.1:4173",
+		"chrome-extension://",
+	}
+	for _, raw := range strings.Split(os.Getenv("LQD_ALLOWED_ORIGINS"), ",") {
+		origin := strings.TrimSpace(raw)
+		if origin == "" {
+			continue
+		}
+		origins = append(origins, origin)
+	}
+	return origins
 }
 
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	allowed := false
-	for _, o := range allowedOrigins {
+	for _, o := range configuredAllowedOrigins() {
 		if strings.HasPrefix(origin, o) {
 			allowed = true
 			break
@@ -3013,7 +3525,7 @@ func maxBytesMiddleware(next http.HandlerFunc, maxBytes int64) http.HandlerFunc 
 func (b *BlockchainServer) Start() {
 	portStr := fmt.Sprintf("%d", b.Port)
 
-	const maxBodySize    = 10 * 1024 * 1024 // 10 MB  — general limit
+	const maxBodySize = 10 * 1024 * 1024    // 10 MB  — general limit
 	const deployBodySize = 60 * 1024 * 1024 // 60 MB  — Go plugin .so files can be ~20 MB
 
 	http.HandleFunc("/", b.getBlockchain)
@@ -3071,9 +3583,19 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/liquidity/pools/sync", b.SyncPools)
 	http.HandleFunc("/liquidity/pools/register", b.limiter.middleware(maxBytesMiddleware(b.RegisterPoolManual, maxBodySize)))
 	http.HandleFunc("/bridge/requests", b.GetBridgeRequests)
+	http.HandleFunc("/bridge/families", b.GetBridgeFamilies)
 	http.HandleFunc("/bridge/tokens", b.GetBridgeTokens)
+	http.HandleFunc("/bridge/token", b.limiter.middleware(maxBytesMiddleware(b.UpsertBridgeToken, maxBodySize)))
+	http.HandleFunc("/bridge/token/remove", b.limiter.middleware(maxBytesMiddleware(b.RemoveBridgeToken, maxBodySize)))
+	http.HandleFunc("/bridge/chains", b.GetBridgeChains)
+	http.HandleFunc("/bridge/chain", b.UpsertBridgeChain)
+	http.HandleFunc("/bridge/chain/remove", b.RemoveBridgeChain)
 	http.HandleFunc("/bridge/lock_bsc", b.limiter.middleware(maxBytesMiddleware(b.BridgeLockBsc, maxBodySize)))
 	http.HandleFunc("/bridge/burn_lqd", b.limiter.middleware(maxBytesMiddleware(b.BridgeBurnLqd, maxBodySize)))
+	http.HandleFunc("/bridge/private_lock_bsc", b.limiter.middleware(maxBytesMiddleware(b.BridgePrivateLockBsc, maxBodySize)))
+	http.HandleFunc("/bridge/private_burn_lqd", b.limiter.middleware(maxBytesMiddleware(b.BridgePrivateBurnLqd, maxBodySize)))
+	http.HandleFunc("/bridge/lock_chain", b.limiter.middleware(maxBytesMiddleware(b.BridgeLockChain, maxBodySize)))
+	http.HandleFunc("/bridge/burn_chain", b.limiter.middleware(maxBytesMiddleware(b.BridgeBurnChain, maxBodySize)))
 
 	//http.HandleFunc("/contract/compile", b.CompileContract)
 
@@ -3088,7 +3610,8 @@ func (b *BlockchainServer) Start() {
 	log.Println("Blockchain server is starting on port:", b.Port)
 
 	// Use the CORS handler
-	err := http.ListenAndServe("127.0.0.1:"+portStr, nil)
+	// Bind on all interfaces so mobile devices on the same LAN can reach it.
+	err := http.ListenAndServe(":"+portStr, nil)
 	if err != nil {
 		log.Fatalf("Failed to start blockchain server: %v", err)
 	}
