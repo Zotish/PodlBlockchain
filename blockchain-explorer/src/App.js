@@ -13,7 +13,6 @@ import AddressPage from './pages/AddressPage';
 import WalletPage from './pages/WalletPage'; // Add this import
 
 import './styles.css';
-import SmartContractStudio from './components/contracts/SmartContractStudio';
 import LiquidityPage from './pages/LiquidityPage';
 import PoolsPage from './pages/PoolsPage';
 import BridgePage from './pages/BridgePage';

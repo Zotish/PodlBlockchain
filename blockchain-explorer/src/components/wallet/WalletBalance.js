@@ -592,6 +592,7 @@ const WalletBalance = ({ address, privateKey }) => {
         }
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
   useEffect(() => {
@@ -605,6 +606,7 @@ const WalletBalance = ({ address, privateKey }) => {
     };
     window.addEventListener("lqd:wallet-updated", refreshAll);
     return () => window.removeEventListener("lqd:wallet-updated", refreshAll);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokens]);
 
   const autoImport = async () => {

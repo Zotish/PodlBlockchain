@@ -41,13 +41,12 @@ const SmartContractStudio = ({ walletAddress }) => {
       </div>
 
       <div className="main-panel">
-        <ContractManager address={walletAddress} />
+        <ContractManager address={selectedAddress || walletAddress} />
       </div>
     </div>
   );
 };
 
 export default SmartContractStudio;
-
 
 
