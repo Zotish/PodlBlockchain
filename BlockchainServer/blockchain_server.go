@@ -75,11 +75,50 @@ func (b *BlockchainServer) getBlockchain(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
 	if r.Method == http.MethodGet {
-		io.WriteString(w, b.BlockchainPtr.ToJsonChain())
+		if r.URL.Query().Get("full") == "1" || strings.EqualFold(r.URL.Query().Get("full"), "true") {
+			io.WriteString(w, b.BlockchainPtr.ToJsonChain())
+			return
+		}
+
+		b.BlockchainPtr.Mutex.Lock()
+		height := len(b.BlockchainPtr.Blocks)
+		peers := len(b.BlockchainPtr.Network.Peers)
+		mempool := len(b.BlockchainPtr.Transaction_pool)
+		validators := len(b.BlockchainPtr.Validators)
+		baseFee := b.BlockchainPtr.BaseFee
+		var latestHash string
+		if height > 0 && b.BlockchainPtr.Blocks[height-1] != nil {
+			latestHash = b.BlockchainPtr.Blocks[height-1].CurrentHash
+		}
+		b.BlockchainPtr.Mutex.Unlock()
+
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":            "ok",
+			"service":           "podl-chain",
+			"height":            height,
+			"peers":             peers,
+			"mempool":           mempool,
+			"validators":        validators,
+			"base_fee":          baseFee,
+			"latest_block_hash": latestHash,
+			"full_chain_path":   "/?full=1",
+			"health_path":       "/health",
+			"timestamp":         time.Now().Unix(),
+		})
 	} else {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+}
+
+func (b *BlockchainServer) GetFullBlockchain(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	io.WriteString(w, b.BlockchainPtr.ToJsonChain())
 }
 
 func (bcs *BlockchainServer) GetAccountNonce(w http.ResponseWriter, r *http.Request) {
@@ -3529,6 +3568,7 @@ func (b *BlockchainServer) Start() {
 	const deployBodySize = 60 * 1024 * 1024 // 60 MB  — Go plugin .so files can be ~20 MB
 
 	http.HandleFunc("/", b.getBlockchain)
+	http.HandleFunc("/chain/export", b.GetFullBlockchain)
 	http.HandleFunc("/balance", b.GetBalance)
 	http.HandleFunc("/send_tx", b.limiter.middleware(maxBytesMiddleware(b.sendTransaction, maxBodySize)))
 	http.HandleFunc("/send_tx/batch", b.limiter.middleware(maxBytesMiddleware(b.sendTransactionBatch, maxBodySize)))
