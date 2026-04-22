@@ -865,13 +865,16 @@ if (ext.storage?.onChanged) {
 
 // ── Official dApp Registry ────────────────────────────────────────────────────
 // To add/remove dApps, edit this list. url can be absolute or relative.
+const PROD_EXPLORER_URL = "https://YOUR-EXPLORER-DOMAIN";
+const PROD_DEX_URL = "https://YOUR-SWAP-DEX-DOMAIN";
+const PROD_BRIDGE_URL = "https://YOUR-EXPLORER-DOMAIN/bridge";
 const OFFICIAL_DAPPS = [
   {
     name: "LQD DEX",
     description: "Swap & provide liquidity on PosDL chain",
     icon: "⇄",
     iconBg: "linear-gradient(135deg,#0f172a,#7c3aed)",
-    url: "http://localhost:3001",
+    url: PROD_DEX_URL,
     category: "DeFi",
   },
   {
@@ -879,7 +882,7 @@ const OFFICIAL_DAPPS = [
     description: "Browse blocks, transactions & addresses",
     icon: "🔍",
     iconBg: "linear-gradient(135deg,#0c4a6e,#0369a1)",
-    url: "http://localhost:3000",
+    url: PROD_EXPLORER_URL,
     category: "Tools",
   },
   {
@@ -887,7 +890,7 @@ const OFFICIAL_DAPPS = [
     description: "Bridge assets between LQD and BSC",
     icon: "⬡",
     iconBg: "linear-gradient(135deg,#064e3b,#059669)",
-    url: "http://localhost:3002",
+    url: PROD_BRIDGE_URL,
     category: "Bridge",
   },
   {
@@ -895,7 +898,7 @@ const OFFICIAL_DAPPS = [
     description: "Manage LP positions & earn rewards",
     icon: "💧",
     iconBg: "linear-gradient(135deg,#1e3a5f,#2563eb)",
-    url: "http://localhost:3000/pools",
+    url: `${PROD_EXPLORER_URL}/pools`,
     category: "DeFi",
   },
   {
@@ -903,7 +906,7 @@ const OFFICIAL_DAPPS = [
     description: "View validators & staking statistics",
     icon: "✦",
     iconBg: "linear-gradient(135deg,#3b0764,#7e22ce)",
-    url: "http://localhost:3000/validators",
+    url: `${PROD_EXPLORER_URL}/validators`,
     category: "Staking",
   },
 ];

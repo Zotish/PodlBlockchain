@@ -1,22 +1,27 @@
 const ext = typeof chrome !== "undefined" ? chrome : browser;
 
+const PROD_CHAIN_URL = "https://podlblockchain-production-a9f1.up.railway.app";
+const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
+const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
+const PROD_EXPLORER_URL = "https://YOUR-EXPLORER-DOMAIN";
+
 // ── Default networks ──────────────────────────────────────────────────────────
 const DEFAULT_NETWORKS = {
   "0x8b": {
     chainId: "0x8b",
     name: "LQD Mainnet",
-    nodeUrl: "http://127.0.0.1:5000",
-    walletUrl: "http://127.0.0.1:8080",
+    nodeUrl: PROD_CHAIN_URL,
+    walletUrl: PROD_WALLET_URL,
     symbol: "LQD",
-    blockExplorer: "http://localhost:3001"
+    blockExplorer: PROD_EXPLORER_URL
   },
   "0x8c": {
     chainId: "0x8c",
     name: "LQD Aggregator",
-    nodeUrl: "http://127.0.0.1:9000",
-    walletUrl: "http://127.0.0.1:8080",
+    nodeUrl: PROD_AGGREGATOR_URL,
+    walletUrl: PROD_WALLET_URL,
     symbol: "LQD",
-    blockExplorer: "http://localhost:3001"
+    blockExplorer: PROD_EXPLORER_URL
   }
 };
 
@@ -25,8 +30,8 @@ let session = {
   address: "",
   privateKey: "",
   chainId: "0x8b",
-  nodeUrl: "http://127.0.0.1:5000",
-  walletUrl: "http://127.0.0.1:8080"
+  nodeUrl: PROD_CHAIN_URL,
+  walletUrl: PROD_WALLET_URL
 };
 
 const portsByTab = new Map();
@@ -129,9 +134,16 @@ async function loadConfig() {
     session.nodeUrl = net.nodeUrl;
     session.walletUrl = net.walletUrl;
   }
-  // Live dev environment uses 6500, not the legacy 5000/9000 defaults.
-  if (session.nodeUrl && (session.nodeUrl.includes(":5000") || session.nodeUrl.includes(":9000"))) {
-    session.nodeUrl = "http://127.0.0.1:6500";
+  // Migrate legacy local defaults to production endpoints.
+  if (
+    session.nodeUrl &&
+    (session.nodeUrl.includes(":5000") ||
+      session.nodeUrl.includes(":6500") ||
+      session.nodeUrl.includes(":9000") ||
+      session.nodeUrl.includes("127.0.0.1") ||
+      session.nodeUrl.includes("localhost"))
+  ) {
+    session.nodeUrl = PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: session.nodeUrl });
   }
   const data = await ext.storage.local.get(["address"]);

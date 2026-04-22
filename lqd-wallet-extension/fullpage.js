@@ -1,14 +1,23 @@
 "use strict";
 const ext = typeof chrome !== "undefined" ? chrome : browser;
+const PROD_CHAIN_URL = "https://podlblockchain-production-a9f1.up.railway.app";
+const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
+const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
+const PROD_EXPLORER_URL = "https://YOUR-EXPLORER-DOMAIN";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
   address: "",
-  nodeUrl:   "http://127.0.0.1:6500",
-  walletUrl: "http://127.0.0.1:8080",
+  nodeUrl:   PROD_CHAIN_URL,
+  walletUrl: PROD_WALLET_URL,
   tokens: [],          // [{ address, symbol, name, decimals }]
   compiledBinary: null // last compiler output
 };
+let bridgeMode = "public";
+let bridgeChainId = "bsc-testnet";
+let bridgeFamilyId = "evm";
+let bridgeChains = [];
+let bridgeFamilies = [];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function $(id) { return document.getElementById(id); }
@@ -151,15 +160,25 @@ async function init() {
   if (stored.nodeUrl)   state.nodeUrl   = stored.nodeUrl;
   if (stored.walletUrl) state.walletUrl = stored.walletUrl;
 
-  // Auto-migrate: port 5000 conflicts with macOS ControlCenter — use 6500 chain node
-  if (state.nodeUrl && (state.nodeUrl.includes(":5000") || state.nodeUrl.includes(":9000"))) {
-    state.nodeUrl = "http://127.0.0.1:6500";
+  // Auto-migrate legacy local defaults to production endpoints.
+  if (
+    state.nodeUrl &&
+    (state.nodeUrl.includes(":5000") ||
+      state.nodeUrl.includes(":6500") ||
+      state.nodeUrl.includes(":9000") ||
+      state.nodeUrl.includes("127.0.0.1") ||
+      state.nodeUrl.includes("localhost"))
+  ) {
+    state.nodeUrl = PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: state.nodeUrl });
   }
 
   // Populate settings inputs
   $("settingsNodeUrl").value  = state.nodeUrl;
   $("settingsWalletUrl").value = state.walletUrl;
+  await loadBridgeFamilies();
+  await loadBridgeTokens();
+  await loadBridgeChains();
 
   // Check lock state
   const lockData = await ext.storage.local.get(["address", "locked"]);
@@ -195,6 +214,11 @@ function showApp() {
   $("chipAddr").textContent = state.address;
   $("chipLabel").textContent = shortAddr(state.address);
   $("receiveAddr").textContent = state.address;
+  _bscAccount = state.address;
+  loadBridgeFamilies().catch(() => {});
+  loadBridgeTokens().catch(() => {});
+  loadBridgeChains().catch(() => {});
+  useExtensionWalletSigner().catch(() => {});
   loadTokens();
   refreshBalance();
   loadActivity();
@@ -993,49 +1017,369 @@ $("exploreBtn").addEventListener("click", async () => {
 // ══════════════════════════════════════════════════════════════════
 // BRIDGE PAGE
 // ══════════════════════════════════════════════════════════════════
-let _bscProvider = null, _bscAccount = "";
+let _bscAccount = "";
+let _bridgeTokens = [];
 
-$("connectBscBtn").addEventListener("click", async () => {
-  if (!window.ethereum) { toast("MetaMask not found", "error"); return; }
+async function loadBridgeTokens() {
   try {
-    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-    _bscAccount = accounts[0] || "";
-    $("bscStatus").textContent = `✓ Connected: ${shortAddr(_bscAccount)}`;
-    $("bscStatus").className = "notice success";
-    toast("MetaMask connected!", "success");
-  } catch (e) { toast("MetaMask connect failed: " + e.message, "error"); }
+    const data = await nodeGet("/bridge/tokens");
+    _bridgeTokens = Array.isArray(data) ? data : [];
+  } catch {
+    _bridgeTokens = [];
+  }
+}
+
+function syncBridgeFamilyToUI(familyId) {
+  const nextFamily = String(familyId || "evm").toLowerCase();
+  bridgeFamilyId = nextFamily;
+  const familySelect = $("bridgeFamilySelect");
+  const burnFamilySelect = $("burnFamilySelect");
+  const adminFamilySelect = $("bridgeAdminFamily");
+  const tokenFamilySelect = $("bridgeTokenAdminFamily");
+  if (familySelect && familySelect.value !== nextFamily) familySelect.value = nextFamily;
+  if (burnFamilySelect && burnFamilySelect.value !== nextFamily) burnFamilySelect.value = nextFamily;
+  if (adminFamilySelect && adminFamilySelect.value !== nextFamily) adminFamilySelect.value = nextFamily;
+  if (tokenFamilySelect && tokenFamilySelect.value !== nextFamily) tokenFamilySelect.value = nextFamily;
+  updateBridgeExternalFieldVisibility(nextFamily);
+}
+
+function resolvedBridgeChainFamily(chainId = bridgeChainId) {
+  const normalized = String(chainId || "").toLowerCase();
+  const selected = bridgeChains.find((cfg) => String(cfg.id || cfg.chain_id || "").toLowerCase() === normalized);
+  const family = String(selected?.family || "evm").toLowerCase();
+  return family || "evm";
+}
+
+function updateBridgeExternalFieldVisibility(familyId) {
+  const family = String(familyId || resolvedBridgeChainFamily() || "evm").toLowerCase();
+  const isExternal = isExternalBridgeFamily(family);
+  const metaCard = $("bridgeExternalMetaCard");
+  const evmHint = $("bridgeEvmHint");
+  const burnMetaCard = $("burnExternalMetaCard");
+  if (metaCard) metaCard.style.display = isExternal ? "block" : "none";
+  if (burnMetaCard) burnMetaCard.style.display = isExternal ? "block" : "none";
+  if (evmHint) evmHint.style.display = isExternal ? "none" : "block";
+  if (!isExternal) {
+    ["bridgeSourceTxHash", "bridgeSourceAddress", "bridgeSourceMemo", "bridgeSourceSequence", "bridgeSourceOutput", "burnSourceTxHash", "burnSourceAddress", "burnSourceMemo", "burnSourceSequence", "burnSourceOutput"].forEach((id) => {
+      const el = $(id);
+      if (el) el.value = "";
+    });
+  }
+}
+
+async function loadBridgeFamilies() {
+  try {
+    const data = await nodeGet("/bridge/families");
+    bridgeFamilies = Array.isArray(data) ? data : [];
+  } catch {
+    bridgeFamilies = [];
+  }
+  const familySelect = $("bridgeFamilySelect");
+  const burnFamilySelect = $("burnFamilySelect");
+  const adminFamilySelect = $("bridgeAdminFamily");
+  const tokenFamilySelect = $("bridgeTokenAdminFamily");
+  const current = bridgeFamilies.length ? bridgeFamilies : [
+    { id: "evm", name: "EVM" },
+    { id: "utxo", name: "UTXO" },
+    { id: "cosmos", name: "Cosmos" },
+    { id: "substrate", name: "Substrate" },
+    { id: "solana", name: "Solana" },
+    { id: "xrpl", name: "XRPL" },
+    { id: "ton", name: "TON" },
+    { id: "cardano", name: "Cardano" },
+    { id: "aptos", name: "Aptos" },
+    { id: "sui", name: "Sui" },
+    { id: "near", name: "NEAR" },
+    { id: "icp", name: "ICP" },
+  ];
+  const options = current.map((cfg) => {
+    const value = cfg.id || cfg.family || "";
+    const label = cfg.name || cfg.id || "Family";
+    return `<option value="${value}">${label}</option>`;
+  }).join("");
+  if (familySelect) {
+    familySelect.innerHTML = options || '<option value="evm">EVM</option>';
+    if (![...familySelect.options].some((opt) => opt.value === bridgeFamilyId)) {
+      bridgeFamilyId = familySelect.options[0]?.value || "evm";
+    }
+    familySelect.value = bridgeFamilyId;
+  }
+  if (burnFamilySelect) {
+    burnFamilySelect.innerHTML = options || '<option value="evm">EVM</option>';
+    if (![...burnFamilySelect.options].some((opt) => opt.value === bridgeFamilyId)) {
+      burnFamilySelect.value = burnFamilySelect.options[0]?.value || "evm";
+    } else {
+      burnFamilySelect.value = bridgeFamilyId;
+    }
+  }
+  if (adminFamilySelect) {
+    adminFamilySelect.innerHTML = options || '<option value="evm">EVM</option>';
+    adminFamilySelect.value = bridgeFamilyId;
+  }
+  if (tokenFamilySelect) {
+    tokenFamilySelect.innerHTML = options || '<option value="evm">EVM</option>';
+    tokenFamilySelect.value = bridgeFamilyId;
+  }
+}
+
+async function loadBridgeChains() {
+  try {
+    const data = await nodeGet("/bridge/chains");
+    bridgeChains = Array.isArray(data) ? data : [];
+  } catch {
+    bridgeChains = [];
+  }
+  const chainSelect = $("bridgeChainSelect");
+  const burnSelect = $("burnChainSelect");
+  const tokenAdminSelect = $("bridgeTokenAdminChainSelect");
+  const current = bridgeChains.length ? bridgeChains : [{ id: "bsc-testnet", name: "BSC Testnet", chain_id: "97", family: "evm" }];
+  const familyFilter = String(bridgeFamilyId || $("bridgeFamilySelect")?.value || "evm").toLowerCase();
+  const filtered = current.filter((cfg) => !familyFilter || String(cfg.family || "evm").toLowerCase() === String(familyFilter).toLowerCase());
+  const visible = filtered.length ? filtered : (familyFilter === "evm" ? current : []);
+  const options = current.map((cfg) => {
+    const value = cfg.id || cfg.chain_id || "";
+    const label = cfg.name || cfg.id || cfg.chain_id || "Chain";
+    const fam = cfg.family || "evm";
+    const extra = fam ? ` (${fam.toUpperCase()})` : "";
+    return `<option value="${value}">${label}${extra}</option>`;
+  }).join("");
+  if (chainSelect) {
+    const chainOptions = visible.length ? visible.map((cfg) => {
+      const value = cfg.id || cfg.chain_id || "";
+      const label = cfg.name || cfg.id || cfg.chain_id || "Chain";
+      const fam = cfg.family || "evm";
+      return `<option value="${value}">${label} (${fam.toUpperCase()})</option>`;
+    }).join("") : '<option value="">No chains configured for this family</option>';
+    chainSelect.innerHTML = chainOptions;
+    if (!visible.length) {
+      bridgeChainId = "";
+    } else if (![...chainSelect.options].some((opt) => opt.value === bridgeChainId)) {
+      const optionList = Array.from(chainSelect.options || []);
+      bridgeChainId = optionList.find((opt) => opt.value === "bsc-testnet")?.value
+        || optionList.find((opt) => /EVM/i.test(opt.textContent || ""))?.value
+        || optionList[0]?.value
+        || "";
+    }
+    chainSelect.value = bridgeChainId;
+  }
+  if (burnSelect) {
+    const chainOptions = visible.length ? visible.map((cfg) => {
+      const value = cfg.id || cfg.chain_id || "";
+      const label = cfg.name || cfg.id || cfg.chain_id || "Chain";
+      const fam = cfg.family || "evm";
+      return `<option value="${value}">${label} (${fam.toUpperCase()})</option>`;
+    }).join("") : '<option value="">No chains configured for this family</option>';
+    burnSelect.innerHTML = chainOptions;
+    if (!visible.length) {
+      bridgeChainId = "";
+    } else if (![...burnSelect.options].some((opt) => opt.value === bridgeChainId)) {
+      const optionList = Array.from(burnSelect.options || []);
+      burnSelect.value = optionList.find((opt) => opt.value === "bsc-testnet")?.value
+        || optionList.find((opt) => /EVM/i.test(opt.textContent || ""))?.value
+        || optionList[0]?.value
+        || "";
+    } else {
+      burnSelect.value = bridgeChainId;
+    }
+  }
+  if (tokenAdminSelect) {
+    const chainOptions = visible.length ? visible.map((cfg) => {
+      const value = cfg.id || cfg.chain_id || "";
+      const label = cfg.name || cfg.id || cfg.chain_id || "Chain";
+      const fam = cfg.family || "evm";
+      return `<option value="${value}">${label} (${fam.toUpperCase()})</option>`;
+    }).join("") : '<option value="">No chains configured for this family</option>';
+    tokenAdminSelect.innerHTML = chainOptions;
+    tokenAdminSelect.value = bridgeChainId;
+  }
+  updateBridgeExternalFieldVisibility(bridgeFamilyId || resolvedBridgeChainFamily());
+  renderBridgeChainList();
+}
+
+function renderBridgeChainList() {
+  const el = $("bridgeChainList");
+  if (!el) return;
+  if (!bridgeChains.length) {
+    el.innerHTML = "<div class='notice'>No bridge chains configured yet.</div>";
+    return;
+  }
+  el.innerHTML = bridgeChains.map((cfg) => {
+    const id = cfg.id || cfg.chain_id || "";
+    const name = cfg.name || id || "Chain";
+    const family = cfg.family || "evm";
+    const adapter = cfg.adapter || family;
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--surface2);">
+      <strong>${name}</strong> <span style="opacity:.7">${id}</span><br/>
+      <span style="opacity:.7">Family:</span> ${family.toUpperCase()} · <span style="opacity:.7">Adapter:</span> ${adapter}<br/>
+      <span style="opacity:.7">RPC:</span> ${cfg.rpc || (cfg.rpcs || []).join(", ") || "—"}<br/>
+      <span style="opacity:.7">Bridge:</span> ${cfg.bridge_address || "—"}<br/>
+      <span style="opacity:.7">Lock:</span> ${cfg.lock_address || "—"}<br/>
+      <span style="opacity:.7">Public/Private:</span> ${cfg.supports_public ? "public " : ""}${cfg.supports_private ? "private" : ""}
+    </div>`;
+  }).join("");
+}
+
+function bridgeTokenAddressForSelection() {
+  const symbol = $("bridgeTokenSelect")?.value?.trim();
+  const custom = $("bridgeTokenCustomAddr")?.value?.trim();
+  if (custom && /^0x[a-fA-F0-9]{40}$/.test(custom)) return custom;
+  const mapped = _bridgeTokens.find((t) => {
+    const chainMatch = !bridgeChainId || !t.chain_id || String(t.chain_id).toLowerCase() === String(bridgeChainId).toLowerCase();
+    const symbolMatch = String(t.symbol || "").toUpperCase() === String(symbol || "").toUpperCase();
+    return chainMatch && symbolMatch;
+  }) || _bridgeTokens.find((t) => String(t.symbol || "").toUpperCase() === String(symbol || "").toUpperCase());
+  if (mapped?.bsc_token && /^0x[a-fA-F0-9]{40}$/.test(mapped.bsc_token)) return mapped.bsc_token;
+  if (mapped?.source_token && /^0x[a-fA-F0-9]{40}$/.test(mapped.source_token)) return mapped.source_token;
+  return "";
+}
+
+function bridgeMetadataFromUI(prefix = "bridge") {
+  const get = (id) => $(id)?.value?.trim() || "";
+  return {
+    source_tx_hash: get(`${prefix}SourceTxHash`),
+    source_address: get(`${prefix}SourceAddress`),
+    source_memo: get(`${prefix}SourceMemo`),
+    source_sequence: get(`${prefix}SourceSequence`),
+    source_output: get(`${prefix}SourceOutput`),
+  };
+}
+
+function isExternalBridgeFamily(familyId) {
+  const family = String(familyId || bridgeFamilyId || "evm").toLowerCase();
+  return family === "cosmos" || family === "utxo" || family === "cardano" || family === "solana" || family === "substrate" || family === "xrpl" || family === "ton" || family === "near" || family === "aptos";
+}
+
+async function useExtensionWalletSigner() {
+  if (!state.address) {
+    $("bscStatus").textContent = "Unlock your LQD wallet first";
+    $("bscStatus").className = "notice warn";
+    toast("Unlock wallet first", "error");
+    return;
+  }
+  _bscAccount = state.address;
+  $("bscStatus").textContent = `✓ Extension wallet signer ready: ${shortAddr(_bscAccount)}`;
+  $("bscStatus").className = "notice success";
+  toast("Extension wallet signer ready", "success");
+}
+
+$("useWalletSignerBtn").addEventListener("click", async () => {
+  await useExtensionWalletSigner();
 });
 
 $("doBridgeLockBtn").addEventListener("click", async () => {
-  if (!_bscAccount) { toast("Connect MetaMask first", "error"); return; }
-  const token  = $("bridgeTokenSelect").value;
+  const family = String(bridgeFamilyId || $("bridgeFamilySelect")?.value || "evm").toLowerCase();
+  const token = bridgeTokenAddressForSelection();
   const amt    = $("bridgeLockAmt").value.trim();
   const lqdRecipient = $("bridgeLqdRecipient").value.trim() || state.address;
+  bridgeMode = $("bridgeModeSelect")?.value || "public";
+  bridgeChainId = $("bridgeChainSelect")?.value || bridgeChainId;
+  syncBridgeFamilyToUI(family);
+  if (!token) { toast("Select a mapped token or enter a custom BSC token address", "error"); return; }
   if (!amt) { toast("Enter amount", "error"); return; }
   try {
-    const txData = await walletPost("/wallet/bridge/bsc_lock_tx", {
-      token, amount: amt, lqd_recipient: lqdRecipient
-    });
-    const txHash = await window.ethereum.request({
-      method: "eth_sendTransaction",
-      params: [{ from: _bscAccount, to: txData.to, data: txData.data, value: txData.value || "0x0" }]
-    });
-    showResult("bridgeLockResult", `✓ BSC Tx: ${txHash}\nMinting will happen after confirmation.`);
-    toast("Bridge lock initiated!", "success");
-    await nodePost("/bridge/lock_bsc", { tx_hash: txHash, lqd_recipient: lqdRecipient, token, amount: amt });
+    if (isExternalBridgeFamily(family)) {
+      const meta = bridgeMetadataFromUI("bridge");
+      if (!meta.source_tx_hash || !meta.source_address) {
+        toast("Enter source tx hash and source address for this non-EVM bridge", "error");
+        return;
+      }
+      if (family === "cosmos" && !meta.source_memo) {
+        toast("Cosmos bridge needs a memo/note", "error");
+        return;
+      }
+      if (family === "utxo" && !meta.source_output) {
+        toast("UTXO bridge needs a source output index", "error");
+        return;
+      }
+      if (family === "cardano" && !meta.source_output) {
+        toast("Cardano bridge needs a source output index", "error");
+        return;
+      }
+      if (family === "solana" && !meta.source_sequence) {
+        toast("Solana bridge needs a recent blockhash / sequence", "error");
+        return;
+      }
+      if (family === "substrate" && !meta.source_sequence) {
+        toast("Substrate bridge needs a nonce / runtime sequence", "error");
+        return;
+      }
+      if (family === "xrpl" && !meta.source_sequence) {
+        toast("XRPL bridge needs a ledger sequence / delivery sequence", "error");
+        return;
+      }
+      if (family === "ton" && !meta.source_sequence) {
+        toast("TON bridge needs a message sequence / logical time", "error");
+        return;
+      }
+      if (family === "near" && !meta.source_sequence) {
+        toast("NEAR bridge needs an access key nonce / sequence", "error");
+        return;
+      }
+      if (family === "aptos" && !meta.source_sequence) {
+        toast("Aptos bridge needs a sequence number", "error");
+        return;
+      }
+      const res = await nodePost("/bridge/lock_chain", {
+        chain_id: bridgeChainId,
+        family,
+        adapter: family,
+        tx_hash: meta.source_tx_hash,
+        source_tx_hash: meta.source_tx_hash,
+        source_address: meta.source_address,
+        source_memo: meta.source_memo,
+        source_sequence: meta.source_sequence,
+        source_output: meta.source_output,
+        lqd_recipient: lqdRecipient,
+        token,
+        amount: amt,
+        mode: bridgeMode,
+      });
+      showResult("bridgeLockResult", `✓ External lock registered\nSource Tx: ${meta.source_tx_hash}\nStatus: ${res?.status || "ok"}`);
+      toast("External source lock registered!", "success");
+    } else {
+      if (!state.address) { toast("Unlock your LQD wallet first", "error"); return; }
+      const res = await walletPost(bridgeMode === "private" ? "/wallet/bridge/private/lock_bsc_token" : "/wallet/bridge/lock_bsc_token", {
+        address: state.address,
+        private_key: await getPrivateKey(),
+        token,
+        amount: amt,
+        to_lqd: lqdRecipient,
+        chain_id: bridgeChainId,
+        family,
+        mode: bridgeMode
+      });
+      const txHash = res?.tx_hash || res?.hash || "";
+      showResult("bridgeLockResult", `✓ BSC Tx: ${txHash}\nMinting will happen after confirmation.`);
+      toast("Bridge lock initiated using extension wallet!", "success");
+      await nodePost("/bridge/lock_chain", {
+        chain_id: bridgeChainId,
+        family,
+        adapter: family,
+        tx_hash: txHash, lqd_recipient: lqdRecipient, token, amount: amt, mode: bridgeMode
+      });
+    }
     setTimeout(loadBridgeHistory, 5000);
   } catch (e) { showResult("bridgeLockResult", "✗ " + e.message, true); }
 });
 
 $("doBurnBtn").addEventListener("click", async () => {
+  bridgeMode = $("bridgeModeSelect")?.value || "public";
+  bridgeChainId = $("burnChainSelect")?.value || bridgeChainId;
+  syncBridgeFamilyToUI(bridgeFamilyId);
   const tokenAddr = $("burnTokenAddr").value.trim();
   const amt       = $("burnAmt").value.trim();
   const bscRecipient = $("burnBscRecipient").value.trim();
   if (!tokenAddr || !amt || !bscRecipient) { toast("Fill all fields", "error"); return; }
   try {
-    const res = await walletPost("/wallet/bridge/burn_lqd_token", {
+    const meta = bridgeMetadataFromUI("burn");
+    const res = await walletPost(bridgeMode === "private" ? "/wallet/bridge/private/burn_lqd_token" : "/wallet/bridge/burn_lqd_token", {
       address: state.address, private_key: await getPrivateKey(),
-      token_address: tokenAddr, amount: amt, bsc_recipient: bscRecipient
+      token_address: tokenAddr, amount: amt, bsc_recipient: bscRecipient, chain_id: bridgeChainId, family: bridgeFamilyId, mode: bridgeMode,
+      source_tx_hash: meta.source_tx_hash,
+      source_address: meta.source_address,
+      source_memo: meta.source_memo,
+      source_sequence: meta.source_sequence,
+      source_output: meta.source_output,
     });
     showResult("burnResult", `✓ Burn Tx: ${res.tx_hash || ""}\nTokens will be unlocked on BSC.`);
     toast("Bridge burn initiated!", "success");
@@ -1046,22 +1390,244 @@ $("doBurnBtn").addEventListener("click", async () => {
 $("refreshBridgeBtn").addEventListener("click", loadBridgeHistory);
 async function loadBridgeHistory() {
   try {
-    const data = await nodeGet("/bridge/requests");
+    bridgeMode = $("bridgeModeSelect")?.value || bridgeMode;
+    const data = await nodeGet(`/bridge/requests?mode=${encodeURIComponent(bridgeMode)}`);
     const list = Array.isArray(data) ? data : (data.requests || []);
     if (!list.length) { $("bridgeHistory").innerHTML = '<div class="notice">No bridge requests found.</div>'; return; }
-    $("bridgeHistory").innerHTML = `
-      <div class="activity-list">
+  $("bridgeHistory").innerHTML = `
+              <div class="activity-list">
         ${list.slice(0,20).map(r => `
           <div class="activity-row">
             <div class="act-icon">${r.direction === "bsc_to_lqd" ? "→" : "←"}</div>
             <div class="act-info">
-              <div class="act-type">${r.direction === "bsc_to_lqd" ? "BSC → LQD" : "LQD → BSC"} · ${r.token || ""}</div>
-              <div class="act-hash">Amount: ${r.amount || "?"} · Status: ${r.status || "pending"}</div>
+              <div class="act-type">${r.direction === "bsc_to_lqd" ? "BSC → LQD" : "LQD → BSC"} · ${r.token || ""} · ${r.mode || bridgeMode} · ${(r.family || "evm").toUpperCase()}</div>
+              <div class="act-hash">Amount: ${r.amount || "?"} · Status: ${r.status || "pending"}${r.source_tx_hash ? ` · SourceTx: ${r.source_tx_hash}` : ""}</div>
             </div>
           </div>`).join("")}
       </div>`;
   } catch { $("bridgeHistory").innerHTML = '<div class="notice">Could not load bridge history.</div>'; }
 }
+
+async function refreshBridgeChainsAdmin() {
+  await loadBridgeChains();
+}
+
+async function saveBridgeChainAdmin() {
+  const apiKey = $("bridgeAdminApiKey")?.value?.trim() || "";
+  const id = $("bridgeAdminChainId")?.value?.trim() || "";
+  const name = $("bridgeAdminChainName")?.value?.trim() || id;
+  const family = $("bridgeAdminFamily")?.value?.trim() || "evm";
+  const adapter = $("bridgeAdminAdapter")?.value?.trim() || family;
+  const rpc = $("bridgeAdminChainRpc")?.value?.trim() || "";
+  const bridgeAddress = $("bridgeAdminBridgeAddr")?.value?.trim() || "";
+  const lockAddress = $("bridgeAdminLockAddr")?.value?.trim() || "";
+  const chainId = $("bridgeAdminChainIdNumber")?.value?.trim() || "";
+  if (!id || !name || !family || !adapter) {
+    toast("Fill chain id, name, family and adapter", "error");
+    return;
+  }
+  if (family === "evm" && (!rpc || !bridgeAddress)) {
+    toast("EVM chains need rpc and bridge address", "error");
+    return;
+  }
+  try {
+    const res = await fetch(`${state.nodeUrl}/bridge/chain`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { "X-API-Key": apiKey } : {}),
+      },
+      body: JSON.stringify({
+        id,
+        name,
+        chain_id: chainId || id,
+        family,
+        adapter,
+        rpc,
+        bridge_address: bridgeAddress,
+        lock_address: lockAddress || bridgeAddress,
+        native_symbol: "LQD",
+        enabled: true,
+        supports_public: true,
+        supports_private: true,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    toast(`Bridge chain saved: ${name}`, "success");
+    await loadBridgeChains();
+  } catch (err) {
+    toast(err?.message || "Failed to save chain", "error");
+  }
+}
+
+async function saveBridgeTokenAdmin() {
+  const apiKey = $("bridgeTokenAdminApiKey")?.value?.trim() || "";
+  const chainId = $("bridgeTokenAdminChainSelect")?.value?.trim() || bridgeChainId;
+  const family = $("bridgeTokenAdminFamily")?.value?.trim() || bridgeFamilyId || "evm";
+  const sourceToken = $("bridgeTokenAdminSource")?.value?.trim() || "";
+  const lqdToken = $("bridgeTokenAdminLqd")?.value?.trim() || "";
+  const name = $("bridgeTokenAdminName")?.value?.trim() || "";
+  const symbol = $("bridgeTokenAdminSymbol")?.value?.trim() || "";
+  const decimals = $("bridgeTokenAdminDecimals")?.value?.trim() || "";
+  if (!chainId || !sourceToken || !lqdToken) {
+    toast("Fill chain, source token and LQD token", "error");
+    return;
+  }
+  try {
+    const res = await fetch(`${state.nodeUrl}/bridge/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { "X-API-Key": apiKey } : {}),
+      },
+      body: JSON.stringify({
+        chain_id: chainId,
+        family,
+        chain_name: chainId,
+        source_token: sourceToken,
+        target_chain_id: "lqd",
+        target_chain_name: "LQD",
+        target_token: lqdToken,
+        name,
+        symbol,
+        decimals,
+        bsc_token: sourceToken,
+        lqd_token: lqdToken,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    toast("Bridge token saved", "success");
+    await loadBridgeTokens();
+  } catch (err) {
+    toast(err?.message || "Failed to save token", "error");
+  }
+}
+
+async function removeBridgeTokenAdmin() {
+  const apiKey = $("bridgeTokenAdminApiKey")?.value?.trim() || "";
+  const chainId = $("bridgeTokenAdminChainSelect")?.value?.trim() || bridgeChainId;
+  const sourceToken = $("bridgeTokenAdminSource")?.value?.trim() || "";
+  const lqdToken = $("bridgeTokenAdminLqd")?.value?.trim() || "";
+  if (!chainId || (!sourceToken && !lqdToken)) {
+    toast("Fill chain and source or LQD token", "error");
+    return;
+  }
+  try {
+    const res = await fetch(`${state.nodeUrl}/bridge/token/remove`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { "X-API-Key": apiKey } : {}),
+      },
+      body: JSON.stringify({
+        chain_id: chainId,
+        source_token: sourceToken,
+        lqd_token: lqdToken,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    toast("Bridge token removed", "success");
+    await loadBridgeTokens();
+  } catch (err) {
+    toast(err?.message || "Failed to remove token", "error");
+  }
+}
+
+async function removeBridgeChainAdmin() {
+  const apiKey = $("bridgeAdminApiKey")?.value?.trim() || "";
+  const id = $("bridgeAdminChainId")?.value?.trim() || "";
+  if (!id) {
+    toast("Enter chain id", "error");
+    return;
+  }
+  try {
+    const res = await fetch(`${state.nodeUrl}/bridge/chain/remove`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { "X-API-Key": apiKey } : {}),
+      },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    toast(`Bridge chain removed: ${id}`, "success");
+    await loadBridgeChains();
+  } catch (err) {
+    toast(err?.message || "Failed to remove chain", "error");
+  }
+}
+
+const bridgeModeSelect = $("bridgeModeSelect");
+if (bridgeModeSelect) {
+  bridgeModeSelect.addEventListener("change", () => {
+    bridgeMode = bridgeModeSelect.value || "public";
+    loadBridgeHistory();
+  });
+}
+
+const bridgeFamilySelect = $("bridgeFamilySelect");
+if (bridgeFamilySelect) {
+  bridgeFamilySelect.addEventListener("change", async () => {
+    syncBridgeFamilyToUI(bridgeFamilySelect.value || "evm");
+    await loadBridgeChains();
+  });
+}
+
+const bridgeChainSelect = $("bridgeChainSelect");
+if (bridgeChainSelect) {
+  bridgeChainSelect.addEventListener("change", () => {
+    bridgeChainId = bridgeChainSelect.value || bridgeChainId;
+    const selected = bridgeChains.find((cfg) => String(cfg.id || cfg.chain_id || "").toLowerCase() === String(bridgeChainId || "").toLowerCase());
+    syncBridgeFamilyToUI(selected?.family || "evm");
+  });
+}
+
+const burnChainSelect = $("burnChainSelect");
+if (burnChainSelect) {
+  burnChainSelect.addEventListener("change", () => {
+    bridgeChainId = burnChainSelect.value || bridgeChainId;
+    const selected = bridgeChains.find((cfg) => String(cfg.id || cfg.chain_id || "").toLowerCase() === String(bridgeChainId || "").toLowerCase());
+    syncBridgeFamilyToUI(selected?.family || "evm");
+  });
+}
+
+const burnFamilySelect = $("burnFamilySelect");
+if (burnFamilySelect) {
+  burnFamilySelect.addEventListener("change", async () => {
+    syncBridgeFamilyToUI(burnFamilySelect.value || "evm");
+    await loadBridgeChains();
+  });
+}
+
+const bridgeAdminFamilySelect = $("bridgeAdminFamily");
+if (bridgeAdminFamilySelect) {
+  bridgeAdminFamilySelect.addEventListener("change", () => {
+    syncBridgeFamilyToUI(bridgeAdminFamilySelect.value || "evm");
+  });
+}
+
+const bridgeTokenAdminFamilySelect = $("bridgeTokenAdminFamily");
+if (bridgeTokenAdminFamilySelect) {
+  bridgeTokenAdminFamilySelect.addEventListener("change", async () => {
+    syncBridgeFamilyToUI(bridgeTokenAdminFamilySelect.value || "evm");
+    await loadBridgeChains();
+  });
+}
+
+const bridgeAdminSaveBtn = $("bridgeAdminSaveBtn");
+if (bridgeAdminSaveBtn) bridgeAdminSaveBtn.addEventListener("click", saveBridgeChainAdmin);
+const bridgeAdminRemoveBtn = $("bridgeAdminRemoveBtn");
+if (bridgeAdminRemoveBtn) bridgeAdminRemoveBtn.addEventListener("click", removeBridgeChainAdmin);
+const bridgeAdminRefreshBtn = $("bridgeAdminRefreshBtn");
+if (bridgeAdminRefreshBtn) bridgeAdminRefreshBtn.addEventListener("click", refreshBridgeChainsAdmin);
+const bridgeTokenAdminSaveBtn = $("bridgeTokenAdminSaveBtn");
+if (bridgeTokenAdminSaveBtn) bridgeTokenAdminSaveBtn.addEventListener("click", saveBridgeTokenAdmin);
+const bridgeTokenAdminRemoveBtn = $("bridgeTokenAdminRemoveBtn");
+if (bridgeTokenAdminRemoveBtn) bridgeTokenAdminRemoveBtn.addEventListener("click", removeBridgeTokenAdmin);
 
 // ══════════════════════════════════════════════════════════════════
 // ACTIVITY PAGE
