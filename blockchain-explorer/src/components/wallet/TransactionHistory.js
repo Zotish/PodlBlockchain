@@ -68,12 +68,14 @@ const TransactionHistory = ({ address }) => {
 
   useEffect(() => {
     fetchTransactionHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
   useEffect(() => {
     const onWalletUpdated = () => fetchTransactionHistory();
     window.addEventListener('lqd:wallet-updated', onWalletUpdated);
     return () => window.removeEventListener('lqd:wallet-updated', onWalletUpdated);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
   const formatTime = (timestamp) => {

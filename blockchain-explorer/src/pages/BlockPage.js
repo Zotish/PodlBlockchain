@@ -1,7 +1,5 @@
 
 
-/* global BigInt */
-
 import { formatLQD } from "../utils/lqdUnits";
 
 

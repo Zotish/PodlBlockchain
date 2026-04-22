@@ -30,6 +30,7 @@ export default function LiquidityDashboard({ address }) {
   useEffect(() => {
     if (!address) return;
     fetchInfo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
   const provideLiquidity = async () => {

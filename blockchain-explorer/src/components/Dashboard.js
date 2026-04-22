@@ -6,7 +6,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import BlockList from "./BlockList";
 import ValidatorList from "./ValidatorList";
-import DebugComponent from "./DebugComponent";
 import { useNavigate } from "react-router-dom";
 import { formatLQD } from "../utils/lqdUnits";
 import { fetchJSON, mergeArrayResults, firstNodeResult } from "../utils/api";
@@ -100,8 +99,10 @@ const Dashboard = () => {
 
   useEffect(() => {
     fetchData();
-    const id = setInterval(fetchData,1000);
+    const id = setInterval(fetchData, 1000);
     return () => clearInterval(id);
+    // fetchData intentionally re-created with latest dashboard state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* -----------------------------
@@ -132,7 +133,6 @@ const Dashboard = () => {
         tx.method_name ||
         "") + "";
 
-    const from = (tx.from || tx.From || "").toLowerCase();
     const to = (tx.to || tx.To || "").toLowerCase();
 
     const l = raw.toLowerCase();
@@ -330,9 +330,6 @@ if (isBlockNumber(q)) {
 
   if (loading && !networkStats)
     return <div className="loading">Loading dashboard…</div>;
-
-  const latestBlock =
-    recentBlocks && recentBlocks.length > 0 ? recentBlocks[0] : null;
 
   /* ===========================================================
                          RENDER START

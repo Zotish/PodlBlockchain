@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { fetchJSON, API_BASE } from '../utils/api';
 
 const BridgePage = () => {
@@ -24,6 +24,7 @@ const BridgePage = () => {
   const [lqdAmount, setLqdAmount] = useState('');
   const [lqdStatus, setLqdStatus] = useState('');
   const [tokenMappings, setTokenMappings] = useState([]);
+  const [bridgeMode, setBridgeMode] = useState('public');
 
   const defaultTokens = [
     { symbol: 'USDT', address: '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9' },
@@ -31,21 +32,24 @@ const BridgePage = () => {
     { symbol: 'BUSD', address: '0xed24fc36d5ee211ea25a80239fb8c4cfd80f12ee' },
   ];
 
-  const loadRequests = async () => {
+  const loadRequests = useCallback(async () => {
     try {
-      const q = from ? `?address=${encodeURIComponent(from)}` : '';
+      const params = [];
+      if (from) params.push(`address=${encodeURIComponent(from)}`);
+      if (bridgeMode) params.push(`mode=${encodeURIComponent(bridgeMode)}`);
+      const q = params.length ? `?${params.join('&')}` : '';
       const data = await fetchJSON(`/bridge/requests${q}`);
       setRequests(Array.isArray(data) ? data : []);
     } catch (e) {
       setRequests([]);
     }
-  };
+  }, [from, bridgeMode]);
 
   useEffect(() => {
     if (from) {
       loadRequests();
     }
-  }, [from]);
+  }, [from, loadRequests]);
 
   const loadTokenMappings = async () => {
     try {
@@ -58,6 +62,7 @@ const BridgePage = () => {
 
   useEffect(() => {
     loadTokenMappings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const submitBridge = async () => {
@@ -74,8 +79,9 @@ const BridgePage = () => {
         amount: amount,
         gas_price: Number(gasPrice || 0),
         gas: 50000,
+        mode: bridgeMode,
       };
-      const res = await fetch(`${API_BASE}/wallet/bridge/lock`, {
+      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}lock`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -103,8 +109,9 @@ const BridgePage = () => {
         private_key: burnKey,
         amount: burnAmount,
         to_lqd: burnToLqd,
+        mode: bridgeMode,
       };
-      const res = await fetch(`${API_BASE}/wallet/bridge/burn`, {
+      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}burn`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -132,8 +139,9 @@ const BridgePage = () => {
         token: bscToken,
         to_lqd: bscToLqd,
         amount: bscAmount,
+        mode: bridgeMode,
       };
-      const res = await fetch(`${API_BASE}/wallet/bridge/lock_bsc_token`, {
+      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}lock_bsc_token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -163,8 +171,9 @@ const BridgePage = () => {
         token: lqdToken,
         to_bsc: lqdToBsc,
         amount: lqdAmount,
+        mode: bridgeMode,
       };
-      const res = await fetch(`${API_BASE}/wallet/bridge/burn_lqd_token`, {
+      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}burn_lqd_token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -184,6 +193,14 @@ const BridgePage = () => {
   return (
     <div className="page">
       <h2>Bridge (LQD ↔ BSC Testnet)</h2>
+      <div className="card">
+        <h3>Bridge Mode</h3>
+        <div className="template-wrap">
+          <button className={bridgeMode === 'public' ? 'chip active' : 'chip'} onClick={() => setBridgeMode('public')}>Public</button>
+          <button className={bridgeMode === 'private' ? 'chip active' : 'chip'} onClick={() => setBridgeMode('private')}>Private</button>
+        </div>
+        <div className="notice">Current mode: {bridgeMode}</div>
+      </div>
       <div className="card">
         <h3>Lock BEP20 on BSC → Mint on LQD</h3>
         <div className="form-row">

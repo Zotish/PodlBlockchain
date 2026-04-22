@@ -53,6 +53,7 @@ const TransactionPage = () => {
     fetchTx(stop);
     intervalId = setInterval(() => fetchTx(stop), 5000);
     return () => clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hash]);
 
   if (loading) return <div className="loading">Loading transaction…</div>;

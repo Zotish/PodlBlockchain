@@ -16,7 +16,7 @@ function validatePasswordStrength(pw) {
   if (!/[0-9]/.test(pw)) {
     return 'Password must contain at least one number';
   }
-  if (!/[!@#$%^&*()_\-+=\[\]{};:"\\|,.<>/?]/.test(pw)) {
+  if (!/[!@#$%^&*()_\-+=[\]{};:"\\|,.<>/?]/.test(pw)) {
     return 'Password must contain at least one special character';
   }
   return '';
