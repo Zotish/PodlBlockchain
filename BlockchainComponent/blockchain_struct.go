@@ -53,7 +53,7 @@ type BlockRewardBreakdown struct {
 	ParticipantRewards   map[string]string `json:"participant_rewards"`
 }
 type LockRecord struct {
-	Amount    *big.Int `json:"amount"`
+	Amount    *big.Int  `json:"amount"`
 	UnlockAt  time.Time `json:"unlock_at"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -285,6 +285,9 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		if blockchainStruct.BridgeTokenMap == nil {
 			blockchainStruct.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
 		}
+		if err := blockchainStruct.LoadBridgeTokenRegistryIntoState(); err != nil {
+			log.Printf("Warning: failed to load bridge token registry: %v", err)
+		}
 
 		// ContractEngine is not serialised to DB — must be rebuilt on every load
 		if blockchainStruct.ContractEngine == nil {
@@ -343,6 +346,9 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		newBlockchain.PendingBlocks = make(map[string]*Block)
 		newBlockchain.BridgeRequests = make(map[string]*BridgeRequest)
 		newBlockchain.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
+		if err := newBlockchain.LoadBridgeTokenRegistryIntoState(); err != nil {
+			log.Printf("Warning: failed to load bridge token registry: %v", err)
+		}
 		engine, _ := NewLQDContractEngine()
 
 		newBlockchain.ContractEngine = engine
@@ -968,7 +974,7 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 		fmt.Printf("TX %s failed: missing from/to", tx.TxHash)
 		return false
 	}
-	if tx.Type == "bridge_lock" && tx.To != constantset.BridgeEscrowAddress {
+	if (tx.Type == "bridge_lock" || tx.Type == "bridge_lock_private") && tx.To != constantset.BridgeEscrowAddress {
 		tx.Status = constantset.StatusFailed
 		log.Printf("TX %s failed: bridge_lock must go to escrow", tx.TxHash)
 		return false
@@ -1485,12 +1491,12 @@ func (bc *Blockchain_struct) ProvideLiquidity(address string, amount *big.Int, l
 	lp, exists := bc.LiquidityProviders[address]
 	if !exists {
 		lp = &LiquidityProvider{
-			Address: address,
-			StakeAmount: big.NewInt(0),
-			TotalRewards: big.NewInt(0),
+			Address:        address,
+			StakeAmount:    big.NewInt(0),
+			TotalRewards:   big.NewInt(0),
 			PendingRewards: big.NewInt(0),
-			UnstakeAmount: big.NewInt(0),
-			ReleasedSoFar: big.NewInt(0),
+			UnstakeAmount:  big.NewInt(0),
+			ReleasedSoFar:  big.NewInt(0),
 		}
 	}
 

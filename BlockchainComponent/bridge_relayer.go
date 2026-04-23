@@ -3,11 +3,15 @@ package blockchaincomponent
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
+	"math/rand"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,8 +54,8 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 			_ = os.Setenv("BSC_LOCK_ADDRESS", v)
 		}
 	}
-	if rpc == "" || pk == "" || bridgeAddr == "" {
-		log.Println("Bridge relayer disabled: missing BSC_TESTNET_RPC or BSC_TESTNET_PRIVATE_KEY or BSC_BRIDGE_ADDRESS")
+	if len(BridgeRPCEndpoints(rpc)) == 0 || pk == "" || bridgeAddr == "" {
+		log.Println("Bridge relayer disabled: missing BSC_TESTNET_RPC(S) or BSC_TESTNET_PRIVATE_KEY or BSC_BRIDGE_ADDRESS")
 		return
 	}
 	log.Printf("Bridge relayer: rpc=%s bridge=%s lock=%s", rpc, bridgeAddr, lockAddr)
@@ -77,11 +81,13 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 	}
 
 	go func() {
-		client, err := ethclient.Dial(rpc)
+		endpoints := BridgeRPCEndpoints(rpc)
+		client, activeRPC, err := DialBscClient(endpoints)
 		if err != nil {
-			log.Printf("Bridge relayer: cannot connect to BSC RPC: %v", err)
+			log.Printf("Bridge relayer: cannot connect to BSC RPC endpoints: %v", err)
 			return
 		}
+		log.Printf("Bridge relayer: using rpc=%s", activeRPC)
 		parsedABI, err := abi.JSON(strings.NewReader(bscBridgeABI))
 		if err != nil {
 			log.Printf("Bridge relayer: ABI parse error: %v", err)
@@ -97,6 +103,10 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 			log.Printf("Bridge relayer: ERC20 ABI parse error: %v", err)
 			return
 		}
+		checkpoint, err := loadBridgeRelayerCheckpoint()
+		if err != nil {
+			log.Printf("Bridge relayer: checkpoint load failed: %v", err)
+		}
 		bridge := common.HexToAddress(bridgeAddr)
 		lock := common.Address{}
 		if lockAddr != "" {
@@ -108,11 +118,63 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 
 		var lastChecked uint64
 		var lastLockChecked uint64
+		if checkpoint != nil {
+			lastChecked = checkpoint.LastBurnChecked
+			lastLockChecked = checkpoint.LastLockChecked
+			if checkpoint.ActiveRPC != "" {
+				activeRPC = checkpoint.ActiveRPC
+			}
+		}
+		privateBatchSize := 3
+		if v := os.Getenv("BRIDGE_PRIVATE_BATCH_SIZE"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				privateBatchSize = n
+			}
+		}
+		privateBatchMax := 8
+		if v := os.Getenv("BRIDGE_PRIVATE_BATCH_MAX_SIZE"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				privateBatchMax = n
+			}
+		}
+		if privateBatchMax < privateBatchSize {
+			privateBatchMax = privateBatchSize
+		}
+		privateBatchWait := 45 * time.Second
+		if v := os.Getenv("BRIDGE_PRIVATE_BATCH_WAIT_SEC"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				privateBatchWait = time.Duration(n) * time.Second
+			}
+		}
+
+		if reg, err := LoadBridgeChainRegistry(); err == nil && reg != nil {
+			for _, cfg := range reg.List() {
+				if cfg == nil || !cfg.Enabled {
+					continue
+				}
+				if strings.EqualFold(cfg.ID, "bsc-testnet") || strings.EqualFold(cfg.ID, "bsc") {
+					continue
+				}
+				go runBridgeRelayerForChain(cfg, bc, interval, backfill, privateBatchSize, privateBatchMax, privateBatchWait)
+			}
+		}
 
 		for {
 			latest, err := client.BlockNumber(context.Background())
 			if err != nil {
 				log.Printf("Bridge relayer: failed to fetch latest block: %v", err)
+				if client != nil {
+					client.Close()
+				}
+				client, activeRPC, err = DialBscClient(endpoints)
+				if err == nil {
+					log.Printf("Bridge relayer: reconnected to rpc=%s", activeRPC)
+					_ = saveBridgeRelayerCheckpoint(&BridgeRelayerCheckpoint{
+						LastBurnChecked: lastChecked,
+						LastLockChecked: lastLockChecked,
+						ActiveRPC:       activeRPC,
+					})
+				}
 				time.Sleep(interval)
 				continue
 			}
@@ -164,6 +226,15 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 				}
 				log.Printf("Bridge relayer: scanning burn events %d -> %d", from, to)
 				if err := handleBurnEvents(client, parsedABI, bridge, from, to, bc); err != nil {
+					if isPrunedHistoryError(err) {
+						if fastForwardRelayerCheckpoint("Bridge relayer", from, to, &lastChecked, lastLockChecked, activeRPC, saveBridgeRelayerCheckpoint) {
+							if to == latest {
+								break
+							}
+							from = to + 1
+							continue
+						}
+					}
 					log.Printf("Bridge relayer: burn event scan error: %v", err)
 					break
 				}
@@ -185,7 +256,16 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 						break
 					}
 					log.Printf("Bridge relayer: scanning lock events %d -> %d", from, to)
-					if err := handleBscTokenLocks(client, parsedLockABI, parsedErc20ABI, lock, from, to, bc); err != nil {
+					if err := handleBscTokenLocks(client, parsedLockABI, parsedErc20ABI, lock, from, to, bc, "bsc-testnet", "lqd"); err != nil {
+						if isPrunedHistoryError(err) {
+							if fastForwardRelayerLockCheckpoint("Bridge relayer", from, to, lastChecked, &lastLockChecked, activeRPC, saveBridgeRelayerCheckpoint) {
+								if to == latest {
+									break
+								}
+								from = to + 1
+								continue
+							}
+						}
 						log.Printf("Bridge relayer: bsc lock scan error: %v", err)
 						break
 					}
@@ -197,13 +277,36 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 				}
 			}
 
+			processQueuedPrivateBridgeBatches(client, parsedABI, parsedLockABI, parsedErc20ABI, bridge, lock, pk, chainID, bc, privateBatchSize, privateBatchMax, privateBatchWait, "bsc-testnet", "lqd", nil)
+
 			// 1) Mint for locked requests
 			reqs := bc.ListBridgeRequests("")
 			for _, r := range reqs {
-				if r.Status != BridgeStatusLocked {
+				if r.Status != BridgeStatusLocked && r.Status != BridgeStatusProcessing {
 					continue
 				}
 				if r.To == "" || strings.EqualFold(r.SourceChain, "BSC") {
+					continue
+				}
+				if strings.EqualFold(r.Status, BridgeStatusProcessing) && r.BscTxHash != "" {
+					ok, err := bridgeReceiptConfirmed(endpoints, r.BscTxHash)
+					if err != nil {
+						log.Printf("Bridge relayer: mint receipt check failed for %s: %v", r.ID, err)
+						continue
+					}
+					if !ok {
+						continue
+					}
+					if strings.EqualFold(r.Mode, "private") {
+						markShieldedNullifierSpent(r.ShieldedNullifier)
+					}
+					bc.MarkBridgeMinted(r.ID, r.BscTxHash, "")
+					continue
+				}
+				if strings.EqualFold(r.Mode, "private") && !verifyShieldedBridgeRequest(r) {
+					continue
+				}
+				if r.BscTxHash != "" {
 					continue
 				}
 				if err := sendMint(client, parsedABI, bridge, pk, chainID, r, bc); err != nil {
@@ -215,38 +318,94 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 			// 1b) Fallback mint for BSC->LQD requests (if RPC log scan missed)
 			reqs = bc.ListBridgeRequests("")
 			for _, r := range reqs {
-				if r.Status != BridgeStatusLocked {
+				if r.Status != BridgeStatusLocked && r.Status != BridgeStatusProcessing {
 					continue
 				}
 				if !strings.EqualFold(r.SourceChain, "BSC") || !strings.EqualFold(r.TargetChain, "LQD") {
 					continue
 				}
+				if strings.EqualFold(r.Status, BridgeStatusProcessing) && r.BscTxHash != "" {
+					ok, err := bridgeReceiptConfirmed(endpoints, r.BscTxHash)
+					if err != nil {
+						log.Printf("Bridge relayer: BSC mint receipt check failed for %s: %v", r.ID, err)
+						continue
+					}
+					if !ok {
+						continue
+					}
+					if strings.EqualFold(r.Mode, "private") {
+						markShieldedNullifierSpent(r.ShieldedNullifier)
+					}
+					if err := mintFromBscRequest(client, parsedErc20ABI, r, bc); err != nil {
+						log.Printf("Bridge relayer: mint from BSC request failed for %s: %v", r.ID, err)
+						continue
+					}
+					if strings.EqualFold(r.Mode, "private") {
+						markShieldedNullifierSpent(r.ShieldedNullifier)
+					}
+					continue
+				}
 				if r.Token == "" || r.To == "" {
+					continue
+				}
+				if strings.EqualFold(r.Mode, "private") && !verifyShieldedBridgeRequest(r) {
 					continue
 				}
 				if err := mintFromBscRequest(client, parsedErc20ABI, r, bc); err != nil {
 					log.Printf("Bridge relayer: mint from BSC request failed for %s: %v", r.ID, err)
 					continue
 				}
+				if strings.EqualFold(r.Mode, "private") {
+					markShieldedNullifierSpent(r.ShieldedNullifier)
+				}
 			}
 
 			// 4) Process LQD burns -> release on BSC
 			for _, r := range bc.ListBridgeRequests("") {
-				if r.Status != BridgeStatusBurned || !strings.EqualFold(r.TargetChain, "BSC") {
+				if r.Status != BridgeStatusBurned && r.Status != BridgeStatusProcessing {
+					continue
+				}
+				if !strings.EqualFold(r.TargetChain, "BSC") {
 					continue
 				}
 				if r.Token == "" || r.To == "" {
 					continue
 				}
+				if strings.EqualFold(r.Status, BridgeStatusProcessing) && r.BscTxHash != "" {
+					ok, err := bridgeReceiptConfirmed(endpoints, r.BscTxHash)
+					if err != nil {
+						log.Printf("Bridge relayer: release receipt check failed for %s: %v", r.ID, err)
+						continue
+					}
+					if !ok {
+						continue
+					}
+					if strings.EqualFold(r.Mode, "private") {
+						markShieldedNullifierSpent(r.ShieldedNullifier)
+					}
+					bc.MarkBridgeUnlocked(r.ID)
+					continue
+				}
 				if lockAddr == "" {
 					continue
 				}
-				if err := sendRelease(client, parsedLockABI, lock, pk, chainID, r); err != nil {
+				if strings.EqualFold(r.Mode, "private") && !verifyShieldedBridgeRequest(r) {
+					continue
+				}
+				if r.BscTxHash != "" {
+					continue
+				}
+				if err := sendRelease(client, parsedLockABI, lock, pk, chainID, bc, r, nil); err != nil {
 					log.Printf("Bridge relayer: release failed for %s: %v", r.ID, err)
 					continue
 				}
-				bc.MarkBridgeUnlocked(r.ID)
 			}
+
+			_ = saveBridgeRelayerCheckpoint(&BridgeRelayerCheckpoint{
+				LastBurnChecked: lastChecked,
+				LastLockChecked: lastLockChecked,
+				ActiveRPC:       activeRPC,
+			})
 
 			time.Sleep(interval)
 		}
@@ -306,8 +465,65 @@ func sendMint(client *ethclient.Client, parsedABI abi.ABI, bridge common.Address
 		return err
 	}
 	log.Printf("Bridge relayer: mint tx sent %s for %s", tx.Hash().Hex(), r.ID)
-	bc.MarkBridgeMinted(r.ID, tx.Hash().Hex(), "")
+	bc.MarkBridgeProcessing(r.ID, tx.Hash().Hex(), "")
 	return nil
+}
+
+func bridgeReceiptConfirmed(endpoints []string, txHashHex string) (bool, error) {
+	if strings.TrimSpace(txHashHex) == "" {
+		return false, nil
+	}
+	if len(endpoints) == 0 {
+		endpoints = BridgeRPCEndpoints("")
+	}
+	consensus, err := ConsensusReceipt(endpoints, txHashHex, 2*time.Minute, 2*time.Second)
+	if err != nil {
+		return false, err
+	}
+	return consensus != nil && consensus.Receipt != nil && consensus.Receipt.Status == 1, nil
+}
+
+func isPrunedHistoryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "history has been pruned") ||
+		strings.Contains(msg, "pruned") ||
+		strings.Contains(msg, "missing trie node") ||
+		strings.Contains(msg, "requested to block") && strings.Contains(msg, "after last accepted")
+}
+
+func fastForwardRelayerCheckpoint(label string, from, to uint64, lastBurnChecked *uint64, lastLockChecked uint64, activeRPC string, save func(*BridgeRelayerCheckpoint) error) bool {
+	if lastBurnChecked == nil || save == nil {
+		return false
+	}
+	*lastBurnChecked = to
+	if err := save(&BridgeRelayerCheckpoint{
+		LastBurnChecked: *lastBurnChecked,
+		LastLockChecked: lastLockChecked,
+		ActiveRPC:       activeRPC,
+	}); err != nil {
+		log.Printf("%s: failed to persist burn checkpoint after pruned-history fast-forward: %v", label, err)
+	}
+	log.Printf("%s: pruned history detected for burn scan %d -> %d; fast-forwarded checkpoint to %d", label, from, to, *lastBurnChecked)
+	return true
+}
+
+func fastForwardRelayerLockCheckpoint(label string, from, to uint64, lastBurnChecked uint64, lastLockChecked *uint64, activeRPC string, save func(*BridgeRelayerCheckpoint) error) bool {
+	if lastLockChecked == nil || save == nil {
+		return false
+	}
+	*lastLockChecked = to
+	if err := save(&BridgeRelayerCheckpoint{
+		LastBurnChecked: lastBurnChecked,
+		LastLockChecked: *lastLockChecked,
+		ActiveRPC:       activeRPC,
+	}); err != nil {
+		log.Printf("%s: failed to persist lock checkpoint after pruned-history fast-forward: %v", label, err)
+	}
+	log.Printf("%s: pruned history detected for lock scan %d -> %d; fast-forwarded checkpoint to %d", label, from, to, *lastLockChecked)
+	return true
 }
 
 func handleBurnEvents(client *ethclient.Client, parsedABI abi.ABI, bridge common.Address, fromBlock, toBlock uint64, bc *Blockchain_struct) error {
@@ -380,7 +596,7 @@ func handleBurnEvents(client *ethclient.Client, parsedABI abi.ABI, bridge common
 	return nil
 }
 
-func handleBscTokenLocks(client *ethclient.Client, parsedABI abi.ABI, erc20ABI abi.ABI, lock common.Address, fromBlock, toBlock uint64, bc *Blockchain_struct) error {
+func handleBscTokenLocks(client *ethclient.Client, parsedABI abi.ABI, erc20ABI abi.ABI, lock common.Address, fromBlock, toBlock uint64, bc *Blockchain_struct, sourceChainID string, targetChainID string) error {
 	ctx := context.Background()
 	query := ethereum.FilterQuery{
 		FromBlock: big.NewInt(int64(fromBlock)),
@@ -417,9 +633,15 @@ func handleBscTokenLocks(client *ethclient.Client, parsedABI abi.ABI, erc20ABI a
 		}
 
 		bscTx := vLog.TxHash.Hex()
-		bc.AddBridgeRequestBSC(bscTx, token.Hex(), from.Hex(), toLqd, amount)
+		if sourceChainID == "" {
+			sourceChainID = "bsc-testnet"
+		}
+		if targetChainID == "" {
+			targetChainID = "lqd"
+		}
+		bc.AddBridgeRequestChain(sourceChainID, bscTx, token.Hex(), from.Hex(), toLqd, amount)
 
-		info := bc.GetBridgeTokenMapping(token.Hex())
+		info := bc.GetBridgeTokenMappingForChain(sourceChainID, token.Hex())
 		if info == nil {
 			meta, err := fetchBscTokenMeta(client, erc20ABI, token)
 			if err != nil {
@@ -432,13 +654,19 @@ func handleBscTokenLocks(client *ethclient.Client, parsedABI abi.ABI, erc20ABI a
 				continue
 			}
 			info = &BridgeTokenInfo{
-				BscToken: token.Hex(),
-				LqdToken: lqdAddr,
-				Name:     meta.Name,
-				Symbol:   meta.Symbol,
-				Decimals: meta.Decimals,
+				ChainID:         strings.ToLower(sourceChainID),
+				ChainName:       sourceChainID,
+				BscToken:        token.Hex(),
+				LqdToken:        lqdAddr,
+				SourceToken:     token.Hex(),
+				TargetChainID:   targetChainID,
+				TargetChainName: "LQD",
+				TargetToken:     lqdAddr,
+				Name:            meta.Name,
+				Symbol:          meta.Symbol,
+				Decimals:        meta.Decimals,
 			}
-			bc.SetBridgeTokenMapping(token.Hex(), info)
+			bc.SetBridgeTokenMappingForChain(sourceChainID, token.Hex(), info)
 		}
 
 		// Mint on LQD via system contract call
@@ -453,6 +681,127 @@ func handleBscTokenLocks(client *ethclient.Client, parsedABI abi.ABI, erc20ABI a
 		bc.MarkBridgeMinted(bscTx, "", lqdTx.TxHash)
 	}
 	return nil
+}
+
+func processQueuedPrivateBridgeBatches(client *ethclient.Client, parsedABI abi.ABI, parsedLockABI abi.ABI, erc20ABI abi.ABI, bridge common.Address, lock common.Address, privKeyHex string, chainID int64, bc *Blockchain_struct, minBatch int, maxBatch int, maxWait time.Duration, sourceChainID string, targetChainID string, targetCfg *BridgeChainConfig) {
+	if bc == nil {
+		return
+	}
+	if minBatch <= 0 {
+		minBatch = 3
+	}
+	if maxBatch <= 0 {
+		maxBatch = minBatch
+	}
+	if maxBatch < minBatch {
+		maxBatch = minBatch
+	}
+	if maxWait <= 0 {
+		maxWait = 45 * time.Second
+	}
+	reqs := bc.ListBridgeRequests("")
+	now := time.Now()
+
+	if sourceChainID == "" {
+		sourceChainID = "bsc-testnet"
+	}
+	if targetChainID == "" {
+		targetChainID = "lqd"
+	}
+	mintBatch := selectPrivateBridgeBatch(reqs, sourceChainID, targetChainID, minBatch, maxBatch, maxWait, now)
+	if len(mintBatch) > 0 {
+		batchID := privacyCommitment("private-batch", "bsc-to-lqd", now.UTC().Format(time.RFC3339Nano), strconv.Itoa(len(mintBatch)))
+		mintBatch = shufflePrivateBridgeBatch(mintBatch, batchID)
+		for _, r := range mintBatch {
+			bc.MarkBridgeBatchProcessing(r.ID, batchID, r.BscTxHash, "")
+		}
+		for _, r := range mintBatch {
+			if strings.EqualFold(r.Mode, "private") && !verifyShieldedBridgeRequest(r) {
+				bc.MarkBridgeFailed(r.ID)
+				continue
+			}
+			if err := mintFromBscRequest(client, erc20ABI, r, bc); err != nil {
+				log.Printf("Bridge relayer: private mint batch failed for %s: %v", r.ID, err)
+				bc.MarkBridgeFailed(r.ID)
+			}
+		}
+	}
+
+	releaseBatch := selectPrivateBridgeBatch(reqs, "LQD", targetChainID, minBatch, maxBatch, maxWait, now)
+	if len(releaseBatch) > 0 && lock != (common.Address{}) {
+		batchID := privacyCommitment("private-batch", "lqd-to-bsc", now.UTC().Format(time.RFC3339Nano), strconv.Itoa(len(releaseBatch)))
+		releaseBatch = shufflePrivateBridgeBatch(releaseBatch, batchID)
+		for _, r := range releaseBatch {
+			bc.MarkBridgeBatchProcessing(r.ID, batchID, r.LqdTxHash, "")
+		}
+		for _, r := range releaseBatch {
+			if strings.EqualFold(r.Mode, "private") && !verifyShieldedBridgeRequest(r) {
+				bc.MarkBridgeFailed(r.ID)
+				continue
+			}
+			if err := sendRelease(client, parsedLockABI, lock, privKeyHex, chainID, bc, r, targetCfg); err != nil {
+				log.Printf("Bridge relayer: private release batch failed for %s: %v", r.ID, err)
+				bc.MarkBridgeFailed(r.ID)
+			}
+		}
+	}
+}
+
+func selectPrivateBridgeBatch(reqs []*BridgeRequest, sourceChain, targetChain string, minBatch int, maxBatch int, maxWait time.Duration, now time.Time) []*BridgeRequest {
+	pending := make([]*BridgeRequest, 0)
+	for _, r := range reqs {
+		if r == nil {
+			continue
+		}
+		if !strings.EqualFold(r.Mode, "private") {
+			continue
+		}
+		if r.Status != BridgeStatusQueued {
+			continue
+		}
+		if !strings.EqualFold(r.SourceChain, sourceChain) || !strings.EqualFold(r.TargetChain, targetChain) {
+			continue
+		}
+		pending = append(pending, r)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	sort.SliceStable(pending, func(i, j int) bool {
+		if pending[i].QueuedAt != pending[j].QueuedAt {
+			return pending[i].QueuedAt < pending[j].QueuedAt
+		}
+		if pending[i].CreatedAt != pending[j].CreatedAt {
+			return pending[i].CreatedAt < pending[j].CreatedAt
+		}
+		return pending[i].ID < pending[j].ID
+	})
+	oldest := time.Unix(pending[0].QueuedAt, 0)
+	if pending[0].QueuedAt == 0 {
+		oldest = time.Unix(pending[0].CreatedAt, 0)
+	}
+	if len(pending) < minBatch && now.Sub(oldest) < maxWait {
+		return nil
+	}
+	if len(pending) < maxBatch {
+		return pending
+	}
+	return pending[:maxBatch]
+}
+
+func shufflePrivateBridgeBatch(batch []*BridgeRequest, batchID string) []*BridgeRequest {
+	if len(batch) <= 1 {
+		return batch
+	}
+	seedBytes := sha256.Sum256([]byte(strings.ToLower(batchID)))
+	seed := int64(binary.BigEndian.Uint64(seedBytes[:8]))
+	rng := rand.New(rand.NewSource(seed))
+	out := make([]*BridgeRequest, len(batch))
+	perm := rng.Perm(len(batch))
+	for i, idx := range perm {
+		out[i] = batch[idx]
+	}
+	return out
 }
 
 type tokenMeta struct {
@@ -522,7 +871,7 @@ func deployBridgeToken(bc *Blockchain_struct, name, symbol, decimals, bscToken s
 	return bc.DeployBridgeToken(name, symbol, decimals, bscToken)
 }
 
-func sendRelease(client *ethclient.Client, parsedABI abi.ABI, lock common.Address, privKeyHex string, chainID int64, r *BridgeRequest) error {
+func sendRelease(client *ethclient.Client, parsedABI abi.ABI, lock common.Address, privKeyHex string, chainID int64, bc *Blockchain_struct, r *BridgeRequest, targetCfg *BridgeChainConfig) error {
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(privKeyHex, "0x"))
 	if err != nil {
 		return err
@@ -541,19 +890,27 @@ func sendRelease(client *ethclient.Client, parsedABI abi.ABI, lock common.Addres
 		return err
 	}
 
-	contract := bind.NewBoundContract(lock, parsedABI, client, client, client)
+	targetLock := lock
+	if targetCfg != nil {
+		if targetCfg.LockAddress != "" {
+			targetLock = common.HexToAddress(targetCfg.LockAddress)
+		} else if targetCfg.BridgeAddress != "" {
+			targetLock = common.HexToAddress(targetCfg.BridgeAddress)
+		}
+	}
+	contract := bind.NewBoundContract(targetLock, parsedABI, client, client, client)
 	tx, err := contract.Transact(auth, "release", token, to, amount, id)
 	if err != nil {
 		return err
 	}
 	log.Printf("Bridge relayer: release tx sent %s for %s", tx.Hash().Hex(), r.ID)
-	r.BscTxHash = tx.Hash().Hex()
+	bc.MarkBridgeProcessing(r.ID, tx.Hash().Hex(), "")
 	return nil
 }
 
 func mintFromBscRequest(client *ethclient.Client, erc20ABI abi.ABI, r *BridgeRequest, bc *Blockchain_struct) error {
 	tokenAddr := common.HexToAddress(r.Token)
-	info := bc.GetBridgeTokenMapping(tokenAddr.Hex())
+	info := bc.GetBridgeTokenMappingForChain(r.SourceChainID, tokenAddr.Hex())
 	if info == nil {
 		meta, err := fetchBscTokenMeta(client, erc20ABI, tokenAddr)
 		if err != nil {
@@ -564,13 +921,19 @@ func mintFromBscRequest(client *ethclient.Client, erc20ABI abi.ABI, r *BridgeReq
 			return err
 		}
 		info = &BridgeTokenInfo{
-			BscToken: tokenAddr.Hex(),
-			LqdToken: lqdAddr,
-			Name:     meta.Name,
-			Symbol:   meta.Symbol,
-			Decimals: meta.Decimals,
+			ChainID:         strings.ToLower(r.SourceChainID),
+			ChainName:       r.SourceChain,
+			BscToken:        tokenAddr.Hex(),
+			LqdToken:        lqdAddr,
+			SourceToken:     tokenAddr.Hex(),
+			TargetChainID:   "lqd",
+			TargetChainName: "LQD",
+			TargetToken:     lqdAddr,
+			Name:            meta.Name,
+			Symbol:          meta.Symbol,
+			Decimals:        meta.Decimals,
 		}
-		bc.SetBridgeTokenMapping(tokenAddr.Hex(), info)
+		bc.SetBridgeTokenMappingForChain(r.SourceChainID, tokenAddr.Hex(), info)
 	}
 
 	// Execute mint immediately to guarantee balance update.
@@ -600,4 +963,186 @@ func mintFromBscRequest(client *ethclient.Client, erc20ABI abi.ABI, r *BridgeReq
 
 	bc.MarkBridgeMinted(r.ID, r.BscTxHash, lqdTx.TxHash)
 	return nil
+}
+
+func runBridgeRelayerForChain(cfg *BridgeChainConfig, bc *Blockchain_struct, interval time.Duration, backfill uint64, privateBatchSize int, privateBatchMax int, privateBatchWait time.Duration) {
+	if cfg == nil || bc == nil || !cfg.Enabled {
+		return
+	}
+	rpc := strings.TrimSpace(cfg.RPC)
+	if rpc == "" && len(cfg.RPCs) > 0 {
+		rpc = strings.TrimSpace(cfg.RPCs[0])
+	}
+	if rpc == "" || strings.TrimSpace(cfg.BridgeAddress) == "" {
+		return
+	}
+	endpoints := BridgeRPCEndpoints(rpc)
+	client, activeRPC, err := DialBscClient(endpoints)
+	if err != nil {
+		log.Printf("Bridge relayer[%s]: cannot connect: %v", cfg.ID, err)
+		return
+	}
+	defer client.Close()
+	parsedABI, err := abi.JSON(strings.NewReader(bscBridgeABI))
+	if err != nil {
+		log.Printf("Bridge relayer[%s]: ABI parse error: %v", cfg.ID, err)
+		return
+	}
+	parsedLockABI, err := abi.JSON(strings.NewReader(bscTokenLockABI))
+	if err != nil {
+		log.Printf("Bridge relayer[%s]: lock ABI parse error: %v", cfg.ID, err)
+		return
+	}
+	parsedErc20ABI, err := abi.JSON(strings.NewReader(erc20MetaABI))
+	if err != nil {
+		log.Printf("Bridge relayer[%s]: ERC20 ABI parse error: %v", cfg.ID, err)
+		return
+	}
+	checkpoint, _ := loadBridgeRelayerCheckpointFor(cfg.ID)
+	bridge := common.HexToAddress(cfg.BridgeAddress)
+	lockAddr := strings.TrimSpace(cfg.LockAddress)
+	if lockAddr == "" {
+		lockAddr = cfg.BridgeAddress
+	}
+	lock := common.HexToAddress(lockAddr)
+	var lastChecked, lastLockChecked uint64
+	if checkpoint != nil {
+		lastChecked = checkpoint.LastBurnChecked
+		lastLockChecked = checkpoint.LastLockChecked
+		if checkpoint.ActiveRPC != "" {
+			activeRPC = checkpoint.ActiveRPC
+		}
+	}
+	chainID := int64(97)
+	if v := strings.TrimSpace(cfg.ChainID); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id > 0 {
+			chainID = id
+		}
+	}
+	log.Printf("Bridge relayer[%s]: rpc=%s bridge=%s lock=%s", cfg.ID, activeRPC, bridge.Hex(), lock.Hex())
+
+	for {
+		latest, err := client.BlockNumber(context.Background())
+		if err != nil {
+			log.Printf("Bridge relayer[%s]: latest block error: %v", cfg.ID, err)
+			if client != nil {
+				client.Close()
+			}
+			client, activeRPC, err = DialBscClient(endpoints)
+			if err != nil {
+				time.Sleep(interval)
+				continue
+			}
+		}
+		if latest == 0 {
+			time.Sleep(interval)
+			continue
+		}
+		startBurn := lastChecked + 1
+		if lastChecked == 0 {
+			if latest > backfill {
+				startBurn = latest - backfill
+			} else {
+				startBurn = 1
+			}
+		}
+		startLock := lastLockChecked + 1
+		if lastLockChecked == 0 {
+			if latest > backfill {
+				startLock = latest - backfill
+			} else {
+				startLock = 1
+			}
+		}
+
+		maxRange := uint64(40000)
+		for from := startBurn; from <= latest; {
+			to := from + maxRange
+			if to > latest {
+				to = latest
+			}
+			if from > to {
+				break
+			}
+			if err := handleBurnEvents(client, parsedABI, bridge, from, to, bc); err != nil {
+				if isPrunedHistoryError(err) {
+					if fastForwardRelayerCheckpoint("Bridge relayer["+cfg.ID+"]", from, to, &lastChecked, lastLockChecked, activeRPC, func(cp *BridgeRelayerCheckpoint) error {
+						return saveBridgeRelayerCheckpointFor(cfg.ID, cp)
+					}) {
+						if to == latest {
+							break
+						}
+						from = to + 1
+						continue
+					}
+				}
+				log.Printf("Bridge relayer[%s]: burn scan error: %v", cfg.ID, err)
+				break
+			}
+			lastChecked = to
+			if to == latest {
+				break
+			}
+			from = to + 1
+		}
+		for from := startLock; from <= latest; {
+			to := from + maxRange
+			if to > latest {
+				to = latest
+			}
+			if from > to {
+				break
+			}
+			if err := handleBscTokenLocks(client, parsedLockABI, parsedErc20ABI, lock, from, to, bc, cfg.ID, "lqd"); err != nil {
+				if isPrunedHistoryError(err) {
+					if fastForwardRelayerLockCheckpoint("Bridge relayer["+cfg.ID+"]", from, to, lastChecked, &lastLockChecked, activeRPC, func(cp *BridgeRelayerCheckpoint) error {
+						return saveBridgeRelayerCheckpointFor(cfg.ID, cp)
+					}) {
+						if to == latest {
+							break
+						}
+						from = to + 1
+						continue
+					}
+				}
+				log.Printf("Bridge relayer[%s]: lock scan error: %v", cfg.ID, err)
+				break
+			}
+			lastLockChecked = to
+			if to == latest {
+				break
+			}
+			from = to + 1
+		}
+
+		processQueuedPrivateBridgeBatches(client, parsedABI, parsedLockABI, parsedErc20ABI, bridge, lock, os.Getenv("BSC_TESTNET_PRIVATE_KEY"), chainID, bc, privateBatchSize, privateBatchMax, privateBatchWait, cfg.ID, "lqd", nil)
+
+		reqs := bc.ListBridgeRequests("")
+		releaseBatch := selectPrivateBridgeBatch(reqs, "LQD", cfg.ID, privateBatchSize, privateBatchMax, privateBatchWait, time.Now())
+		if len(releaseBatch) > 0 && lock != (common.Address{}) {
+			batchID := privacyCommitment("private-batch", "lqd-to-"+strings.ToLower(cfg.ID), time.Now().UTC().Format(time.RFC3339Nano), strconv.Itoa(len(releaseBatch)))
+			releaseBatch = shufflePrivateBridgeBatch(releaseBatch, batchID)
+			for _, r := range releaseBatch {
+				bc.MarkBridgeBatchProcessing(r.ID, batchID, r.LqdTxHash, "")
+			}
+			for _, r := range releaseBatch {
+				if strings.EqualFold(r.Mode, "private") && !verifyShieldedBridgeRequest(r) {
+					bc.MarkBridgeFailed(r.ID)
+					continue
+				}
+				if err := sendRelease(client, parsedLockABI, lock, os.Getenv("BSC_TESTNET_PRIVATE_KEY"), chainID, bc, r, cfg); err != nil {
+					log.Printf("Bridge relayer[%s]: release failed for %s: %v", cfg.ID, r.ID, err)
+					bc.MarkBridgeFailed(r.ID)
+				}
+			}
+		}
+
+		_ = saveBridgeRelayerCheckpointFor(cfg.ID, &BridgeRelayerCheckpoint{
+			LastBurnChecked: lastChecked,
+			LastLockChecked: lastLockChecked,
+			ActiveRPC:       activeRPC,
+		})
+
+		time.Sleep(interval)
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,12 +23,36 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 type WalletServer struct {
 	Port                  uint64
 	BlockchainNodeAddress string
+}
+
+func resolveBridgeChainConfig(chainID string) *blockchaincomponent.BridgeChainConfig {
+	reg, err := blockchaincomponent.LoadBridgeChainRegistry()
+	if err != nil || reg == nil {
+		return nil
+	}
+	if cfg := reg.ChainByID(chainID); cfg != nil {
+		return cfg
+	}
+	if cfg := reg.ChainByName(chainID); cfg != nil {
+		return cfg
+	}
+	if cfg := reg.AnyEnabled(); cfg != nil {
+		return cfg
+	}
+	return nil
+}
+
+func bridgeChainIDFromValue(value string) string {
+	chainID := strings.ToLower(strings.TrimSpace(value))
+	if chainID == "" {
+		chainID = "bsc-testnet"
+	}
+	return chainID
 }
 
 func (ws *WalletServer) fetchNextNonce(client *http.Client, addr string) (uint64, error) {
@@ -403,7 +428,7 @@ func (ws *WalletServer) SendTransaction(w http.ResponseWriter, r *http.Request) 
 	io.Copy(w, resp.Body)
 }
 
-func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
+func (ws *WalletServer) bridgeLockWithMode(w http.ResponseWriter, r *http.Request, forcedMode string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -420,14 +445,20 @@ func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		From       string `json:"from"`
 		ToBSC      string `json:"to_bsc"`
+		ChainID    string `json:"chain_id"`
 		Amount     Amount `json:"amount"`
 		Gas        uint64 `json:"gas"`
 		GasPrice   uint64 `json:"gas_price"`
 		PrivateKey string `json:"private_key"`
+		Mode       string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
 		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(request.Mode))
+	if forcedMode != "" {
+		mode = strings.ToLower(strings.TrimSpace(forcedMode))
 	}
 
 	if !wallet.ValidateAddress(request.From) {
@@ -469,6 +500,9 @@ func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
 		nil,
 	)
 	tx.Type = "bridge_lock"
+	if mode == "private" {
+		tx.Type = "bridge_lock_private"
+	}
 	tx.Args = []string{request.ToBSC}
 	tx.Gas = gas
 	tx.GasPrice = gasPrice
@@ -479,6 +513,7 @@ func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	chainID := bridgeChainIDFromValue(request.ChainID)
 	body, _ := json.Marshal(tx)
 	resp, err := http.Post(ws.BlockchainNodeAddress+"/send_tx", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -488,9 +523,30 @@ func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+
+	go func() {
+		payload := map[string]any{
+			"chain_id": chainID,
+			"tx_hash":  tx.TxHash,
+			"from":     request.From,
+			"to_lqd":   request.ToBSC,
+			"amount":   request.Amount.Int.String(),
+			"mode":     mode,
+		}
+		body, _ := json.Marshal(payload)
+		_, _ = http.Post(ws.BlockchainNodeAddress+"/bridge/lock_chain", "application/json", bytes.NewReader(body))
+	}()
 }
 
-func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
+func (ws *WalletServer) BridgeLock(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeLockWithMode(w, r, "")
+}
+
+func (ws *WalletServer) BridgePrivateLock(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeLockWithMode(w, r, "private")
+}
+
+func (ws *WalletServer) bridgeBurnWithMode(w http.ResponseWriter, r *http.Request, forcedMode string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -508,11 +564,14 @@ func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
 		PrivateKey string `json:"private_key"`
 		Amount     Amount `json:"amount"`
 		ToLqd      string `json:"to_lqd"`
+		ChainID    string `json:"chain_id"`
+		Mode       string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
 		return
 	}
+	_ = forcedMode
 	if request.PrivateKey == "" || request.Amount.Int == nil || request.Amount.Int.Sign() == 0 || request.ToLqd == "" {
 		http.Error(w, `{"error":"Missing fields"}`, http.StatusBadRequest)
 		return
@@ -529,7 +588,7 @@ func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, err := ethclient.Dial(rpc)
+	client, _, err := blockchaincomponent.DialBscClient(blockchaincomponent.BridgeRPCEndpoints(rpc))
 	if err != nil {
 		http.Error(w, `{"error":"Failed to connect to BSC RPC"}`, http.StatusBadGateway)
 		return
@@ -563,13 +622,22 @@ func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if consensus, err := blockchaincomponent.ConsensusReceipt(blockchaincomponent.BridgeRPCEndpoints(rpc), tx.Hash().Hex(), 2*time.Minute, 2*time.Second); err != nil || !blockchaincomponent.ReceiptSuccessful(consensus.Receipt) {
+		msg := "BSC burn pending"
+		if err != nil {
+			msg = fmt.Sprintf("BSC burn receipt wait failed: %v", err)
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%s","tx_hash":"%s"}`, msg, tx.Hash().Hex()), http.StatusBadRequest)
+		return
+	}
+
 	json.NewEncoder(w).Encode(map[string]string{
 		"tx_hash": tx.Hash().Hex(),
 	})
 }
 
 // BridgeLockBscToken locks a BEP20 token on BSC to mint on LQD.
-func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Request) {
+func (ws *WalletServer) bridgeLockBscTokenWithMode(w http.ResponseWriter, r *http.Request, forcedMode string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -584,14 +652,27 @@ func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Reques
 	}
 
 	var request struct {
-		PrivateKey string `json:"private_key"`
-		Token      string `json:"token"`
-		Amount     Amount `json:"amount"`
-		ToLqd      string `json:"to_lqd"`
+		PrivateKey     string `json:"private_key"`
+		Token          string `json:"token"`
+		Amount         Amount `json:"amount"`
+		ToLqd          string `json:"to_lqd"`
+		ChainID        string `json:"chain_id"`
+		Family         string `json:"family"`
+		Adapter        string `json:"adapter"`
+		SourceTxHash   string `json:"source_tx_hash"`
+		SourceAddress  string `json:"source_address"`
+		SourceMemo     string `json:"source_memo"`
+		SourceSequence string `json:"source_sequence"`
+		SourceOutput   string `json:"source_output"`
+		Mode           string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
 		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(request.Mode))
+	if forcedMode != "" {
+		mode = strings.ToLower(strings.TrimSpace(forcedMode))
 	}
 	if request.PrivateKey == "" || request.Token == "" || request.Amount.Int == nil || request.Amount.Int.Sign() == 0 || request.ToLqd == "" {
 		http.Error(w, `{"error":"Missing fields"}`, http.StatusBadRequest)
@@ -602,14 +683,36 @@ func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	rpc := os.Getenv("BSC_TESTNET_RPC")
-	lockAddr := os.Getenv("BSC_LOCK_ADDRESS")
+	chainID := bridgeChainIDFromValue(request.ChainID)
+	cfg := resolveBridgeChainConfig(chainID)
+	rpc := ""
+	lockAddr := ""
+	chainNativeID := uint64(97)
+	if cfg != nil {
+		rpc = strings.TrimSpace(cfg.RPC)
+		if rpc == "" && len(cfg.RPCs) > 0 {
+			rpc = strings.TrimSpace(cfg.RPCs[0])
+		}
+		lockAddr = strings.TrimSpace(cfg.LockAddress)
+		if lockAddr == "" {
+			lockAddr = strings.TrimSpace(cfg.BridgeAddress)
+		}
+		if parsed, err := strconv.ParseUint(strings.TrimSpace(cfg.ChainID), 10, 64); err == nil && parsed > 0 {
+			chainNativeID = parsed
+		}
+	}
+	if rpc == "" {
+		rpc = os.Getenv("BSC_TESTNET_RPC")
+	}
+	if lockAddr == "" {
+		lockAddr = os.Getenv("BSC_LOCK_ADDRESS")
+	}
 	if rpc == "" || lockAddr == "" {
-		http.Error(w, `{"error":"BSC lock not configured"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"bridge chain not configured"}`, http.StatusBadRequest)
 		return
 	}
 
-	client, err := ethclient.Dial(rpc)
+	client, _, err := blockchaincomponent.DialBscClient(blockchaincomponent.BridgeRPCEndpoints(rpc))
 	if err != nil {
 		http.Error(w, `{"error":"Failed to connect to BSC RPC"}`, http.StatusBadGateway)
 		return
@@ -631,7 +734,7 @@ func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Reques
 		http.Error(w, `{"error":"Invalid private key"}`, http.StatusBadRequest)
 		return
 	}
-	auth, err := bind.NewKeyedTransactorWithChainID(key, big.NewInt(97))
+	auth, err := bind.NewKeyedTransactorWithChainID(key, big.NewInt(int64(chainNativeID)))
 	if err != nil {
 		http.Error(w, `{"error":"Signer error"}`, http.StatusBadRequest)
 		return
@@ -673,22 +776,48 @@ func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if consensus, err := blockchaincomponent.ConsensusReceipt(blockchaincomponent.BridgeRPCEndpoints(rpc), tx.Hash().Hex(), 2*time.Minute, 2*time.Second); err != nil || !blockchaincomponent.ReceiptSuccessful(consensus.Receipt) {
+		msg := "BSC lock pending"
+		if err != nil {
+			msg = fmt.Sprintf("BSC lock receipt wait failed: %v", err)
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%s","tx_hash":"%s"}`, msg, tx.Hash().Hex()), http.StatusBadRequest)
+		return
+	}
+
 	// Register the BSC lock on LQD immediately (fallback if RPC log scan misses)
 	go func() {
 		payload := map[string]interface{}{
-			"bsc_tx": tx.Hash().Hex(),
-			"token":  request.Token,
-			"from":   ownerAddr.Hex(),
-			"to_lqd": request.ToLqd,
-			"amount": request.Amount.Int.String(),
+			"chain_id":        chainID,
+			"family":          strings.TrimSpace(request.Family),
+			"adapter":         strings.TrimSpace(request.Adapter),
+			"bsc_tx":          tx.Hash().Hex(),
+			"token":           request.Token,
+			"from":            ownerAddr.Hex(),
+			"to_lqd":          request.ToLqd,
+			"amount":          request.Amount.Int.String(),
+			"source_tx_hash":  request.SourceTxHash,
+			"source_address":  request.SourceAddress,
+			"source_memo":     request.SourceMemo,
+			"source_sequence": request.SourceSequence,
+			"source_output":   request.SourceOutput,
+			"mode":            mode,
 		}
 		body, _ := json.Marshal(payload)
-		_, _ = http.Post(ws.BlockchainNodeAddress+"/bridge/lock_bsc", "application/json", bytes.NewReader(body))
+		_, _ = http.Post(ws.BlockchainNodeAddress+"/bridge/lock_chain", "application/json", bytes.NewReader(body))
 	}()
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"tx_hash": tx.Hash().Hex(),
 	})
+}
+
+func (ws *WalletServer) BridgeLockBscToken(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeLockBscTokenWithMode(w, r, "")
+}
+
+func (ws *WalletServer) BridgePrivateLockBscToken(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeLockBscTokenWithMode(w, r, "private")
 }
 
 // BridgeBscLockTxData prepares calldata for BSC lock() so frontend can send via injected wallet.
@@ -765,7 +894,7 @@ func (ws *WalletServer) BridgeBscLockTxData(w http.ResponseWriter, r *http.Reque
 }
 
 // BridgeBurnLqdToken burns a LQD bridge token to release on BSC.
-func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Request) {
+func (ws *WalletServer) bridgeBurnLqdTokenWithMode(w http.ResponseWriter, r *http.Request, forcedMode string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -780,14 +909,27 @@ func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Reques
 	}
 
 	var request struct {
-		PrivateKey string `json:"private_key"`
-		Token      string `json:"token"`
-		Amount     Amount `json:"amount"`
-		ToBsc      string `json:"to_bsc"`
+		PrivateKey     string `json:"private_key"`
+		Token          string `json:"token"`
+		Amount         Amount `json:"amount"`
+		ToBsc          string `json:"to_bsc"`
+		ChainID        string `json:"chain_id"`
+		Family         string `json:"family"`
+		Adapter        string `json:"adapter"`
+		SourceTxHash   string `json:"source_tx_hash"`
+		SourceAddress  string `json:"source_address"`
+		SourceMemo     string `json:"source_memo"`
+		SourceSequence string `json:"source_sequence"`
+		SourceOutput   string `json:"source_output"`
+		Mode           string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, `{"error":"Invalid request format"}`, http.StatusBadRequest)
 		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(request.Mode))
+	if forcedMode != "" {
+		mode = strings.ToLower(strings.TrimSpace(forcedMode))
 	}
 	if request.PrivateKey == "" || request.Token == "" || request.Amount.Int == nil || request.Amount.Int.Sign() == 0 || request.ToBsc == "" {
 		http.Error(w, `{"error":"Missing fields"}`, http.StatusBadRequest)
@@ -806,13 +948,22 @@ func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Reques
 
 	// Execute burn directly on the node and register a bridge request.
 	payload := map[string]any{
-		"token":  request.Token,
-		"from":   signer.Address,
-		"to_bsc": request.ToBsc,
-		"amount": request.Amount.Int.String(),
+		"chain_id":        bridgeChainIDFromValue(request.ChainID),
+		"family":          strings.TrimSpace(request.Family),
+		"adapter":         strings.TrimSpace(request.Adapter),
+		"token":           request.Token,
+		"from":            signer.Address,
+		"to_addr":         request.ToBsc,
+		"amount":          request.Amount.Int.String(),
+		"source_tx_hash":  request.SourceTxHash,
+		"source_address":  request.SourceAddress,
+		"source_memo":     request.SourceMemo,
+		"source_sequence": request.SourceSequence,
+		"source_output":   request.SourceOutput,
+		"mode":            mode,
 	}
 	body, _ := json.Marshal(payload)
-	resp, err := http.Post(ws.BlockchainNodeAddress+"/bridge/burn_lqd", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(ws.BlockchainNodeAddress+"/bridge/burn_chain", "application/json", bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, `{"error":"Blockchain node unreachable"}`, http.StatusBadGateway)
 		return
@@ -820,6 +971,22 @@ func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Reques
 	defer resp.Body.Close()
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+func (ws *WalletServer) BridgeBurnLqdToken(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeBurnLqdTokenWithMode(w, r, "")
+}
+
+func (ws *WalletServer) BridgePrivateBurnLqdToken(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeBurnLqdTokenWithMode(w, r, "private")
+}
+
+func (ws *WalletServer) BridgeBurn(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeBurnWithMode(w, r, "")
+}
+
+func (ws *WalletServer) BridgePrivateBurn(w http.ResponseWriter, r *http.Request) {
+	ws.bridgeBurnWithMode(w, r, "private")
 }
 
 func (ws *WalletServer) SendTransactionBatch(w http.ResponseWriter, r *http.Request) {
@@ -1114,11 +1281,11 @@ func (ws *WalletServer) GetTokenBalance(w http.ResponseWriter, r *http.Request) 
 	// Call node contract endpoint
 	client := &http.Client{Timeout: 10 * time.Second}
 	payload := map[string]interface{}{
-		"address":  contract,
-		"caller":   holder,
-		"fn":       "balanceOf",
-		"args":     []string{holder},
-		"value":    0,
+		"address": contract,
+		"caller":  holder,
+		"fn":      "balanceOf",
+		"args":    []string{holder},
+		"value":   0,
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := client.Post(ws.BlockchainNodeAddress+"/contract/call",
@@ -1175,19 +1342,23 @@ func apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 func (ws *WalletServer) Start() {
 	portStr := fmt.Sprintf("%d", ws.Port)
-	http.HandleFunc("/wallet/new", apiKeyMiddleware(ws.CreateNewWallet))
-	http.HandleFunc("/wallet/import/mnemonic", apiKeyMiddleware(ws.ImportFromMnemonic))
-	http.HandleFunc("/wallet/import/private-key", apiKeyMiddleware(ws.ImportFromPrivateKey))
-	http.HandleFunc("/wallet/balance", apiKeyMiddleware(ws.GetBalance))
-	http.HandleFunc("/wallet/send", apiKeyMiddleware(ws.SendTransaction))
-	http.HandleFunc("/wallet/send_batch", apiKeyMiddleware(ws.SendTransactionBatch))
-	http.HandleFunc("/wallet/contract-template", apiKeyMiddleware(ws.ContractTemplate))
-	http.HandleFunc("/wallet/bridge/lock", apiKeyMiddleware(ws.BridgeLock))
-	http.HandleFunc("/wallet/bridge/burn", apiKeyMiddleware(ws.BridgeBurn))
-	http.HandleFunc("/wallet/bridge/lock_bsc_token", apiKeyMiddleware(ws.BridgeLockBscToken))
-	http.HandleFunc("/wallet/bridge/burn_lqd_token", apiKeyMiddleware(ws.BridgeBurnLqdToken))
-	http.HandleFunc("/wallet/bridge/bsc_lock_tx", apiKeyMiddleware(ws.BridgeBscLockTxData))
-	http.HandleFunc("/wallet/token-balance", apiKeyMiddleware(ws.GetTokenBalance))
+	http.HandleFunc("/wallet/new", ws.CreateNewWallet)
+	http.HandleFunc("/wallet/import/mnemonic", ws.ImportFromMnemonic)
+	http.HandleFunc("/wallet/import/private-key", ws.ImportFromPrivateKey)
+	http.HandleFunc("/wallet/balance", ws.GetBalance)
+	http.HandleFunc("/wallet/send", ws.SendTransaction)
+	http.HandleFunc("/wallet/send_batch", ws.SendTransactionBatch)
+	http.HandleFunc("/wallet/contract-template", ws.ContractTemplate)
+	http.HandleFunc("/wallet/bridge/lock", ws.BridgeLock)
+	http.HandleFunc("/wallet/bridge/private/lock", ws.BridgePrivateLock)
+	http.HandleFunc("/wallet/bridge/burn", ws.BridgeBurn)
+	http.HandleFunc("/wallet/bridge/private/burn", ws.BridgePrivateBurn)
+	http.HandleFunc("/wallet/bridge/lock_bsc_token", ws.BridgeLockBscToken)
+	http.HandleFunc("/wallet/bridge/private/lock_bsc_token", ws.BridgePrivateLockBscToken)
+	http.HandleFunc("/wallet/bridge/burn_lqd_token", ws.BridgeBurnLqdToken)
+	http.HandleFunc("/wallet/bridge/private/burn_lqd_token", ws.BridgePrivateBurnLqdToken)
+	http.HandleFunc("/wallet/bridge/bsc_lock_tx", ws.BridgeBscLockTxData)
+	http.HandleFunc("/wallet/token-balance", ws.GetTokenBalance)
 
 	log.Printf("Starting wallet server on port %d\n", ws.Port)
 	log.Printf("Connected to blockchain node at %s\n", ws.BlockchainNodeAddress)

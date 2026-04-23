@@ -215,7 +215,6 @@ func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
 
-	// Handle preflight requests
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -224,20 +223,76 @@ func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) 
 	b.BlockchainPtr.Mutex.Lock()
 	defer b.BlockchainPtr.Mutex.Unlock()
 
-	if r.Method == http.MethodGet {
-		blocks := b.BlockchainPtr.Blocks
-		var blocksToReturn []*blockchaincomponent.Block
-		if len(blocks) < 10 {
-			blocksToReturn = blocks
-		} else {
-			blocksToReturn = blocks[len(blocks)-10:]
-		}
-
-		json.NewEncoder(w).Encode(blocksToReturn) // Actually return the data
-	} else {
+	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
+	blocks := b.BlockchainPtr.Blocks
+	total := len(blocks)
+
+	// --- optional query params ---
+	// n=10          → return last N blocks (legacy, default 10)
+	// page=1&size=10 → server-side pagination (newest-first)
+	q := r.URL.Query()
+
+	pageStr := q.Get("page")
+	sizeStr := q.Get("size")
+
+	if pageStr != "" || sizeStr != "" {
+		// paginated mode
+		page, _ := strconv.Atoi(pageStr)
+		size, _ := strconv.Atoi(sizeStr)
+		if page < 1 {
+			page = 1
+		}
+		if size < 1 || size > 200 {
+			size = 10
+		}
+		totalPages := (total + size - 1) / size
+		if totalPages == 0 {
+			totalPages = 1
+		}
+
+		// newest-first: page 1 = last `size` blocks
+		end := total - (page-1)*size
+		start := end - size
+		if start < 0 {
+			start = 0
+		}
+		if end < 0 {
+			end = 0
+		}
+		slice := blocks[start:end]
+		// reverse so newest is first
+		result := make([]*blockchaincomponent.Block, len(slice))
+		for i, bl := range slice {
+			result[len(slice)-1-i] = bl
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"blocks":      result,
+			"total":       total,
+			"page":        page,
+			"size":        size,
+			"total_pages": totalPages,
+		})
+		return
+	}
+
+	// legacy mode: return last n blocks (default 10, backward compatible)
+	n := 10
+	if nStr := q.Get("n"); nStr != "" {
+		if parsed, err := strconv.Atoi(nStr); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	var blocksToReturn []*blockchaincomponent.Block
+	if total <= n {
+		blocksToReturn = blocks
+	} else {
+		blocksToReturn = blocks[total-n:]
+	}
+	json.NewEncoder(w).Encode(blocksToReturn)
 }
 func (bcs *BlockchainServer) GetBlockchainHeight(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")

@@ -3,6 +3,27 @@
 ## Overview
 This document explains how to run the chain, add validators, and upgrade safely.
 
+## Production Guide
+For a full operator, developer, miner, and user handbook, read [PRODUCTION_GUIDE.md](./PRODUCTION_GUIDE.md).
+
+## Developer Guide
+For smart contract authoring, deployment, and testing instructions, read [DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md).
+
+## Smart Contract Template
+For a reusable starter token contract, read [SMART_CONTRACT_TEMPLATE_TOKEN.md](./SMART_CONTRACT_TEMPLATE_TOKEN.md).
+
+## DAO Template
+For a reusable starter DAO / treasury governance contract, read [SMART_CONTRACT_TEMPLATE_DAO.md](./SMART_CONTRACT_TEMPLATE_DAO.md).
+
+## DEX Template
+For a reusable starter AMM pair / DEX contract, read [SMART_CONTRACT_TEMPLATE_DEX.md](./SMART_CONTRACT_TEMPLATE_DEX.md).
+
+## NFT Template
+For a reusable starter NFT collection contract, read [SMART_CONTRACT_TEMPLATE_NFT.md](./SMART_CONTRACT_TEMPLATE_NFT.md).
+
+## Mobile Wallet
+For a MetaMask-like mobile wallet blueprint and feature parity map, read [../mobile-wallet/README.md](../mobile-wallet/README.md).
+
 ## Requirements
 - Go 1.21+
 - Linux/macOS

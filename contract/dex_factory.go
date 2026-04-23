@@ -297,6 +297,129 @@ func (f *Factory) requirePair(ctx *bc.Context, tokenA, tokenB string) (pairAddr,
 	return
 }
 
+type swapRoute struct {
+	kind       string
+	directPair string
+	hop1Addr   string
+	hop2Addr   string
+	midToken   string
+	weight     int64
+	depth      *big.Int
+	hops       int
+}
+
+func (r swapRoute) valid() bool {
+	return r.kind != "" && r.hops > 0
+}
+
+func (r swapRoute) betterThan(other swapRoute) bool {
+	if !r.valid() {
+		return false
+	}
+	if !other.valid() {
+		return true
+	}
+	if r.weight != other.weight {
+		return r.weight > other.weight
+	}
+	rd := r.depth
+	od := other.depth
+	if rd == nil {
+		rd = big.NewInt(0)
+	}
+	if od == nil {
+		od = big.NewInt(0)
+	}
+	if cmp := rd.Cmp(od); cmp != 0 {
+		return cmp > 0
+	}
+	return r.hops < other.hops
+}
+
+func (f *Factory) pairWeight(ctx *bc.Context, pairAddr string) int64 {
+	if pairAddr == "" {
+		return 0
+	}
+	res, err := ctx.Call(pairAddr, "GetRoutingWeight", []string{})
+	if err != nil || res == nil || res.Output == "" {
+		return 50
+	}
+	if v := parseBig(res.Output); v.IsInt64() {
+		return v.Int64()
+	}
+	return 50
+}
+
+func (f *Factory) pairDepth(ctx *bc.Context, pairAddr string) *big.Int {
+	if pairAddr == "" {
+		return big.NewInt(0)
+	}
+	res, err := ctx.Call(pairAddr, "GetReserves", []string{})
+	if err != nil || res == nil || res.Output == "" {
+		return big.NewInt(0)
+	}
+	parts := strings.SplitN(res.Output, ",", 3)
+	if len(parts) < 2 {
+		return big.NewInt(0)
+	}
+	r0 := parseBig(parts[0])
+	r1 := parseBig(parts[1])
+	if r0.Cmp(r1) < 0 {
+		return r0
+	}
+	return r1
+}
+
+func (f *Factory) selectBestSwapRoute(ctx *bc.Context, tokenIn, tokenOut string) swapRoute {
+	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
+
+	best := swapRoute{}
+
+	// Direct route first, but only if it truly scores best.
+	pk, _, _ := pairKey(tokenIn, tokenOut)
+	if direct := ctx.Get("pairAddr:" + pk); direct != "" {
+		best = swapRoute{
+			kind:       "direct",
+			directPair: direct,
+			weight:     f.pairWeight(ctx, direct),
+			depth:      f.pairDepth(ctx, direct),
+			hops:       1,
+		}
+	}
+
+	// Compare against the best 2-hop route.
+	mid, hop1, hop2 := f.findBestRoute(ctx, tokenIn, tokenOut)
+	if mid != "" {
+		candidate := swapRoute{
+			kind:     "2hop",
+			hop1Addr: hop1,
+			hop2Addr: hop2,
+			midToken: mid,
+			weight:   50,
+			depth:    big.NewInt(0),
+			hops:     2,
+		}
+		w1 := f.pairWeight(ctx, hop1)
+		w2 := f.pairWeight(ctx, hop2)
+		candidate.weight = w1
+		if w2 < candidate.weight {
+			candidate.weight = w2
+		}
+		d1 := f.pairDepth(ctx, hop1)
+		d2 := f.pairDepth(ctx, hop2)
+		candidate.depth = d1
+		if d2.Cmp(candidate.depth) < 0 {
+			candidate.depth = d2
+		}
+
+		if candidate.betterThan(best) {
+			best = candidate
+		}
+	}
+
+	return best
+}
+
 // ─── LIQUIDITY ROUTER ─────────────────────────────────────────────────────────
 
 // AddLiquidity deposits tokenA + tokenB and mints LP tokens via the pair contract.
@@ -333,26 +456,21 @@ func (f *Factory) RemoveLiquidity(ctx *bc.Context, tokenA string, tokenB string,
 // For native LQD output: tokenOut = "lqd", native LQD sent back automatically
 func (f *Factory) SwapExactTokensForTokens(ctx *bc.Context, amountIn string, minAmountOut string, tokenIn string, tokenOut string) {
 	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
+	route := f.selectBestSwapRoute(ctx, tokenIn, tokenOut)
+	if !route.valid() {
+		ctx.Revert("no route found for " + tokenIn + " → " + tokenOut)
+	}
 
-	// ── 1. Direct pair ────────────────────────────────────────────────────────
-	pk, _, _ := pairKey(tokenIn, tokenOut)
-	pairAddr := ctx.Get("pairAddr:" + pk)
-	if pairAddr != "" {
-		_, err := ctx.Call(pairAddr, "Swap", []string{amountIn, minAmountOut, tokenIn})
+	if route.kind == "direct" {
+		_, err := ctx.Call(route.directPair, "Swap", []string{amountIn, minAmountOut, tokenIn})
 		if err != nil {
 			ctx.Revert("Swap failed: " + err.Error())
 		}
 		return
 	}
 
-	// ── 2. No direct pair — find best 2-hop route via Virtual Routing ─────────
-	midToken, hop1Addr, hop2Addr := f.findBestRoute(ctx, tokenIn, tokenOut)
-	if midToken == "" {
-		ctx.Revert("no route found for " + tokenIn + " → " + tokenOut)
-	}
-
 	// Hop 1: tokenIn → midToken  (get intermediate amount out)
-	hop1Res, err := ctx.Call(hop1Addr, "GetAmountOut", []string{amountIn, tokenIn})
+	hop1Res, err := ctx.Call(route.hop1Addr, "GetAmountOut", []string{amountIn, tokenIn})
 	if err != nil || hop1Res == nil {
 		ctx.Revert("route hop1 GetAmountOut failed")
 	}
@@ -362,23 +480,23 @@ func (f *Factory) SwapExactTokensForTokens(ctx *bc.Context, amountIn string, min
 	}
 
 	// Execute hop 1: tokenIn → midToken (0 minOut, hop2 will enforce slippage)
-	_, err = ctx.Call(hop1Addr, "Swap", []string{amountIn, "0", tokenIn})
+	_, err = ctx.Call(route.hop1Addr, "Swap", []string{amountIn, "0", tokenIn})
 	if err != nil {
 		ctx.Revert("route hop1 swap failed: " + err.Error())
 	}
 
 	// Execute hop 2: midToken → tokenOut (enforce minAmountOut here)
-	_, err = ctx.Call(hop2Addr, "Swap", []string{midAmountOut, minAmountOut, midToken})
+	_, err = ctx.Call(route.hop2Addr, "Swap", []string{midAmountOut, minAmountOut, route.midToken})
 	if err != nil {
 		ctx.Revert("route hop2 swap failed: " + err.Error())
 	}
 
 	ctx.Emit("MultiHopSwap", map[string]interface{}{
 		"tokenIn":  tokenIn,
-		"midToken": midToken,
+		"midToken": route.midToken,
 		"tokenOut": tokenOut,
-		"hop1":     hop1Addr,
-		"hop2":     hop2Addr,
+		"hop1":     route.hop1Addr,
+		"hop2":     route.hop2Addr,
 	})
 }
 
@@ -462,33 +580,29 @@ func (f *Factory) findBestRoute(ctx *bc.Context, tokenIn, tokenOut string) (midT
 // Returns the intermediate token address and both hop pair addresses.
 func (f *Factory) GetBestRoute(ctx *bc.Context, tokenIn string, tokenOut string) {
 	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
-
-	// Check direct first
-	pk, _, _ := pairKey(tokenIn, tokenOut)
-	direct := ctx.Get("pairAddr:" + pk)
-	if direct != "" {
-		ctx.Set("output", direct)
-		ctx.Emit("BestRoute", map[string]interface{}{
-			"type":     "direct",
-			"pairAddr": direct,
-			"hops":     "1",
-		})
-		return
-	}
-
-	mid, hop1, hop2 := f.findBestRoute(ctx, tokenIn, tokenOut)
-	if mid == "" {
+	route := f.selectBestSwapRoute(ctx, tokenIn, tokenOut)
+	if !route.valid() {
 		ctx.Set("output", "")
 		ctx.Emit("BestRoute", map[string]interface{}{"type": "none"})
 		return
 	}
 
-	ctx.Set("output", hop1+","+hop2)
+	if route.kind == "direct" {
+		ctx.Set("output", route.directPair)
+		ctx.Emit("BestRoute", map[string]interface{}{
+			"type":     "direct",
+			"pairAddr": route.directPair,
+			"hops":     "1",
+		})
+		return
+	}
+
+	ctx.Set("output", route.hop1Addr+","+route.hop2Addr)
 	ctx.Emit("BestRoute", map[string]interface{}{
 		"type":     "2hop",
-		"midToken": mid,
-		"hop1":     hop1,
-		"hop2":     hop2,
+		"midToken": route.midToken,
+		"hop1":     route.hop1Addr,
+		"hop2":     route.hop2Addr,
 		"hops":     "2",
 	})
 }

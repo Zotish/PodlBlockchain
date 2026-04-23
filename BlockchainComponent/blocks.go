@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -205,6 +206,19 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	var totalGasCost uint64
 
 	finalTxs := make([]*Transaction, 0, len(txPool))
+	failedTxHashes := make(map[string]struct{})
+
+	markFailed := func(tx *Transaction) {
+		if tx == nil {
+			return
+		}
+		tx.Status = constantset.StatusFailed
+		if tx.TxHash == "" {
+			tx.TxHash = CalculateTransactionHash(*tx)
+		}
+		failedTxHashes[tx.TxHash] = struct{}{}
+		bc.RecordRecentTx(tx)
+	}
 
 	for res := range resultChan {
 
@@ -221,13 +235,11 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		}
 
 		if !res.Valid || res.Tx == nil {
-			if res.Tx != nil {
-				res.Tx.Status = constantset.StatusFailed
-			}
+			markFailed(res.Tx)
 			continue
 		}
 		if totalGasUsed+res.GasUsed > newBlock.GasLimit {
-			res.Tx.Status = constantset.StatusFailed
+			markFailed(res.Tx)
 			continue
 		}
 
@@ -239,7 +251,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 				)
 				if err != nil {
 					log.Printf("ContractTx FAILED fn=%s addr=%s err=%v", res.Tx.Function, res.Tx.To, err)
-					res.Tx.Status = constantset.StatusFailed
+					markFailed(res.Tx)
 					continue
 				}
 			}
@@ -253,7 +265,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 			senderBal = big.NewInt(0)
 		}
 		if senderBal.Cmp(totalTxCost) < 0 {
-			res.Tx.Status = constantset.StatusFailed
+			markFailed(res.Tx)
 			continue
 		}
 
@@ -264,12 +276,16 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 
 		res.Tx.Status = constantset.StatusSuccess
 
-		if res.Tx.Type == "bridge_lock" {
+		if res.Tx.Type == "bridge_lock" || res.Tx.Type == "bridge_lock_private" {
 			toBSC := ""
 			if len(res.Tx.Args) > 0 {
 				toBSC = res.Tx.Args[0]
 			}
-			bc.AddBridgeRequest(res.Tx, toBSC)
+			if res.Tx.Type == "bridge_lock_private" {
+				bc.AddPrivateBridgeRequest(res.Tx, toBSC)
+			} else {
+				bc.AddBridgeRequest(res.Tx, toBSC)
+			}
 		}
 
 		finalTxs = append(finalTxs, res.Tx)
@@ -278,6 +294,23 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		totalGasCost += res.Fee
 
 		bc.RecordRecentTx(res.Tx)
+	}
+
+	if len(failedTxHashes) > 0 {
+		filteredPool := make([]*Transaction, 0, len(bc.Transaction_pool))
+		for _, tx := range bc.Transaction_pool {
+			if tx == nil {
+				continue
+			}
+			if strings.EqualFold(tx.Status, constantset.StatusFailed) {
+				continue
+			}
+			if _, failed := failedTxHashes[tx.TxHash]; failed {
+				continue
+			}
+			filteredPool = append(filteredPool, tx)
+		}
+		bc.Transaction_pool = filteredPool
 	}
 
 	newBlock.Transactions = finalTxs

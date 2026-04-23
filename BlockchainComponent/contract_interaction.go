@@ -50,6 +50,9 @@ func (reg *ContractRegistry) Save(c *Contract) {
 	}
 	if c.PluginPath != "" {
 		meta.PluginPath = c.PluginPath
+		if fp, err := CurrentPluginRuntimeFingerprint(); err == nil {
+			meta.RuntimeFingerprint = fp
+		}
 	}
 
 	state := &SmartContractState{
