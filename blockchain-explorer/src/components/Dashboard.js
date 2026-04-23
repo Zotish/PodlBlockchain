@@ -186,7 +186,7 @@ const Dashboard = () => {
 
   const isBlockNumber = (q) => /^\d+$/.test(q);
 
-  const handleGlobalSearchSubmit = (e) => {
+  const handleGlobalSearchSubmit = async (e) => {
     e.preventDefault();
     const q = globalSearch.trim();
 
@@ -198,8 +198,12 @@ if (isAddress(q)) {
   return navigate(`/address/${q}`);
 }
 
-// Then tx hash
+// Then hash: block hash first, tx hash fallback
 if (isHash(q)) {
+  try {
+    await fetchJSON(`/block/${q}`);
+    return navigate(`/blocks/${q}`);
+  } catch {}
   return navigate(`/tx/${q}`);
 }
 

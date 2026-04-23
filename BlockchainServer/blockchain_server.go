@@ -1090,25 +1090,42 @@ func (b *BlockchainServer) GetBlock(w http.ResponseWriter, r *http.Request) {
 			id = parts[len(parts)-1]
 		}
 	}
-	blockNumber, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		http.Error(w, "Invalid block number", http.StatusBadRequest)
+
+	if blockNumber, err := strconv.ParseUint(id, 10, 64); err == nil {
+		b.BlockchainPtr.Mutex.Lock()
+		defer b.BlockchainPtr.Mutex.Unlock()
+
+		// Try in-memory blocks first (handles trimmed chains)
+		for _, blk := range b.BlockchainPtr.Blocks {
+			if blk != nil && blk.BlockNumber == blockNumber {
+				json.NewEncoder(w).Encode(blk)
+				return
+			}
+		}
+
+		// Fall back to DB if not in memory
+		block, err := blockchaincomponent.GetBlockFromDB(blockNumber)
+		if err != nil || block == nil {
+			http.Error(w, "Block not found", http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(block)
 		return
 	}
+
+	blockHash := strings.ToLower(strings.TrimSpace(id))
 
 	b.BlockchainPtr.Mutex.Lock()
 	defer b.BlockchainPtr.Mutex.Unlock()
 
-	// Try in-memory blocks first (handles trimmed chains)
 	for _, blk := range b.BlockchainPtr.Blocks {
-		if blk != nil && blk.BlockNumber == blockNumber {
+		if blk != nil && strings.ToLower(blk.CurrentHash) == blockHash {
 			json.NewEncoder(w).Encode(blk)
 			return
 		}
 	}
 
-	// Fall back to DB if not in memory
-	block, err := blockchaincomponent.GetBlockFromDB(blockNumber)
+	block, err := blockchaincomponent.GetBlockByHashFromDB(blockHash)
 	if err != nil || block == nil {
 		http.Error(w, "Block not found", http.StatusNotFound)
 		return
