@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import BlockList from '../components/BlockList';
-import { fetchJSON } from '../utils/api';
+import { fetchJSON, firstNodeResult, mergeArrayResults } from '../utils/api';
 
 const PAGE_SIZE = 10;
 
@@ -16,15 +16,22 @@ const BlocksPage = () => {
     try {
       setError('');
       const data = await fetchJSON(`/fetch_last_n_block?page=${page}&size=${PAGE_SIZE}`);
+      const primary = firstNodeResult(data);
 
-      // paginated response: { blocks: [...], total: N, total_pages: M }
-      if (data && data.blocks) {
+      // direct/paginated response: { blocks: [...], total: N, total_pages: M }
+      if (primary && primary.blocks) {
+        setBlocks(Array.isArray(primary.blocks) ? primary.blocks : []);
+        setTotal(primary.total ?? 0);
+        setTotalPages(primary.total_pages ?? 1);
+      } else if (data && data.blocks) {
         setBlocks(Array.isArray(data.blocks) ? data.blocks : []);
-        setTotal(data.total       ?? 0);
+        setTotal(data.total ?? 0);
         setTotalPages(data.total_pages ?? 1);
       } else {
-        // fallback: legacy array response
-        const arr = Array.isArray(data) ? data : [];
+        // fallback: legacy array response or aggregated node wrapper
+        const arr = Array.isArray(data)
+          ? data
+          : mergeArrayResults(data, 'block_number');
         arr.sort((a, b) => (b.block_number ?? 0) - (a.block_number ?? 0));
         setBlocks(arr);
         setTotal(arr.length);
