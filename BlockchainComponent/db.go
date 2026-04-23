@@ -82,6 +82,33 @@ func GetBlockFromDB(blockNumber uint64) (*Block, error) {
 	return &block, nil
 }
 
+func GetBlockByHashFromDB(hash string) (*Block, error) {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if hash == "" {
+		return nil, fmt.Errorf("missing block hash")
+	}
+
+	latest, err := GetLatestBlockNumberFromDB()
+	if err != nil {
+		return nil, err
+	}
+	if latest == 0 {
+		return nil, fmt.Errorf("block not found")
+	}
+
+	for num := latest; num >= 1; num-- {
+		blk, err := GetBlockFromDB(num)
+		if err == nil && blk != nil && strings.ToLower(blk.CurrentHash) == hash {
+			return blk, nil
+		}
+		if num == 1 {
+			break
+		}
+	}
+
+	return nil, fmt.Errorf("block not found")
+}
+
 func GetLatestBlockNumberFromDB() (uint64, error) {
 	db, err := getDB()
 	if err != nil {
