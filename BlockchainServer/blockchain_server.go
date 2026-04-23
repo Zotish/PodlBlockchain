@@ -250,8 +250,8 @@ func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// legacy mode: return last n blocks (default 15 for dashboard/recent views)
-	n := 15
+	// legacy mode: return last n blocks (default 14 for dashboard/recent views)
+	n := 14
 	if nStr := q.Get("n"); nStr != "" {
 		if parsed, err := strconv.Atoi(nStr); err == nil && parsed > 0 {
 			n = parsed
