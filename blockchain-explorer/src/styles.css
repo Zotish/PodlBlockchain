@@ -644,9 +644,7 @@ tr:hover td {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-5) var(--space-6);
-  overflow: hidden;          /* clip table overflow inside card */
-  min-width: 0;              /* prevent flex/grid item from growing beyond parent */
-  width: 100%;
+  min-width: 0;
 }
 
 .recent-blocks h3,
