@@ -865,9 +865,9 @@ if (ext.storage?.onChanged) {
 
 // ── Official dApp Registry ────────────────────────────────────────────────────
 // To add/remove dApps, edit this list. url can be absolute or relative.
-const PROD_EXPLORER_URL = "https://YOUR-EXPLORER-DOMAIN";
-const PROD_DEX_URL = "https://YOUR-SWAP-DEX-DOMAIN";
-const PROD_BRIDGE_URL = "https://YOUR-EXPLORER-DOMAIN/bridge";
+const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
+const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
+const PROD_BRIDGE_URL = "https://delightful-churros-767ded.netlify.app";
 const OFFICIAL_DAPPS = [
   {
     name: "LQD DEX",
