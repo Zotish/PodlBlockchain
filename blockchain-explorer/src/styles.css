@@ -135,8 +135,8 @@ code, pre, .monospace {
   border-bottom: 1px solid var(--border);
   padding: 0 28px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 8px;
   height: 60px;
   position: sticky;
   top: 0;
@@ -144,14 +144,18 @@ code, pre, .monospace {
   backdrop-filter: blur(8px);
 }
 
+.navbar-brand {
+  flex-shrink: 0;
+}
+
 .navbar-brand a {
   color: var(--text-primary);
-  font-size: 1.1rem;
+  font-size: 1.05rem;
   font-weight: 700;
   text-decoration: none;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   letter-spacing: -0.3px;
 }
 
@@ -173,17 +177,19 @@ code, pre, .monospace {
   flex-shrink: 0;
 }
 
+/* links container — desktop: flex row, mobile: dropdown */
 .navbar-links {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+  margin-left: auto;          /* push to right on desktop */
 }
 
 .navbar-links a {
   color: var(--text-secondary);
-  padding: 6px 12px;
+  padding: 6px 11px;
   border-radius: var(--radius-sm);
-  font-size: 0.875rem;
+  font-size: 0.855rem;
   font-weight: 500;
   text-decoration: none;
   transition: all var(--transition);
@@ -198,6 +204,55 @@ code, pre, .monospace {
 .navbar-links a.active {
   color: var(--primary-light);
   background: var(--primary-subtle);
+}
+
+/* Mainnet pill */
+.navbar-mainnet-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px;
+  background: rgba(16,185,129,0.1);
+  border: 1px solid rgba(16,185,129,0.25);
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #10b981;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: 10px;
+}
+
+.navbar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
+  animation: navpulse 2s infinite;
+  flex-shrink: 0;
+}
+
+/* Hamburger — hidden on desktop */
+.navbar-hamburger {
+  display: none;
+  background: var(--bg-badge);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 1rem;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-left: auto;
+  transition: background var(--transition);
+}
+
+.navbar-hamburger:hover {
+  background: var(--bg-card-hover);
 }
 
 /* ─── Page Section Header ────────────────────────────────────────────── */
@@ -962,61 +1017,289 @@ pre {
   background: var(--text-muted);
 }
 
-/* ─── Responsive ─────────────────────────────────────────────────────── */
-@media (max-width: 1024px) {
+/* ═══════════════════════════════════════════════════════════════════════
+   RESPONSIVE — all breakpoints
+═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Tablet landscape & small desktop (≤1100px) ── */
+@media (max-width: 1100px) {
   .container {
-    padding: 20px 16px;
+    padding: 20px 18px;
+  }
+  .navbar {
+    padding: 0 18px;
   }
 }
 
-@media (max-width: 768px) {
-  .recent-data {
-    grid-template-columns: 1fr;
-  }
-
-  .navbar {
-    padding: 0 16px;
-    height: auto;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding-top: 10px;
-    padding-bottom: 10px;
-  }
-
-  .navbar-links {
-    flex-wrap: wrap;
-    gap: 2px;
-  }
-
-  .navbar-links a {
-    font-size: 0.8rem;
-    padding: 5px 8px;
-  }
-
+/* ── Tablet portrait (≤900px) ── */
+@media (max-width: 900px) {
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 
+  .recent-data {
+    grid-template-columns: 1fr;
+  }
+
   .search-hero {
-    padding: var(--space-6);
+    padding: var(--space-6) var(--space-5);
+  }
+
+  .detail-label {
+    width: 150px;
+  }
+
+  /* tables: allow horizontal scroll */
+  .blocks-table,
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* ── Mobile (≤767px) — hamburger kicks in ── */
+@media (max-width: 767px) {
+
+  /* Navbar layout */
+  .navbar {
+    padding: 0 14px;
+    height: 56px;
+    flex-wrap: nowrap;
+    position: relative;
+  }
+
+  /* hide mainnet pill in navbar header on mobile (shown inside menu) */
+  .navbar > .navbar-mainnet-pill {
+    display: none;
+  }
+
+  /* show hamburger */
+  .navbar-hamburger {
+    display: flex;
+  }
+
+  /* dropdown menu */
+  .navbar-links {
+    display: none;
+    position: absolute;
+    top: 56px;
+    left: 0;
+    right: 0;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+    flex-direction: column;
+    padding: 8px 12px 14px;
+    gap: 2px;
+    z-index: 99;
+    box-shadow: var(--shadow-lg);
+    margin-left: 0;
+  }
+
+  .navbar-links.open {
+    display: flex;
+  }
+
+  .navbar-links a {
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    border-radius: var(--radius-sm);
+    width: 100%;
+  }
+
+  /* mainnet pill inside mobile menu */
+  .navbar-links .navbar-mainnet-pill {
+    display: flex;
+    margin: 6px 0 2px 12px;
+    width: fit-content;
+  }
+
+  /* Container */
+  .container {
+    padding: 16px 14px;
+  }
+
+  /* Stats */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-3);
+  }
+
+  .stat-card {
+    padding: var(--space-4);
+  }
+
+  .stat-card p {
+    font-size: 1.25rem;
+  }
+
+  /* Search hero */
+  .search-hero {
+    padding: var(--space-5) var(--space-4);
+    border-radius: var(--radius-lg);
+  }
+
+  .search-hero-title {
+    font-size: 1rem;
   }
 
   .search-form {
     flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .search-form .btn-primary {
+    width: 100%;
+    padding: 11px;
+  }
+
+  /* Dashboard sections */
+  .recent-data {
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+
+  .recent-blocks,
+  .recent-transactions,
+  .validators-section {
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+  }
+
+  /* Tables — horizontal scroll */
+  table {
+    min-width: 540px;
+  }
+
+  .blocks-table,
+  .table-responsive,
+  .recent-blocks > div,
+  .validators-section > div {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Detail pages */
+  .block-page,
+  .transaction-page,
+  .validator-page,
+  .address-page {
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+  }
+
+  .detail-row {
+    flex-direction: column;
+    gap: 4px;
+    padding: var(--space-3) 0;
   }
 
   .detail-label {
-    width: 130px;
+    width: 100%;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .detail-value {
+    font-size: 0.82rem;
+  }
+
+  /* Pagination */
+  .pagination,
+  .sort-options {
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .pagination button,
+  .sort-options button {
+    padding: 5px 10px;
+    font-size: 0.75rem;
+  }
+
+  /* TX tabs */
+  .tx-tabs {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .tx-tab {
+    flex: 1;
+    text-align: center;
+  }
+
+  /* page title */
+  .page-title,
+  h2 {
+    font-size: 1.1rem;
+  }
+
+  /* card */
+  .card {
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
   }
 }
 
-@media (max-width: 480px) {
+/* ── Small mobile (≤479px) ── */
+@media (max-width: 479px) {
+  .container {
+    padding: 12px 10px;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+
+  .stat-card p {
+    font-size: 1.1rem;
+  }
+
+  .stat-card h3,
+  .stat-card h4 {
+    font-size: 0.68rem;
+  }
+
+  .search-hero {
+    padding: var(--space-4);
+  }
+
+  .navbar-logo-icon {
+    width: 24px;
+    height: 24px;
+    font-size: 12px;
+  }
+
+  .navbar-brand a {
+    font-size: 0.9rem;
+    gap: 7px;
+  }
+
+  .validator-address,
+  .transaction-hash,
+  .address-hash {
+    font-size: 0.72rem;
+    padding: 6px 10px;
+  }
+
+  /* hash cells truncate more on small screens */
+  .hash-cell {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* ── Very small (≤359px) ── */
+@media (max-width: 359px) {
   .stats-grid {
     grid-template-columns: 1fr;
   }
 
   .container {
-    padding: 16px 12px;
+    padding: 10px 8px;
   }
 }
 
