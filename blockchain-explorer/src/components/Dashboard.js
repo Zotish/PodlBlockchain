@@ -57,7 +57,7 @@ const Dashboard = () => {
       const sortedBlocks = mergedBlocks.sort(
         (a, b) => (b.block_number ?? 0) - (a.block_number ?? 0)
       );
-      setRecentBlocks(sortedBlocks.slice(0, 15));
+      setRecentBlocks(sortedBlocks.slice(0, 14));
 
       try {
         const bt = await fetchJSON(`/blocktime/latest`);
