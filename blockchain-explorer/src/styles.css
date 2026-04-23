@@ -633,8 +633,9 @@ tr:hover td {
 
 .recent-data {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 2fr 1fr;   /* blocks ~66%, txs ~33% */
   gap: var(--space-5);
+  align-items: stretch;              /* both cards same height */
 }
 
 .recent-blocks,
@@ -645,6 +646,8 @@ tr:hover td {
   border-radius: var(--radius-lg);
   padding: var(--space-5) var(--space-6);
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .recent-blocks h3,
