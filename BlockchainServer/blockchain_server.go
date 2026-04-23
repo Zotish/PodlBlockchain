@@ -225,9 +225,8 @@ func (b *BlockchainServer) fetchNBlocks(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// --- optional query params ---
-	// n=15           → return last N blocks (legacy, default 15)
-	// page=1&size=10 → server-side pagination (newest-first)
+	// `n` keeps the dashboard recent-blocks widget lightweight.
+	// `page`/`size` powers the full historical blocks explorer.
 	q := r.URL.Query()
 
 	pageStr := q.Get("page")
