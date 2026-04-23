@@ -1,0 +1,16 @@
+{
+  "name": "lqd-wallet-extension",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "jest --testEnvironment jsdom"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "jsdom",
+    "testMatch": ["**/__tests__/**/*.js", "**/*.test.js"]
+  }
+}

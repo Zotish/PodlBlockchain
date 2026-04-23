@@ -1,5 +1,5 @@
 // src/components/Navbar.js
-import React, { useState } from 'react';
+import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 
 const NAV_ITEMS = [
@@ -14,7 +14,6 @@ const NAV_ITEMS = [
 
 const Navbar = () => {
   const location = useLocation();
-  const [menuOpen, setMenuOpen] = useState(false);
 
   const isActive = (to) =>
     to === '/'
@@ -25,7 +24,7 @@ const Navbar = () => {
     <nav className="navbar">
       {/* ── Brand ── */}
       <div className="navbar-brand">
-        <Link to="/" onClick={() => setMenuOpen(false)}>
+        <Link to="/">
           <span className="navbar-logo-icon">⬡</span>
           LQD Explorer
         </Link>
