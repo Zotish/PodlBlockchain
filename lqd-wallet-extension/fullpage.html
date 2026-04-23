@@ -333,20 +333,63 @@ var Contract = &amp;Counter{}
       <div class="page-header">
         <div>
           <div class="page-title">Bridge</div>
-          <div class="page-sub">Transfer assets between BSC and LQD</div>
+          <div class="page-sub">Transfer assets between BSC and LQD using the unlocked extension wallet as signer</div>
         </div>
       </div>
 
       <div class="notice warn" style="margin-bottom:16px;">
-        ⚠️ Bridge requires MetaMask connected to BSC Testnet (Chain ID: 97).
+        ⚠️ Bridge uses your unlocked LQD Wallet as the signer. No external wallet connection is required.
       </div>
 
       <div class="grid-2">
         <!-- BSC → LQD -->
         <div class="card">
           <div class="card-title">BSC → LQD (Lock &amp; Mint)</div>
-          <div id="bscStatus" class="notice" style="margin-bottom:12px;">MetaMask not connected</div>
-          <button class="btn btn-secondary btn-sm" id="connectBscBtn" style="margin-bottom:14px;">Connect MetaMask (BSC)</button>
+          <div id="bscStatus" class="notice" style="margin-bottom:12px;">Extension wallet signer not ready</div>
+          <button class="btn btn-secondary btn-sm" id="useWalletSignerBtn" style="margin-bottom:14px;">Use Extension Wallet Signer</button>
+          <div class="field">
+            <label>Bridge Mode</label>
+            <select id="bridgeModeSelect">
+              <option value="public">Public</option>
+              <option value="private">Private</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Bridge Family</label>
+            <select id="bridgeFamilySelect">
+            <option value="evm">EVM</option>
+            <option value="utxo">UTXO</option>
+            <option value="cosmos">Cosmos</option>
+            <option value="substrate">Substrate</option>
+            <option value="solana">Solana</option>
+            <option value="xrpl">XRPL</option>
+            <option value="ton">TON</option>
+            <option value="cardano">Cardano</option>
+            <option value="aptos">Aptos</option>
+            <option value="sui">Sui</option>
+            <option value="near">NEAR</option>
+            <option value="icp">ICP</option>
+          </select>
+        </div>
+          <div class="field">
+            <label>Chain</label>
+            <select id="bridgeChainSelect">
+              <option value="bsc-testnet">BSC Testnet</option>
+            </select>
+          </div>
+          <div id="bridgeExternalMetaCard" style="display:none;">
+            <div class="notice" style="margin:12px 0 10px 0;">
+              For Cosmos/UTXO source locks, enter the source tx details below and submit the lock request after the external chain transfer is already broadcast.
+            </div>
+            <div class="field"><label>Source tx hash</label><input id="bridgeSourceTxHash" placeholder="0x... / txid" /></div>
+            <div class="field"><label>Source address</label><input id="bridgeSourceAddress" placeholder="0x... / external address" /></div>
+            <div class="field"><label>Source memo / note</label><input id="bridgeSourceMemo" placeholder="memo / note" /></div>
+            <div class="field"><label>Source sequence / nonce</label><input id="bridgeSourceSequence" placeholder="sequence / nonce" /></div>
+            <div class="field"><label>Source output index</label><input id="bridgeSourceOutput" placeholder="UTXO output index" /></div>
+          </div>
+          <div class="notice" id="bridgeEvmHint" style="margin:12px 0 10px 0;">
+            EVM chain selected. External source metadata is hidden for this path.
+          </div>
 
           <div class="field">
             <label>Token</label>
@@ -355,6 +398,10 @@ var Contract = &amp;Counter{}
               <option value="USDT">USDT</option>
               <option value="USDC">USDC</option>
             </select>
+          </div>
+          <div class="field">
+            <label>Custom BSC Token Address</label>
+            <input id="bridgeTokenCustomAddr" placeholder="0x..." />
           </div>
           <div class="field"><label>Amount</label><input id="bridgeLockAmt" type="number" placeholder="0.0" /></div>
           <div class="field"><label>LQD Recipient Address</label><input id="bridgeLqdRecipient" placeholder="0x..." /></div>
@@ -365,6 +412,39 @@ var Contract = &amp;Counter{}
         <!-- LQD → BSC -->
         <div class="card">
           <div class="card-title">LQD → BSC (Burn &amp; Unlock)</div>
+        <div class="field">
+          <label>Target Family</label>
+          <select id="burnFamilySelect">
+            <option value="evm">EVM</option>
+            <option value="utxo">UTXO</option>
+            <option value="cosmos">Cosmos</option>
+            <option value="substrate">Substrate</option>
+            <option value="solana">Solana</option>
+            <option value="xrpl">XRPL</option>
+            <option value="ton">TON</option>
+            <option value="cardano">Cardano</option>
+            <option value="aptos">Aptos</option>
+            <option value="sui">Sui</option>
+            <option value="near">NEAR</option>
+            <option value="icp">ICP</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Target Chain</label>
+          <select id="burnChainSelect">
+            <option value="bsc-testnet">BSC Testnet</option>
+          </select>
+        </div>
+        <div id="burnExternalMetaCard" style="display:none;">
+          <div class="notice" style="margin:12px 0 10px 0;">
+            Burn requests can also keep Cosmos/UTXO source metadata for later release verification.
+          </div>
+          <div class="field"><label>Source tx hash</label><input id="burnSourceTxHash" placeholder="0x... / txid" /></div>
+          <div class="field"><label>Source address</label><input id="burnSourceAddress" placeholder="0x... / external address" /></div>
+          <div class="field"><label>Source memo / note</label><input id="burnSourceMemo" placeholder="memo / note" /></div>
+          <div class="field"><label>Source sequence / nonce</label><input id="burnSourceSequence" placeholder="sequence / nonce" /></div>
+          <div class="field"><label>Source output index</label><input id="burnSourceOutput" placeholder="UTXO output index" /></div>
+        </div>
           <div class="field">
             <label>Token Contract (LQD chain)</label>
             <input id="burnTokenAddr" placeholder="0x..." />

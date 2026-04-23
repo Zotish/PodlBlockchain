@@ -267,54 +267,31 @@ if (isBlockNumber(q)) {
   ----------------------------- */
   const StatusBadge = ({ status }) => {
     const s = (status || "").toLowerCase();
-    const color =
-      s === "succsess" ? "#16a34a" : s === "failed" ? "#dc2626" : "#ca8a04";
+    const cls =
+      s === "succsess" ? "badge badge-green"
+      : s === "failed" ? "badge badge-red"
+      : "badge badge-yellow";
     const text =
-      s === "succsess" ? "confirmed" : s === "failed" ? "failed" : "pending";
-
-    return (
-      <span
-        style={{
-          background: color,
-          color: "#fff",
-          padding: "2px 6px",
-          borderRadius: 6,
-          fontSize: 11,
-        }}
-      >
-        {text}
-      </span>
-    );
+      s === "succsess" ? "Confirmed"
+      : s === "failed"  ? "Failed"
+      : "Pending";
+    return <span className={cls}>{text}</span>;
   };
 
   const TypeBadge = ({ type }) => {
     const t = (type || "").toLowerCase();
     const map = {
-      reward_validator: ["#0ea5e9", "validator reward"],
-      reward_lp: ["#8b5cf6", "lp reward"],
-      reward_contributor: ["#14b8a6", "contributor reward"],
-      reward: ["#0ea5e9", "reward"],
-      contract_create: ["#a855f7", "contract create"],
-      contract_call: ["#22c55e", "contract call"],
-      token_transfer: ["#f97316", "token transfer"],
-      transfer: ["#4b5563", "transfer"],
+      reward_validator: ["badge badge-cyan",   "Validator Reward"],
+      reward_lp:        ["badge badge-purple", "LP Reward"],
+      reward_contributor:["badge badge-teal",  "Contributor"],
+      reward:           ["badge badge-cyan",   "Reward"],
+      contract_create:  ["badge badge-purple", "Deploy"],
+      contract_call:    ["badge badge-green",  "Contract Call"],
+      token_transfer:   ["badge badge-orange", "Token Transfer"],
+      transfer:         ["badge badge-gray",   "Transfer"],
     };
-
-    const [bg, label] = map[t] || map.transfer;
-
-    return (
-      <span
-        style={{
-          background: bg,
-          color: "#fff",
-          padding: "2px 6px",
-          borderRadius: 6,
-          fontSize: 11,
-        }}
-      >
-        {label}
-      </span>
-    );
+    const [cls, label] = map[t] || map.transfer;
+    return <span className={cls}>{label}</span>;
   };
 
   /* -----------------------------
@@ -336,107 +313,93 @@ if (isBlockNumber(q)) {
      =========================================================== */
   return (
     <div className="dashboard">
-      {/* -------- Global Search -------- */}
-      <form
-        onSubmit={handleGlobalSearchSubmit}
-        style={{
-          marginBottom: 20,
-          display: "flex",
-          gap: 10,
-          justifyContent: "space-between",
-        }}
-      >
-        <input
-          value={globalSearch}
-          onChange={(e) => setGlobalSearch(e.target.value)}
-          placeholder="Search: tx hash / address / block number"
-          style={{
-            flex: 1,
-            padding: "10px 14px",
-            border: "1px solid #ccc",
-            borderRadius: 10,
-          }}
-        />
-        <button
-          type="submit"
-          className="btn-primary"
 
-          style={{ padding: "10px 10px" ,height: "42px",width: "80px"}}
-        >
-          Search
-        </button>
-      </form>
+      {/* ══════════ HERO SEARCH ══════════ */}
+      <div className="search-hero">
+        <p className="search-hero-title">LQD Blockchain Explorer</p>
+        <p className="search-hero-sub">
+          Search by transaction hash, address, or block number
+        </p>
+        <form className="search-form" onSubmit={handleGlobalSearchSubmit}>
+          <input
+            className="search-input"
+            value={globalSearch}
+            onChange={(e) => setGlobalSearch(e.target.value)}
+            placeholder="0x… tx hash  /  0x… address  /  block number"
+          />
+          <button type="submit" className="btn-primary" style={{ flexShrink: 0 }}>
+            Search
+          </button>
+        </form>
+      </div>
 
       {error && <div className="error-message">{error}</div>}
 
-      {/* -------- Network Stats -------- */}
+      {/* ══════════ NETWORK STATS ══════════ */}
       <div className="network-stats">
-        <h3>Network Statistics</h3>
         <div className="stats-grid">
-        <div className="stat-card">
-  <h4>Block Height and Block Producing Time</h4>
-  <p>
-    {blockTime && typeof blockTime.mining_time_sec === "number"
-      ? `#${blockTime.block_number} • ${blockTime.mining_time_sec.toFixed(5)} s`
-      : (networkStats?.block_height ?? "N/A")}
-  </p>
-</div>
-
+          <div className="stat-card">
+            <h4>Block Height</h4>
+            <p>
+              {blockTime && typeof blockTime.mining_time_sec === "number"
+                ? `#${blockTime.block_number}`
+                : (networkStats?.block_height ?? "—")}
+            </p>
+          </div>
+          <div className="stat-card">
+            <h4>Block Time</h4>
+            <p>
+              {blockTime && typeof blockTime.mining_time_sec === "number"
+                ? `${blockTime.mining_time_sec.toFixed(3)} s`
+                : "—"}
+            </p>
+          </div>
           <div className="stat-card">
             <h4>Validators</h4>
-            <p>{validators.length}</p>
+            <p>{validators.length || "—"}</p>
           </div>
           <div className="stat-card">
             <h4>Avg Block Time</h4>
-            <p>{networkStats?.average_block_time
-                ? `${networkStats.average_block_time.toFixed(2)} s`: "N/A"} </p>
+            <p>
+              {networkStats?.average_block_time
+                ? `${networkStats.average_block_time.toFixed(2)} s`
+                : "—"}
+            </p>
           </div>
         </div>
       </div>
 
-      {/* -------- Recent Blocks + TX Story -------- */}
+      {/* ══════════ RECENT BLOCKS + TXS ══════════ */}
       <div className="recent-data">
+
+        {/* ── Recent Blocks ── */}
         <div className="recent-blocks">
-          <h3>Recent Blocks ({recentBlocks.length})</h3>
+          <h3>Recent Blocks
+            <span style={{ marginLeft: "auto", fontSize: "0.72rem",
+              color: "var(--text-muted)", fontWeight: 400 }}>
+              {recentBlocks.length} blocks
+            </span>
+          </h3>
           <BlockList blocks={recentBlocks} showTxHash={false} />
         </div>
 
-        {/* -------- Transaction Story -------- */}
+        {/* ── Recent Transactions ── */}
         <div className="recent-transactions">
           <h3>Recent Transactions</h3>
 
-          {/* Search controls */}
-          <div
-            style={{
-              marginBottom: 10,
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-            }}
-          >
+          {/* Search + filter row */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search recent transactions…"
-              style={{
-                padding: "10px 14px",
-                width: "60%",
-                border: "1px solid #ccc",
-                borderRadius: 10,
-              }}
+              placeholder="Filter transactions…"
+              style={{ flex: 1, minWidth: 120 }}
             />
-
             <select
               value={searchField}
               onChange={(e) => setSearchField(e.target.value)}
-              style={{
-                padding: "10px 16px",
-                borderRadius: 10,
-                background: "#2563eb",
-                color: "#fff",
-                border: "1px solid #2563eb",
-              }}
+              style={{ width: "auto" }}
             >
               <option value="all">All fields</option>
               <option value="hash">Tx hash</option>
@@ -444,31 +407,25 @@ if (isBlockNumber(q)) {
               <option value="status">Status</option>
               <option value="type">Tx type</option>
             </select>
-
-            <span style={{ marginLeft: "auto", fontSize: 12, color: "#666" }}>
-              Showing {visibleTxs.length} result
-              {visibleTxs.length === 1 ? "" : "s"}
-            </span>
           </div>
 
-          {/* Tabs */}
-          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {/* Status tabs */}
+          <div className="tx-tabs" style={{ marginBottom: 10 }}>
             {["all", "pending", "confirmed", "failed"].map((tab) => (
               <button
                 key={tab}
+                className={`tx-tab${activeTab === tab ? " active" : ""}`}
                 onClick={() => setActiveTab(tab)}
-                style={{
-                  fontSize: 12,
-                  padding: "6px 10px",
-                  borderRadius: 8,
-                  border:
-                    activeTab === tab ? "1px solid #2563eb" : "1px solid #bbb",
-                  background: activeTab === tab ? "#eff6ff" : "#fff",
-                }}
               >
                 {tab[0].toUpperCase() + tab.slice(1)}
               </button>
             ))}
+          </div>
+
+          {/* TX count */}
+          <div style={{ fontSize: "0.72rem", color: "var(--text-muted)",
+            marginBottom: 8, textAlign: "right" }}>
+            {visibleTxs.length} result{visibleTxs.length !== 1 ? "s" : ""}
           </div>
 
           {/* TX List */}
@@ -476,81 +433,72 @@ if (isBlockNumber(q)) {
             <div className="no-transactions">No matching transactions.</div>
           ) : (
             visibleTxs.map((tx, i) => {
-              const h = tx.tx_hash || tx.txHash || `idx-${i}`;
-              const from = tx.from || tx.From || "";
-              const to = tx.to || tx.To || "";
-              const gas = tx.gas || tx.Gas || 0;
+              const h       = tx.tx_hash || tx.txHash || `idx-${i}`;
+              const from    = tx.from || tx.From || "";
+              const to      = tx.to || tx.To || "";
+              const gas     = tx.gas || tx.Gas || 0;
               const gasPrice = tx.gas_price || tx.GasPrice || 0;
-              const fee = gas * gasPrice;
+              const fee     = gas * gasPrice;
 
               return (
                 <div
                   key={h}
                   className="tx-item"
-                  style={{
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 10,
-                    padding: 10,
-                    marginBottom: 8,
-                    background: "#f9fafb",
-                    cursor: "pointer",
-                  }}
                   onClick={() => navigate(`/tx/${h}`)}
                 >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontSize: 13 }}>
-                        <strong>Tx:</strong>{" "}
-                        <span style={{ fontFamily: "monospace" }}>
-                          {h.slice(0, 18)}…
-                        </span>
+                  {/* top row */}
+                  <div style={{ display: "flex", justifyContent: "space-between",
+                    alignItems: "flex-start", gap: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: "0.8rem", color: "var(--text-link)",
+                        fontFamily: "var(--font-mono)", marginBottom: 2 }}>
+                        {h.slice(0, 20)}…
                       </div>
-                      <div style={{ fontSize: 11, color: "#666" }}>
+                      <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
                         {timeAgo(tx.timestamp || tx.Timestamp)}
                       </div>
                     </div>
 
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        copyHash(h);
-                      }}
-                      className="btn-copy-small"
-                    >
-                      {copiedHash === h ? "Copied" : "Copy"}
-                    </button>
-
-                    <div style={{ display: "flex", gap: 6 }}>
+                    <div style={{ display: "flex", gap: 5, alignItems: "center",
+                      flexShrink: 0 }}>
+                      <button
+                        className="btn-copy-small"
+                        onClick={(e) => { e.stopPropagation(); copyHash(h); }}
+                      >
+                        {copiedHash === h ? "✓" : "Copy"}
+                      </button>
                       <TypeBadge type={tx.__txType} />
                       <StatusBadge status={tx.status || tx.Status} />
                     </div>
                   </div>
 
-                  <div style={{ marginTop: 6, fontSize: 13 }}>
-                    <strong>From:</strong> {from.slice(0, 18)}… →{" "}
-                    <strong>To:</strong> {to.slice(0, 18)}…
+                  {/* address row */}
+                  <div style={{ marginTop: 8, fontSize: "0.78rem",
+                    color: "var(--text-secondary)", display: "flex",
+                    alignItems: "center", gap: 6 }}>
+                    <span style={{ color: "var(--text-muted)", fontSize: "0.7rem" }}>FROM</span>
+                    <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-link)" }}>
+                      {from.slice(0, 14)}…
+                    </span>
+                    <span style={{ color: "var(--text-muted)" }}>→</span>
+                    <span style={{ color: "var(--text-muted)", fontSize: "0.7rem" }}>TO</span>
+                    <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-link)" }}>
+                      {to.slice(0, 14)}…
+                    </span>
                   </div>
 
-                  <div style={{ marginTop: 6, fontSize: 12, color: "#555" }}>
-                    <span style={{ marginRight: 10 }}>
-                      <strong>Value:</strong> {formatLQD(tx.value || 0)}
+                  {/* value / gas row */}
+                  <div style={{ marginTop: 6, display: "flex", gap: 14,
+                    fontSize: "0.75rem", color: "var(--text-muted)", flexWrap: "wrap" }}>
+                    <span><span style={{ color: "var(--text-secondary)" }}>Value</span>{" "}
+                      <strong style={{ color: "var(--text-primary)" }}>{formatLQD(tx.value || 0)}</strong> LQD
                     </span>
-                    <span style={{ marginRight: 10 }}>
-                      <strong>Gas:</strong> {gas}
-                    </span>
-                    <span style={{ marginRight: 10 }}>
-                      <strong>GasPrice:</strong> {formatLQD(gasPrice)}
+                    <span><span style={{ color: "var(--text-secondary)" }}>Gas</span>{" "}
+                      <strong style={{ color: "var(--text-primary)" }}>{gas}</strong>
                     </span>
                     {!!fee && (
-                      <span>
-                        <strong>Fee:</strong> {formatLQD(fee)}
+                      <span><span style={{ color: "var(--text-secondary)" }}>Fee</span>{" "}
+                        <strong style={{ color: "var(--text-primary)" }}>{formatLQD(fee)}</strong>
                       </span>
                     )}
                   </div>
@@ -561,16 +509,13 @@ if (isBlockNumber(q)) {
         </div>
       </div>
 
-      {/* -------- Validators -------- */}
+      {/* ══════════ VALIDATORS ══════════ */}
       <div className="validators-section">
-        <h3>Validators</h3>
+        <h3>Active Validators</h3>
         {validators.length > 0 ? (
           <ValidatorList validators={validators} />
         ) : (
-          <div className="no-validators">
-            <p>No validators found.</p>
-            {/* <DebugComponent /> */}
-          </div>
+          <div className="no-validators">No validators found.</div>
         )}
       </div>
     </div>
