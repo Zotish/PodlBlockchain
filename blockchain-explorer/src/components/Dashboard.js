@@ -52,7 +52,7 @@ const Dashboard = () => {
       const stats = await fetchJSON("/network");
       setNetworkStats(firstNodeResult(stats));
 
-      const blocks = await fetchJSON("/fetch_last_n_block");
+      const blocks = await fetchJSON("/fetch_last_n_block?n=15");
       const mergedBlocks = mergeArrayResults(blocks, "block_number");
       const sortedBlocks = mergedBlocks.sort(
         (a, b) => (b.block_number ?? 0) - (a.block_number ?? 0)
