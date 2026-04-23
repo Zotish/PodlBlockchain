@@ -5,14 +5,12 @@ body {
     padding: 0;
     background-color: #f5f5f5;
     color: #333;
-    overflow-x: hidden;
   }
   
   .container {
     max-width: 1200px;
     margin: 0 auto;
     padding: 20px;
-    width: 100%;
   }
   
   /* Navbar */
@@ -22,8 +20,6 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
   }
   
   .navbar-brand a {
@@ -161,7 +157,6 @@ body {
     padding: 12px 15px;
     text-align: left;
     border-bottom: 1px solid #ddd;
-    overflow-wrap: anywhere;
   }
   
   th {
@@ -235,46 +230,18 @@ body {
   
   /* Responsive */
   @media (max-width: 768px) {
-    .container {
-      padding: 12px;
-    }
-
     .recent-data {
       grid-template-columns: 1fr;
     }
     
     .navbar {
-      padding: 14px 12px;
-      align-items: flex-start;
+      flex-direction: column;
+      gap: 10px;
     }
     
     .navbar-links {
       display: flex;
-      flex-wrap: wrap;
-      gap: 10px 14px;
-      width: 100%;
-    }
-
-    .navbar-links a {
-      margin-left: 0;
-      font-size: 0.95rem;
-    }
-
-    .network-stats,
-    .recent-blocks,
-    .recent-transactions,
-    .top-validators,
-    .block-page,
-    .transaction-page,
-    .validator-page,
-    .address-page {
-      padding: 14px;
-    }
-
-    th,
-    td {
-      padding: 10px 12px;
-      font-size: 0.85rem;
+      gap: 15px;
     }
   }
 
@@ -288,7 +255,6 @@ body {
   
   .detail-row {
     display: flex;
-    gap: 12px;
     padding: 10px 0;
     border-bottom: 1px solid #eee;
   }
@@ -371,24 +337,6 @@ body {
     align-items: center;
     gap: 10px;
     margin: 10px 0;
-  }
-
-  @media (max-width: 1024px) {
-    .container {
-      padding: 16px;
-    }
-
-    .detail-row {
-      flex-direction: column;
-      gap: 4px;
-    }
-
-    .table,
-    table {
-      display: block;
-      overflow-x: auto;
-      white-space: nowrap;
-    }
   }
   
   .validator-badge span {

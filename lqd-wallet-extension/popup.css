@@ -13,8 +13,8 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif; color: var(--text); font-size: 13px; min-width: 0; }
-.app { width: min(360px, 100vw); min-height: min(500px, 100vh); padding: 10px; }
+body { margin: 0; background: var(--bg); font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif; color: var(--text); font-size: 13px; }
+.app { width: 360px; min-height: 500px; padding: 10px; }
 
 /* ── Generic hidden utility ── */
 .hidden { display: none !important; }
@@ -170,39 +170,3 @@ input:focus { border-color: #818cf8; background: #fff; }
 .dropdown.hidden { display: none; }
 .dropdown-item { width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: none; cursor: pointer; font-size: 13px; }
 .dropdown-item:hover { background: #f8fafc; }
-
-@media (max-width: 420px) {
-  .app {
-    width: 100vw;
-    min-height: 100vh;
-    padding: 8px;
-  }
-
-  .topbar,
-  .account-row,
-  .net-row,
-  .row {
-    flex-wrap: wrap;
-  }
-
-  .row button,
-  .row input,
-  .top-actions,
-  .modal-card {
-    width: 100%;
-  }
-
-  .modal {
-    padding: 12px;
-  }
-
-  .modal-card {
-    max-width: 100%;
-  }
-
-  .dapp-card,
-  .token-row,
-  .activity-row {
-    align-items: flex-start;
-  }
-}

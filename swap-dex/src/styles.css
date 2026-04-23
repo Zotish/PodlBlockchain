@@ -54,17 +54,6 @@ body {
   backdrop-filter: blur(12px);
 }
 
-.header,
-.header-right,
-.brand,
-.page-header,
-.pool-header,
-.pool-actions,
-.settings-row-item,
-.validator-info-box .info-row {
-  flex-wrap: wrap;
-}
-
 .brand {
   display: flex;
   align-items: center;
@@ -223,7 +212,6 @@ body {
   justify-content: center;
   align-items: flex-start;
   padding: 32px 20px 64px;
-  width: 100%;
 }
 
 .page-wide {
@@ -464,7 +452,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 16px;
-  width: min(300px, calc(100vw - 32px));
+  width: 300px;
   z-index: 200;
   box-shadow: var(--shadow);
 }
@@ -945,72 +933,6 @@ code {
 
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 600px) {
-  .header {
-    padding: 12px 14px;
-    gap: 10px;
-  }
-
-  .brand-name {
-    font-size: 18px;
-  }
-
-  .page {
-    padding: 20px 12px 84px;
-  }
-
-  .page-wide,
-  .validate-panel {
-    max-width: 100%;
-  }
-
-  .page-header,
-  .pool-header,
-  .settings-row-item,
-  .validator-info-box .info-row {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .token-box {
-    margin: 0 0 12px;
-    padding: 14px;
-  }
-
-  .token-box-row,
-  .modal-import-row,
-  .pool-actions {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .token-select-btn,
-  .modal-import-row button,
-  .pool-btn {
-    width: 100%;
-    justify-content: center;
-  }
-
-  .token-balance,
-  .price-row {
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .settings-popover,
-  .modal-card,
-  .validate-card,
-  .settings-section,
-  .pool-card,
-  .liq-panel {
-    width: 100%;
-    max-width: 100%;
-  }
-
-  .pool-stats,
-  .form-grid {
-    grid-template-columns: 1fr;
-  }
-
   .header { padding: 12px 16px; }
   .nav-tabs { display: none; }
   .mobile-tabs {
