@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useState, useEffect } from 'react';
 import { BrowserProvider, Contract, parseUnits } from 'ethers';
 import { fetchJSON } from '../../utils/api';
 import { formatLQD } from './lqdUnits';
@@ -58,6 +58,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
   const [requests, setRequests] = useState([]);
   const [reqStatus, setReqStatus] = useState('');
   const [bridgeTokens, setBridgeTokens] = useState([]);
+  const [bridgeMode, setBridgeMode] = useState('public');
 
   const selectedToken = useMemo(() => {
     if (useCustomToken) {
@@ -91,20 +92,20 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
     }
   };
 
-  const loadRequests = async () => {
+  const loadRequests = useCallback(async () => {
     try {
-      const data = await fetchJSON('/bridge/requests');
+      const data = await fetchJSON(`/bridge/requests?mode=${encodeURIComponent(bridgeMode)}`);
       const list = Array.isArray(data) ? data : [];
       setRequests(list);
       setReqStatus('');
     } catch (err) {
       setReqStatus(err?.message || 'Failed to load bridge requests');
     }
-  };
+  }, [bridgeMode]);
 
   useEffect(() => {
     loadRequests();
-  }, []);
+  }, [loadRequests]);
   useEffect(() => {
     const loadBridgeTokens = async () => {
       try {
@@ -157,6 +158,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
       token,
       amount: rawAmount,
       to_lqd: toLqd || lqdAddress,
+      mode: bridgeMode,
     };
     try {
       const txdata = await fetchJSON('/wallet/bridge/bsc_lock_tx', {
@@ -210,6 +212,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
           from: bscAccount,
           to_lqd: toLqd || lqdAddress,
           amount: rawAmount,
+          mode: bridgeMode,
         }),
       });
       setLockStatus(`BSC lock submitted: ${txHash}`);
@@ -239,7 +242,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
       return;
     }
     try {
-      const res = await fetchJSON('/wallet/bridge/burn_lqd_token', {
+      const res = await fetchJSON(`/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}burn_lqd_token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -247,6 +250,7 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
           token: burnTokenAddr,
           amount: rawAmount,
           to_bsc: toBsc,
+          mode: bridgeMode,
         }),
       });
       const hash = res?.tx_hash || res?.TxHash || '';
@@ -272,6 +276,14 @@ const BridgePanel = ({ lqdAddress, lqdPrivateKey }) => {
   return (
     <div className="contract-section">
       <h3>Bridge (LQD ↔ BSC Testnet)</h3>
+      <div className="contract-card">
+        <h4>Bridge Mode</h4>
+        <div className="template-wrap">
+          <button className={bridgeMode === 'public' ? 'chip active' : 'chip'} onClick={() => setBridgeMode('public')}>Public</button>
+          <button className={bridgeMode === 'private' ? 'chip active' : 'chip'} onClick={() => setBridgeMode('private')}>Private</button>
+        </div>
+        <p>Current mode: <strong>{bridgeMode}</strong></p>
+      </div>
 
       <div className="contract-card">
         <h4>Connect BSC Wallet</h4>
