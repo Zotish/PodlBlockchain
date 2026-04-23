@@ -1,9 +1,9 @@
 "use strict";
 const ext = typeof chrome !== "undefined" ? chrome : browser;
-const PROD_CHAIN_URL = "https://podlblockchain-production-a9f1.up.railway.app";
+const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
 const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
 const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
-const PROD_EXPLORER_URL = "https://YOUR-EXPLORER-DOMAIN";
+const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
