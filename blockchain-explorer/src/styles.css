@@ -84,10 +84,13 @@
 /* ─── Reset & Base ───────────────────────────────────────────────────── */
 *, *::before, *::after {
   box-sizing: border-box;
+  min-width: 0;          /* prevents flex/grid children from overflowing */
 }
 
 html {
   scroll-behavior: smooth;
+  overflow-x: hidden;    /* no page-level horizontal scroll */
+  max-width: 100%;
 }
 
 body {
@@ -100,6 +103,8 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-size: 14px;
   line-height: 1.6;
+  overflow-x: hidden;    /* no page-level horizontal scroll */
+  max-width: 100%;
 }
 
 a {
@@ -121,12 +126,16 @@ code, pre, .monospace {
   text-align: left;
   min-height: 100vh;
   background: var(--bg-base);
+  overflow-x: hidden;
+  max-width: 100%;
 }
 
 .container {
   max-width: 1280px;
   margin: 0 auto;
   padding: 28px 24px;
+  overflow-x: hidden;
+  width: 100%;
 }
 
 /* ─── Navbar ─────────────────────────────────────────────────────────── */
@@ -635,6 +644,9 @@ tr:hover td {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: var(--space-5) var(--space-6);
+  overflow: hidden;          /* clip table overflow inside card */
+  min-width: 0;              /* prevent flex/grid item from growing beyond parent */
+  width: 100%;
 }
 
 .recent-blocks h3,

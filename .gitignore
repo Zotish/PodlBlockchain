@@ -27,6 +27,7 @@ node_modules/
 build/
 dist/
 .npm
+coverage/
 
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
@@ -40,3 +41,12 @@ __pycache__/
 # ── Go ────────────────────────────────────────────────────────────────────────
 vendor/
 bin/
+blockchain_node_bin
+lqd_server
+tps_benchmark
+
+# ── Local tool / app state ────────────────────────────────────────────────────
+.claude/
+**/.claude/
+.expo/
+**/.expo/
