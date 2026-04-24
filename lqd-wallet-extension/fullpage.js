@@ -542,8 +542,11 @@ $("quickDeployBtn").addEventListener("click", async () => {
       init_args: args   // name, symbol, supply etc. — passed to contract's Init()
     });
     const addr = res.address || res.contract_address || "";
+    if (!addr) {
+      throw new Error(`Deploy returned no contract address. Response: ${JSON.stringify(res)}`);
+    }
     showResult("quickDeployResult",
-      `✓ Deployed!\nAddress: ${addr}\nType: ${type}${args.length ? "\nArgs: " + args.join(", ") : ""}`);
+      `✓ Deployed!\nAddress: ${addr}\nType: ${type}${res.tx_hash ? "\nTx: " + res.tx_hash : ""}${args.length ? "\nArgs: " + args.join(", ") : ""}`);
     toast("Contract deployed: " + shortAddr(addr), "success");
     await recordLocalActivity({ type: "deploy", contract: addr, contractType: type, tx_hash: res.tx_hash || "" });
   } catch (e) {
@@ -800,8 +803,9 @@ $("deployCompiledBtn").addEventListener("click", async () => {
     if (!r.ok) throw new Error(data.error || "Deploy failed");
 
     const addr = data.address || "";
+    if (!addr) throw new Error(`Deploy returned no contract address. Response: ${JSON.stringify(data)}`);
     showResult("compileResult",
-      `✓ Contract Deployed!\nAddress: ${addr}\nType: ${_compiledType}`);
+      `✓ Contract Deployed!\nAddress: ${addr}\nType: ${_compiledType}${data.tx_hash ? "\nTx: " + data.tx_hash : ""}`);
     toast("🎉 Contract live: " + shortAddr(addr), "success");
     await recordLocalActivity({ type: "deploy", contract: addr, contractType: _compiledType, tx_hash: data.tx_hash || "" });
     $("compileDeploySection").style.display = "none";
