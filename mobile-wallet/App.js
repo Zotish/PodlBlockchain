@@ -24,6 +24,7 @@ import * as FileSystem from "expo-file-system";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import CryptoJS from "crypto-js";
 import QRCode from "react-native-qrcode-svg";
+import { WebView } from "react-native-webview";
 
 import {
   getJson,
@@ -78,6 +79,7 @@ const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
 const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
 const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
+const DEFAULT_BROWSER_URL = PROD_EXPLORER_URL;
 
 const DEFAULT_NETWORKS = [
   {
@@ -134,12 +136,16 @@ const BUILTIN_TEMPLATES = [
 const TABS = [
   { id: "home", label: "Home", icon: "⌂" },
   { id: "tokens", label: "Tokens", icon: "◫" },
-  { id: "contracts", label: "Contracts", icon: "⌘" },
-  { id: "bridge", label: "Bridge", icon: "◉" },
-  { id: "approvals", label: "Approvals", icon: "✓" },
+  { id: "browser", label: "Browser", icon: "◌" },
   { id: "activity", label: "Activity", icon: "▤" },
-  { id: "networks", label: "Networks", icon: "◌" },
   { id: "settings", label: "Settings", icon: "⚙" },
+];
+
+const ADVANCED_TABS = [
+  { id: "contracts", label: "Contracts" },
+  { id: "bridge", label: "Bridge" },
+  { id: "approvals", label: "Approvals" },
+  { id: "networks", label: "Networks" },
 ];
 
 const EMPTY_VAULT = {
@@ -178,6 +184,13 @@ function decryptVault(cipher, password) {
     throw new Error("Wrong password or damaged vault");
   }
   return JSON.parse(raw);
+}
+
+function coerceBrowserUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return DEFAULT_BROWSER_URL;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw}`;
 }
 
 function Card({ title, subtitle, children, style }) {
@@ -474,6 +487,11 @@ function App() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [biometricEnabled, setBiometricEnabled] = useState(true);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [browserInput, setBrowserInput] = useState(DEFAULT_BROWSER_URL);
+  const [browserUrl, setBrowserUrl] = useState(DEFAULT_BROWSER_URL);
+  const [browserLoading, setBrowserLoading] = useState(false);
+  const [browserCanGoBack, setBrowserCanGoBack] = useState(false);
+  const [browserCanGoForward, setBrowserCanGoForward] = useState(false);
 
   const nodeUrl = useMemo(() => {
     const current = networks.find((item) => item.id === activeNetworkId) || networks[0] || DEFAULT_NETWORKS[0];
@@ -504,6 +522,7 @@ function App() {
 
   const unlockInProgress = useRef(false);
   const scanHandlerRef = useRef(() => {});
+  const browserRef = useRef(null);
 
   useEffect(() => {
     let alive = true;
@@ -921,6 +940,13 @@ function App() {
         }
       }
     }
+  }
+
+  function openBrowserTarget(value) {
+    const next = coerceBrowserUrl(value);
+    setBrowserInput(next);
+    setBrowserUrl(next);
+    setTab("browser");
   }
 
   function rejectRequest(item) {
@@ -1853,7 +1879,7 @@ function App() {
             <Pressable style={styles.walletPill} onPress={() => scanWithCamera("native")}>
               <Text style={styles.walletPillText}>Scan</Text>
             </Pressable>
-            <View style={styles.walletPill}>
+            <View style={[styles.walletPill, styles.walletPillState]}>
               <Text style={styles.walletPillText}>{walletVisible ? "Unlocked" : "Locked"}</Text>
             </View>
           </View>
@@ -1862,12 +1888,21 @@ function App() {
         <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.mainScroll}>
           <View style={styles.summaryGrid}>
             <Stat label="Native Balance" value={formatUnits(nativeBalance, 8, 6)} subvalue="LQD" />
-            <Stat label="Factory" value={factoryAddress ? shortAddress(factoryAddress) : "Unset"} subvalue="Canonical DEX" />
+            <Stat label="Network" value={currentNetwork.symbol || "LQD"} subvalue={currentNetwork.name} />
             <Stat label="Token Count" value={String(currentTokens.length)} subvalue="Watchlist" />
           </View>
 
           {tab === "home" && (
             <View style={styles.sectionGap}>
+              <Card title="Quick actions" subtitle="Core wallet actions only. DEX sites can be opened from the Browser tab.">
+                <View style={styles.actionGrid}>
+                  <Button label="Send" onPress={() => setTab("home")} />
+                  <Button label="Receive" onPress={() => setReceiveVisible(true)} secondary />
+                  <Button label="Open Browser" onPress={() => setTab("browser")} secondary />
+                  <Button label="Activity" onPress={() => setTab("activity")} secondary />
+                </View>
+              </Card>
+
               <Card title="Send LQD" subtitle="Native coin transfer from your wallet.">
                 <Field label="To" value={sendForm.to} onChangeText={(v) => setSendForm((p) => ({ ...p, to: v }))} placeholder="0x..." />
                 <Field label="Amount" value={sendForm.amount} onChangeText={(v) => setSendForm((p) => ({ ...p, amount: v }))} keyboardType="decimal-pad" placeholder="0.0" />
@@ -1886,11 +1921,6 @@ function App() {
                   <Button label="Refresh" onPress={refreshNativeOnly} compact secondary />
                   <Button label="Lock" onPress={lockWalletAction} compact danger />
                 </View>
-              </Card>
-
-              <Card title="Quick Contract" subtitle="Inspect or call contracts without switching tabs.">
-                <Button label="Go to Contracts" onPress={() => setTab("contracts")} />
-                <Button label="Deploy Factory if Missing" onPress={deployFreshFactoryIfMissing} secondary />
               </Card>
             </View>
           )}
@@ -1982,6 +2012,56 @@ function App() {
                 <Text style={styles.inspectBox}>{inspectData.abi ? JSON.stringify(inspectData.abi, null, 2) : "No ABI loaded yet."}</Text>
                 <Text style={styles.inspectTitle}>Storage</Text>
                 <Text style={styles.inspectBox}>{inspectData.storage ? JSON.stringify(inspectData.storage, null, 2) : "No storage loaded yet."}</Text>
+              </Card>
+            </View>
+          )}
+
+          {tab === "browser" && (
+            <View style={styles.sectionGap}>
+              <Card title="Wallet Browser" subtitle="Paste any trusted DEX or dApp link here.">
+                <Field
+                  label="Website URL"
+                  value={browserInput}
+                  onChangeText={setBrowserInput}
+                  placeholder="https://example-dapp.com"
+                  autoCapitalize="none"
+                />
+                <View style={styles.inlineButtons}>
+                  <Button label="Go" onPress={() => openBrowserTarget(browserInput)} compact />
+                  <Button label="Paste Link" onPress={() => pasteClipboardTo((value) => setBrowserInput(coerceBrowserUrl(value)))} compact secondary />
+                  <Button label="Home" onPress={() => openBrowserTarget(DEFAULT_BROWSER_URL)} compact secondary />
+                </View>
+                <View style={styles.browserSurface}>
+                  <View style={styles.browserToolbar}>
+                    <Button label="←" onPress={() => browserRef.current?.goBack()} compact secondary disabled={!browserCanGoBack} />
+                    <Button label="→" onPress={() => browserRef.current?.goForward()} compact secondary disabled={!browserCanGoForward} />
+                    <Button label="Reload" onPress={() => browserRef.current?.reload()} compact secondary />
+                    <Button label="Open External" onPress={() => Linking.openURL(browserUrl)} compact secondary />
+                  </View>
+                  {browserLoading ? <Text style={styles.browserHint}>Loading…</Text> : null}
+                  <WebView
+                    ref={browserRef}
+                    source={{ uri: browserUrl }}
+                    style={styles.browserFrame}
+                    onLoadStart={() => setBrowserLoading(true)}
+                    onLoadEnd={() => setBrowserLoading(false)}
+                    onNavigationStateChange={(navState) => {
+                      setBrowserCanGoBack(navState.canGoBack);
+                      setBrowserCanGoForward(navState.canGoForward);
+                      if (navState.url) {
+                        setBrowserUrl(navState.url);
+                        setBrowserInput(navState.url);
+                      }
+                    }}
+                    setSupportMultipleWindows={false}
+                    javaScriptEnabled
+                    domStorageEnabled
+                    startInLoadingState
+                  />
+                </View>
+                <Text style={styles.helperText}>
+                  DEX is treated as an external site. Open it here and interact from inside the wallet browser.
+                </Text>
               </Card>
             </View>
           )}
@@ -2381,13 +2461,15 @@ function App() {
                 <Text style={styles.helperText}>The vault itself is encrypted with your password. Backup exports include the encrypted vault, networks, watchlist and settings only.</Text>
               </Card>
 
-              <Card title="Canonical factory" subtitle="Shared DEX factory address for the current chain.">
-                <Text style={styles.largeCode}>{factoryAddress || "No factory deployed yet"}</Text>
-                <Button label="Refresh Factory" onPress={refreshFactory} secondary />
-              </Card>
-
-              <Card title="Pending approvals" subtitle="MetaMask-style approval inbox placeholder for future dApp connections.">
-                {!pendingApprovals.length ? <Text style={styles.helperText}>No pending approvals right now. Open the Approvals tab for dApp connect requests.</Text> : null}
+              <Card title="Advanced tools" subtitle="Keep heavy developer tools out of the main wallet navigation.">
+                <View style={styles.templateWrap}>
+                  {ADVANCED_TABS.map((item) => (
+                    <Chip key={item.id} label={item.label} active={tab === item.id} onPress={() => setTab(item.id)} />
+                  ))}
+                </View>
+                <Text style={styles.helperText}>
+                  Contracts, bridge and dApp approval tools are still available here, but the main wallet stays focused on balance, tokens and browser.
+                </Text>
               </Card>
             </View>
           )}
@@ -2435,6 +2517,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
     alignItems: "center",
+    flexWrap: "wrap",
   },
   topBar: {
     paddingHorizontal: 18,
@@ -2461,6 +2544,10 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingVertical: 8,
     paddingHorizontal: 12,
+  },
+  walletPillState: {
+    backgroundColor: "#18252e",
+    borderColor: "#24413d",
   },
   walletPillText: {
     color: "#91f7bf",
@@ -2500,6 +2587,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
     flexWrap: "wrap",
+  },
+  actionGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
   },
   stat: {
     flexGrow: 1,
@@ -2644,7 +2736,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   navItem: {
-    width: 96,
+    width: 104,
     alignItems: "center",
     justifyContent: "center",
     paddingVertical: 10,
@@ -2746,6 +2838,31 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
+  },
+  browserSurface: {
+    backgroundColor: "#0f1428",
+    borderColor: "#273152",
+    borderWidth: 1,
+    borderRadius: 18,
+    overflow: "hidden",
+  },
+  browserToolbar: {
+    flexDirection: "row",
+    gap: 8,
+    padding: 12,
+    borderBottomColor: "#273152",
+    borderBottomWidth: 1,
+    flexWrap: "wrap",
+  },
+  browserFrame: {
+    height: 520,
+    backgroundColor: "#ffffff",
+  },
+  browserHint: {
+    color: "#9aa5ca",
+    fontSize: 12,
+    paddingHorizontal: 12,
+    paddingTop: 8,
   },
   rowCard: {
     backgroundColor: "#10162c",
