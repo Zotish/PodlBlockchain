@@ -3152,50 +3152,10 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 		req.Gas = 500000
 	}
 
-	// Read builtin source from project contract/ directory
 	projectRoot := findProjectRoot()
-	srcFile := filepath.Join(projectRoot, "contract", req.Template+".go")
-	srcBytes, err := os.ReadFile(srcFile)
+	soBytes, err := loadBuiltinPluginBytes(projectRoot, req.Template)
 	if err != nil {
-		http.Error(w, `{"error":"builtin source not found: `+req.Template+`"}`, 500)
-		return
-	}
-	// Strip build constraints so the file compiles as a plugin
-	source := string(srcBytes)
-	source = strings.Replace(source, "//go:build ignore\n", "", 1)
-	source = strings.Replace(source, "// +build ignore\n", "", 1)
-
-	// Compile plugin from WITHIN the root module (no separate go.mod) so all
-	// shared packages have identical build IDs to the running host binary.
-	// Each deploy gets a unique sub-directory under _plugin_builds/ — no go.mod
-	// there means Go inherits the root module's go.mod automatically.
-	buildsDir := filepath.Join(projectRoot, "_plugin_builds")
-	_ = os.MkdirAll(buildsDir, 0755)
-	tmpDir, err := os.MkdirTemp(buildsDir, "builtin_*")
-	if err != nil {
-		http.Error(w, `{"error":"failed to create build dir"}`, 500)
-		return
-	}
-	defer os.RemoveAll(tmpDir)
-
-	if err := os.WriteFile(filepath.Join(tmpDir, "contract.go"), []byte(source), 0644); err != nil {
-		http.Error(w, `{"error":"failed to write source"}`, 500)
-		return
-	}
-
-	// Relative package path from project root → picks up root go.mod
-	relPkg := "./" + strings.TrimPrefix(filepath.ToSlash(tmpDir), filepath.ToSlash(projectRoot)+"/")
-	outPath := filepath.Join(tmpDir, "contract.so")
-	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, relPkg)
-	cmd.Dir = projectRoot
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"error": "compile failed: " + string(out)})
-		return
-	}
-	soBytes, err := os.ReadFile(outPath)
-	if err != nil {
-		http.Error(w, `{"error":"failed to read plugin"}`, 500)
+		json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
 		return
 	}
 	// Deploy ─────────────────────────────────────────────────────────────────
@@ -3274,7 +3234,7 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 
 	// For dex_factory: auto-compile dex_pair template and call factory.Init(pairPluginPath)
 	if req.Template == "dex_factory" {
-		pairPluginPath, pairCompileErr := b.compilePairTemplate(projectRoot, buildsDir)
+		pairPluginPath, pairCompileErr := b.compilePairTemplate(projectRoot)
 		if pairCompileErr != nil {
 			log.Printf("deploy-builtin: dex_pair compile failed (non-fatal): %v", pairCompileErr)
 		} else {
@@ -3348,9 +3308,68 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func prebuiltBuiltinPluginPath(projectRoot, template string) string {
+	return filepath.Join(projectRoot, "bin", "builtins", template+".so")
+}
+
+func loadBuiltinPluginBytes(projectRoot, template string) ([]byte, error) {
+	prebuiltPath := prebuiltBuiltinPluginPath(projectRoot, template)
+	if soBytes, err := os.ReadFile(prebuiltPath); err == nil && len(soBytes) > 0 {
+		return soBytes, nil
+	}
+	return compileBuiltinTemplate(projectRoot, template)
+}
+
+func compileBuiltinTemplate(projectRoot, template string) ([]byte, error) {
+	srcFile := filepath.Join(projectRoot, "contract", template+".go")
+	srcBytes, err := os.ReadFile(srcFile)
+	if err != nil {
+		return nil, fmt.Errorf("builtin source not found: %s", template)
+	}
+	source := string(srcBytes)
+	source = strings.Replace(source, "//go:build ignore\n", "", 1)
+	source = strings.Replace(source, "// +build ignore\n", "", 1)
+
+	buildsDir := filepath.Join(projectRoot, "_plugin_builds")
+	if err := os.MkdirAll(buildsDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create build dir: %v", err)
+	}
+	tmpDir, err := os.MkdirTemp(buildsDir, "builtin_*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create build dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "contract.go"), []byte(source), 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write source: %v", err)
+	}
+
+	relPkg := "./" + strings.TrimPrefix(filepath.ToSlash(tmpDir), filepath.ToSlash(projectRoot)+"/")
+	outPath := filepath.Join(tmpDir, "contract.so")
+	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, relPkg)
+	cmd.Dir = projectRoot
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("compile failed: %s", msg)
+	}
+	soBytes, err := os.ReadFile(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read plugin: %v", err)
+	}
+	return soBytes, nil
+}
+
 // compilePairTemplate compiles the dex_pair template plugin and returns the .so path.
 // Called when deploying a dex_factory so the factory knows where to find pair plugin code.
-func (b *BlockchainServer) compilePairTemplate(projectRoot, buildsDir string) (string, error) {
+func (b *BlockchainServer) compilePairTemplate(projectRoot string) (string, error) {
+	prebuiltPath := prebuiltBuiltinPluginPath(projectRoot, "dex_pair")
+	if _, err := os.Stat(prebuiltPath); err == nil {
+		return prebuiltPath, nil
+	}
 	// Strategy: build the pair plugin from WITHIN the root module so that all
 	// shared packages (ConstantSet, BlockchainComponent, …) compile with
 	// IDENTICAL build IDs as the host binary.
