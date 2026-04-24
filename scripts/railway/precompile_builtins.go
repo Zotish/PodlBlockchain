@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+// Precompile only the builtin templates that are actively exposed in the
+// wallet quick-deploy UX or required by those flows (dex_factory -> dex_pair).
+// Custom source compilation still uses /contract/compile-plugin at runtime,
+// and direct .so upload deploy remains unchanged.
 var builtinTemplates = []string{
 	"bridge_token",
 	"dao_treasury",
@@ -17,7 +21,6 @@ var builtinTemplates = []string{
 	"lending_pool",
 	"lqd20",
 	"nft_collection",
-	"wlqd",
 }
 
 func main() {
