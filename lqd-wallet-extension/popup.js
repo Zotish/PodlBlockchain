@@ -1,4 +1,7 @@
 const ext = typeof chrome !== "undefined" ? chrome : browser;
+const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
+const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
+const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
 
 // ── Screens & DOM refs ────────────────────────────────────────────────────────
 const screens = {
@@ -79,11 +82,31 @@ function parseAmount(human, decimals = 8) {
 
 async function getNodeUrl() {
   const data = await ext.storage.local.get(["nodeUrl"]);
-  let url = (data.nodeUrl || "http://127.0.0.1:6500").replace(/\/$/, "");
+  let url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
   // Auto-migrate: port 5000 (macOS conflict) or 9000 (aggregator wrong format) → 6500
-  if (url.includes(":5000") || url.includes(":9000")) {
-    url = "http://127.0.0.1:6500";
+  if (
+    url.includes(":5000") ||
+    url.includes(":6500") ||
+    url.includes(":9000") ||
+    url.includes("127.0.0.1") ||
+    url.includes("localhost")
+  ) {
+    url = PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: url });
+  }
+  return url;
+}
+
+async function getWalletUrl() {
+  const data = await ext.storage.local.get(["walletUrl"]);
+  let url = (data.walletUrl || PROD_WALLET_URL).replace(/\/$/, "");
+  if (
+    url.includes(":8080") ||
+    url.includes("127.0.0.1") ||
+    url.includes("localhost")
+  ) {
+    url = PROD_WALLET_URL;
+    await ext.storage.local.set({ walletUrl: url });
   }
   return url;
 }
@@ -127,7 +150,7 @@ async function refreshBalance() {
   const data = await ext.storage.local.get(["address", "nodeUrl"]);
   if (!data.address) return;
   try {
-    const url = (data.nodeUrl || "http://127.0.0.1:6500").replace(/\/$/, "");
+    const url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
     const res = await fetch(`${url}/balance?address=${encodeURIComponent(data.address)}`);
     const json = await res.json();
     const raw = json.balance || json.Balance || "0";
@@ -243,7 +266,7 @@ on("addNetworkBtn", "click", () => {
   const name = document.getElementById("netName")?.value.trim();
   const chainId = document.getElementById("netChainId")?.value.trim();
   const nodeUrl = document.getElementById("netNodeUrl")?.value.trim();
-  const walletUrl = document.getElementById("netWalletUrl")?.value.trim() || "http://127.0.0.1:8080";
+  const walletUrl = document.getElementById("netWalletUrl")?.value.trim() || PROD_WALLET_URL;
   const symbol = document.getElementById("netSymbol")?.value.trim() || "LQD";
   const statusEl = document.getElementById("addNetworkStatus");
 
@@ -270,8 +293,8 @@ async function load() {
   const data = await ext.storage.local.get(["address", "nodeUrl", "walletUrl", "tokenWatchlist", "locked", "txActivity"]);
   const nodeUrlEl = document.getElementById("nodeUrl");
   const walletUrlEl = document.getElementById("walletUrl");
-  if (nodeUrlEl) nodeUrlEl.value = data.nodeUrl || "http://127.0.0.1:6500";
-  if (walletUrlEl) walletUrlEl.value = data.walletUrl || "http://127.0.0.1:8080";
+  if (nodeUrlEl) nodeUrlEl.value = data.nodeUrl || PROD_CHAIN_URL;
+  if (walletUrlEl) walletUrlEl.value = data.walletUrl || PROD_WALLET_URL;
 
   if (data.address) {
     const locked = data.locked !== false;
@@ -317,8 +340,7 @@ on("createBtn", "click", async () => {
   if (pass !== pass2) { if (out) out.textContent = "Passwords do not match"; return; }
   if (out) out.textContent = "Creating…";
 
-  const data = await ext.storage.local.get(["walletUrl"]);
-  const walletServer = (data.walletUrl || "http://127.0.0.1:8080").replace(/\/$/, "");
+  const walletServer = await getWalletUrl();
   try {
     const res = await fetch(`${walletServer}/wallet/new`, {
       method: "POST",
@@ -423,13 +445,13 @@ on("presetLocal5000", "click", () => {
   const n = document.getElementById("nodeUrl");
   const w = document.getElementById("walletUrl");
   if (n) n.value = "http://127.0.0.1:6500";
-  if (w) w.value = "http://127.0.0.1:8080";
+  if (w) w.value = PROD_WALLET_URL;
 });
 on("presetLocal9000", "click", () => {
   const n = document.getElementById("nodeUrl");
   const w = document.getElementById("walletUrl");
   if (n) n.value = "http://127.0.0.1:9000";
-  if (w) w.value = "http://127.0.0.1:8080";
+  if (w) w.value = PROD_WALLET_URL;
 });
 
 on("revealKey", "click", () => {
@@ -507,7 +529,7 @@ on("openSend", "click", async () => {
   // Fetch fresh balance and show it
   const data = await ext.storage.local.get(["address", "nodeUrl"]);
   if (data.address) {
-    const url = (data.nodeUrl || "http://127.0.0.1:6500").replace(/\/$/, "");
+    const url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
     try {
       const res = await fetch(`${url}/balance?address=${encodeURIComponent(data.address)}`);
       const json = await res.json();
@@ -677,7 +699,7 @@ on("tabDapps",    "click", () => { switchTab({ tab: "tabDapps", pane: "dappsPane
 
 // ── Tokens ────────────────────────────────────────────────────────────────────
 async function fetchTokenMeta(contractAddr, nodeUrl) {
-  const base = (nodeUrl || "http://127.0.0.1:6500").replace(/\/$/, "");
+  const base = (nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
   const call = async (fn) => {
     try {
       const res = await fetch(`${base}/contract/call`, {
@@ -702,7 +724,7 @@ async function fetchTokenMeta(contractAddr, nodeUrl) {
 }
 
 async function fetchTokenBalance(contractAddr, walletAddr, nodeUrl) {
-  const base = (nodeUrl || "http://127.0.0.1:6500").replace(/\/$/, "");
+  const base = (nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
   const call = async (fn) => {
     try {
       const res = await fetch(`${base}/contract/call`, {
@@ -731,7 +753,7 @@ async function renderTokens(watchlist) {
 
   const data = await ext.storage.local.get(["address", "nodeUrl"]);
   const addr = data.address;
-  const nodeUrl = data.nodeUrl || "http://127.0.0.1:6500";
+  const nodeUrl = data.nodeUrl || PROD_CHAIN_URL;
 
   container.innerHTML = "";
   for (const token of watchlist) {

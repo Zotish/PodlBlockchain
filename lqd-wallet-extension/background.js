@@ -146,6 +146,15 @@ async function loadConfig() {
     session.nodeUrl = PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: session.nodeUrl });
   }
+  if (
+    session.walletUrl &&
+    (session.walletUrl.includes(":8080") ||
+      session.walletUrl.includes("127.0.0.1") ||
+      session.walletUrl.includes("localhost"))
+  ) {
+    session.walletUrl = PROD_WALLET_URL;
+    await ext.storage.local.set({ walletUrl: session.walletUrl });
+  }
   const data = await ext.storage.local.get(["address"]);
   if (data.address) session.address = data.address;
 }
