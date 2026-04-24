@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
+  Keyboard,
   Linking,
   KeyboardAvoidingView,
   Modal,
@@ -658,7 +659,11 @@ function App() {
     const record = { address: vault.address, cipher, createdAt: Date.now() };
     await saveJSON(STORAGE_KEYS.vault, record);
     if (biometricEnabled) {
-      await saveString(STORAGE_KEYS.biometricVault, JSON.stringify(vault), { requireAuthentication: true });
+      try {
+        await saveString(STORAGE_KEYS.biometricVault, JSON.stringify(vault), { requireAuthentication: true });
+      } catch {
+        // Do not block wallet creation if biometric-secured storage is unavailable on a device.
+      }
     } else {
       await removeItem(STORAGE_KEYS.biometricVault);
     }
@@ -994,8 +999,10 @@ function App() {
     const password = createForm.password.trim();
     if (!password || password !== createForm.confirm.trim()) {
       setStatus("Passwords do not match");
+      Alert.alert("Create wallet failed", "Passwords do not match.");
       return;
     }
+    Keyboard.dismiss();
     setBusy(true);
     try {
       const res = await walletCreate(walletUrl, password);
@@ -1008,10 +1015,14 @@ function App() {
       setWallet(vault);
       setWalletVisible(true);
       setShowMnemonic(true);
+      setCreateForm(initialCreateForm);
       setStatus(`Created wallet ${shortAddress(vault.address)}`);
+      Alert.alert("Wallet created", `Address: ${vault.address}`);
       await refreshWalletSnapshot();
     } catch (e) {
-      setStatus(e.message || "Failed to create wallet");
+      const message = e.message || "Failed to create wallet";
+      setStatus(message);
+      Alert.alert("Create wallet failed", message);
     } finally {
       setBusy(false);
     }
@@ -1022,8 +1033,10 @@ function App() {
     const password = importMnemonicForm.password.trim();
     if (!mnemonic || !password) {
       setStatus("Fill mnemonic and password");
+      Alert.alert("Import failed", "Fill mnemonic and password.");
       return;
     }
+    Keyboard.dismiss();
     setBusy(true);
     try {
       const res = await walletImportMnemonic(walletUrl, mnemonic, password);
@@ -1036,10 +1049,14 @@ function App() {
       setWallet(vault);
       setWalletVisible(true);
       setShowMnemonic(true);
+      setImportMnemonicForm(initialImportMnemonicForm);
       setStatus(`Imported wallet ${shortAddress(vault.address)}`);
+      Alert.alert("Wallet imported", `Address: ${vault.address}`);
       await refreshWalletSnapshot();
     } catch (e) {
-      setStatus(e.message || "Failed to import mnemonic");
+      const message = e.message || "Failed to import mnemonic";
+      setStatus(message);
+      Alert.alert("Import failed", message);
     } finally {
       setBusy(false);
     }
@@ -1050,8 +1067,10 @@ function App() {
     const password = importPkForm.password.trim();
     if (!privateKey || !password) {
       setStatus("Fill private key and password");
+      Alert.alert("Import failed", "Fill private key and password.");
       return;
     }
+    Keyboard.dismiss();
     setBusy(true);
     try {
       const res = await walletImportPrivateKey(walletUrl, privateKey);
@@ -1063,10 +1082,14 @@ function App() {
       await persistWalletVault(vault, password);
       setWallet(vault);
       setWalletVisible(true);
+      setImportPkForm(initialImportPkForm);
       setStatus(`Imported private key wallet ${shortAddress(vault.address)}`);
+      Alert.alert("Wallet imported", `Address: ${vault.address}`);
       await refreshWalletSnapshot();
     } catch (e) {
-      setStatus(e.message || "Failed to import private key");
+      const message = e.message || "Failed to import private key";
+      setStatus(message);
+      Alert.alert("Import failed", message);
     } finally {
       setBusy(false);
     }
