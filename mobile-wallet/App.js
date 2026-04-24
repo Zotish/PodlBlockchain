@@ -2476,11 +2476,11 @@ function App() {
 
           <Text style={styles.statusText}>{status}</Text>
         </ScrollView>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bottomNav}>
+        <View style={styles.bottomNav}>
           {TABS.map((item) => (
             <NavItem key={item.id} icon={item.icon} label={item.label} active={tab === item.id} onPress={() => setTab(item.id)} />
           ))}
-        </ScrollView>
+        </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -2521,21 +2521,21 @@ const styles = StyleSheet.create({
   },
   topBar: {
     paddingHorizontal: 18,
-    paddingTop: 12,
-    paddingBottom: 10,
+    paddingTop: 10,
+    paddingBottom: 8,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 12,
   },
   topTitle: {
     color: "#f4f7ff",
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "800",
   },
   topSub: {
     color: "#a5afcf",
-    fontSize: 13,
-    marginTop: 3,
+    fontSize: 12,
+    marginTop: 2,
   },
   walletPill: {
     backgroundColor: "#16203a",
@@ -2555,7 +2555,7 @@ const styles = StyleSheet.create({
   },
   mainScroll: {
     padding: 16,
-    paddingBottom: 126,
+    paddingBottom: 28,
   },
   tabRow: {
     flexDirection: "row",
@@ -2622,15 +2622,15 @@ const styles = StyleSheet.create({
   },
   sectionGap: {
     gap: 12,
-    marginTop: 14,
+    marginTop: 12,
   },
   card: {
     backgroundColor: "#151b31",
     borderColor: "#273152",
     borderWidth: 1,
     borderRadius: 22,
-    padding: 16,
-    gap: 12,
+    padding: 15,
+    gap: 10,
   },
   cardHeader: {
     marginBottom: 2,
@@ -2726,21 +2726,23 @@ const styles = StyleSheet.create({
   },
   bottomNav: {
     flexDirection: "row",
-    gap: 6,
-    paddingHorizontal: 10,
+    gap: 8,
+    paddingHorizontal: 12,
     paddingTop: 10,
-    paddingBottom: 12,
+    paddingBottom: 14,
     borderTopWidth: 1,
     borderTopColor: "#242d4e",
     backgroundColor: "#0b1020",
     alignItems: "center",
+    justifyContent: "space-between",
   },
   navItem: {
-    width: 104,
+    flex: 1,
+    minWidth: 0,
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 10,
-    paddingHorizontal: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 6,
     borderRadius: 16,
     backgroundColor: "#11182e",
     borderWidth: 1,
@@ -2752,7 +2754,7 @@ const styles = StyleSheet.create({
   },
   navIcon: {
     color: "#7f8bb6",
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "800",
     marginBottom: 3,
   },
@@ -2761,7 +2763,7 @@ const styles = StyleSheet.create({
   },
   navLabel: {
     color: "#9aa5ca",
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: "700",
     textAlign: "center",
   },
