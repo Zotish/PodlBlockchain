@@ -2797,6 +2797,7 @@ func (b *BlockchainServer) CurrentDEXFactory(w http.ResponseWriter, r *http.Requ
 		timestamp int64
 	}
 	best := candidate{}
+	currentFingerprint, _ := blockchaincomponent.CurrentPluginRuntimeFingerprint()
 
 	for _, addr := range addrs {
 		rec, err := b.BlockchainPtr.ContractEngine.Registry.LoadContract(addr)
@@ -2822,6 +2823,9 @@ func (b *BlockchainServer) CurrentDEXFactory(w http.ResponseWriter, r *http.Requ
 			}
 		}
 		if !isFactory {
+			continue
+		}
+		if meta.RuntimeFingerprint != "" && currentFingerprint != "" && meta.RuntimeFingerprint != currentFingerprint {
 			continue
 		}
 		if meta.Timestamp >= best.timestamp {
@@ -3076,7 +3080,15 @@ func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Reques
 	// Run: go build -buildmode=plugin -o contract.so <relPkg>
 	relPkg := "./" + strings.TrimPrefix(filepath.ToSlash(tmpDir), filepath.ToSlash(projectRoot)+"/")
 	outPath := filepath.Join(tmpDir, "contract.so")
-	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, relPkg)
+	goBinary, goErr := findGoCompiler()
+	if goErr != nil {
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   goErr.Error(),
+		})
+		return
+	}
+	cmd := exec.Command(goBinary, "build", "-buildmode=plugin", "-o", outPath, relPkg)
 	cmd.Dir = projectRoot
 	cacheRoot := strings.TrimSpace(os.Getenv("LQD_GO_CACHE_ROOT"))
 	if cacheRoot == "" {
@@ -3125,6 +3137,24 @@ func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Reques
 		"binary":  encoded,
 		"size":    len(soBytes),
 	})
+}
+
+func findGoCompiler() (string, error) {
+	if goBinary, err := exec.LookPath("go"); err == nil {
+		return goBinary, nil
+	}
+	candidates := []string{
+		"/mise/installs/go/1.24.2/bin/go",
+		"/mise/shims/go",
+		"/usr/local/go/bin/go",
+		"/usr/bin/go",
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("go compiler not found in PATH or known Railway runtime paths")
 }
 
 // DeployBuiltin compiles and deploys a named builtin contract template.
