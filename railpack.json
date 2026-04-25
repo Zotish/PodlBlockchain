@@ -9,14 +9,12 @@
       {
         "step": "packages:mise",
         "include": [
-          "/mise/bin",
           "/mise/shims",
           "/mise/installs"
         ]
       }
     ],
     "paths": [
-      "/mise/bin",
       "/mise/shims",
       "/mise/installs/go/1.24.2/bin"
     ]
