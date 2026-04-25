@@ -131,11 +131,12 @@ export async function nodeDeployContract(nodeUrl, formData) {
   return requestJson(`${normalizeUrl(nodeUrl)}/contract/deploy`, {
     method: "POST",
     body: formData,
+    timeoutMs: 180000,
   });
 }
 
 export async function nodeCompilePlugin(nodeUrl, source) {
-  return postJson(`${normalizeUrl(nodeUrl)}/contract/compile-go-plugin`, { source });
+  return postJson(`${normalizeUrl(nodeUrl)}/contract/compile-plugin`, { source }, { timeoutMs: 180000 });
 }
 
 export async function nodeContractAbi(nodeUrl, address) {

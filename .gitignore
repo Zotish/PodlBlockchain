@@ -41,6 +41,7 @@ __pycache__/
 # ── Go ────────────────────────────────────────────────────────────────────────
 vendor/
 bin/
+.lqd-go-cache/
 blockchain_node_bin
 lqd_server
 tps_benchmark

@@ -693,14 +693,16 @@ type PluginContract struct {
 }
 
 type PluginVM struct {
-	plugins map[string]*PluginContract
-	byPath  map[string]*PluginContract
+	plugins  map[string]*PluginContract
+	byPath   map[string]*PluginContract
+	byDigest map[string]*PluginContract
 }
 
 func NewPluginVM() *PluginVM {
 	return &PluginVM{
-		plugins: make(map[string]*PluginContract),
-		byPath:  make(map[string]*PluginContract),
+		plugins:  make(map[string]*PluginContract),
+		byPath:   make(map[string]*PluginContract),
+		byDigest: make(map[string]*PluginContract),
 	}
 }
 
@@ -713,22 +715,32 @@ func (p *PluginVM) LoadPlugin(addr, path string) error {
 		p.plugins[addr] = existing
 		return nil
 	}
+	digest := ""
+	if soBytes, err := os.ReadFile(path); err == nil {
+		sum := sha256.Sum256(soBytes)
+		digest = hex.EncodeToString(sum[:])
+		if existing := p.byDigest[digest]; existing != nil {
+			p.plugins[addr] = existing
+			p.byPath[path] = existing
+			return nil
+		}
+	}
 
 	pl, err := plugin.Open(path)
 	if err != nil {
-		// Go plugins can only be loaded once per process
 		if strings.Contains(err.Error(), "plugin already loaded") {
 			if existing := p.byPath[path]; existing != nil {
 				p.plugins[addr] = existing
 				return nil
 			}
-			// Fallback: reuse any already-loaded plugin (single-plugin limitation)
-			for _, existing := range p.plugins {
-				if existing != nil {
+			if digest != "" {
+				if existing := p.byDigest[digest]; existing != nil {
 					p.plugins[addr] = existing
+					p.byPath[path] = existing
 					return nil
 				}
 			}
+			return fmt.Errorf("plugin already loaded but no cached contract found for %s; rebuild with a unique plugin package path: %w", path, err)
 		}
 		if strings.Contains(err.Error(), "different version of package") {
 			return fmt.Errorf("plugin binary is incompatible with the current runtime; recompile or redeploy this contract plugin: %w", err)
@@ -754,6 +766,9 @@ func (p *PluginVM) LoadPlugin(addr, path string) error {
 	pc := &PluginContract{Instance: inst, Methods: methods}
 	p.plugins[addr] = pc
 	p.byPath[path] = pc
+	if digest != "" {
+		p.byDigest[digest] = pc
+	}
 	return nil
 }
 

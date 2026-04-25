@@ -3078,13 +3078,35 @@ func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Reques
 	outPath := filepath.Join(tmpDir, "contract.so")
 	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outPath, relPkg)
 	cmd.Dir = projectRoot
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	cacheRoot := strings.TrimSpace(os.Getenv("LQD_GO_CACHE_ROOT"))
+	if cacheRoot == "" {
+		cacheRoot = filepath.Join(projectRoot, ".lqd-go-cache")
+	}
+	gocache := strings.TrimSpace(os.Getenv("GOCACHE"))
+	if gocache == "" {
+		gocache = filepath.Join(cacheRoot, "build")
+	}
+	gomodcache := strings.TrimSpace(os.Getenv("GOMODCACHE"))
+	if gomodcache == "" {
+		gomodcache = filepath.Join(cacheRoot, "mod")
+	}
+	_ = os.MkdirAll(gocache, 0o755)
+	_ = os.MkdirAll(gomodcache, 0o755)
+	cmd.Env = append(os.Environ(),
+		"CGO_ENABLED=1",
+		"GOCACHE="+gocache,
+		"GOMODCACHE="+gomodcache,
+	)
 	cmdOutput, err := cmd.CombinedOutput()
 	if err != nil {
+		msg := strings.TrimSpace(string(cmdOutput))
+		if msg == "" {
+			msg = err.Error()
+		}
 		// Return compiler error as JSON so frontend can display it
 		json.NewEncoder(w).Encode(map[string]any{
 			"success": false,
-			"error":   string(cmdOutput),
+			"error":   msg,
 		})
 		return
 	}
