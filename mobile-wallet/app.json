@@ -16,6 +16,13 @@
       "eas": {
         "projectId": "478e431e-0711-464d-976b-0ae89416a63a"
       }
+    },
+    "ios": {
+      "bundleIdentifier": "com.zotish.lqdmobilewallet",
+      "buildNumber": "2",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     }
   }
 }
