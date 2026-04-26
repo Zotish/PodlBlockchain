@@ -1748,7 +1748,7 @@ function App() {
             <Button label={busy ? "Importing…" : "Import Private Key"} onPress={importPrivateKeyAction} disabled={busy} />
           </Card>
 
-          <Text style={styles.statusText}>{status}</Text>
+          {tab !== "browser" ? <Text style={styles.statusText}>{status}</Text> : null}
         </ScrollView>
       </SafeAreaView>
     );
@@ -1865,7 +1865,7 @@ function App() {
           </View>
         </Modal>
 
-        <View style={styles.topBar}>
+        <View style={[styles.topBar, tab === "browser" && styles.topBarBrowser]}>
           {tab === "home" && (
             <View style={styles.topActions}>
               <Pressable style={styles.walletPill} onPress={() => setReceiveVisible(true)}>
@@ -1891,11 +1891,13 @@ function App() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={[styles.mainScroll, tab === "browser" && styles.mainScrollBrowser]}
         >
-          <View style={styles.summaryGrid}>
-            <Stat label="Native Balance" value={formatUnits(nativeBalance, 8, 6)} subvalue="LQD" />
-            <Stat label="Network" value={currentNetwork.symbol || "LQD"} subvalue={currentNetwork.name} />
-            <Stat label="Token Count" value={String(currentTokens.length)} subvalue="Watchlist" />
-          </View>
+          {tab !== "browser" && (
+            <View style={styles.summaryGrid}>
+              <Stat label="Native Balance" value={formatUnits(nativeBalance, 8, 6)} subvalue="LQD" />
+              <Stat label="Network" value={currentNetwork.symbol || "LQD"} subvalue={currentNetwork.name} />
+              <Stat label="Token Count" value={String(currentTokens.length)} subvalue="Watchlist" />
+            </View>
+          )}
 
           {tab === "home" && (
             <View style={styles.sectionGap}>
@@ -2023,7 +2025,7 @@ function App() {
 
           {tab === "browser" && (
             <View style={[styles.sectionGap, styles.browserSection]}>
-              <Card title="Wallet Browser" subtitle="Paste any trusted DEX or dApp link here." style={styles.browserCard}>
+              <Card style={styles.browserCard}>
                 <Field
                   label="Website URL"
                   value={browserInput}
@@ -2531,6 +2533,9 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     gap: 12,
   },
+  topBarBrowser: {
+    paddingBottom: 8,
+  },
   topIdentity: {
     alignItems: "center",
   },
@@ -2660,7 +2665,11 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     borderLeftWidth: 0,
     borderRightWidth: 0,
-    padding: 10,
+    borderTopWidth: 1,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 6,
+    gap: 8,
     minHeight: 0,
   },
   cardHeader: {
