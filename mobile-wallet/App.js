@@ -523,6 +523,61 @@ function App() {
   const unlockInProgress = useRef(false);
   const scanHandlerRef = useRef(() => {});
   const browserRef = useRef(null);
+  const lqdProviderScript = useMemo(() => `
+    (function () {
+      if (window.lqd && window.lqd.isLQDWallet) return true;
+      var pending = {};
+      var requestId = 1;
+
+      function emit(name, detail) {
+        try {
+          window.dispatchEvent(new CustomEvent(name, { detail: detail }));
+        } catch (_) {}
+      }
+
+      window.lqd = {
+        isLQDWallet: true,
+        isMobileWallet: true,
+        selectedAddress: ${JSON.stringify(wallet?.address || "")},
+        chainId: ${JSON.stringify(currentNetwork?.chainId || "0x8b")},
+        request: function (payload) {
+          var body = payload || {};
+          var id = String(requestId++);
+          return new Promise(function (resolve, reject) {
+            pending[id] = { resolve: resolve, reject: reject };
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              source: "lqd-mobile-provider",
+              id: id,
+              method: body.method,
+              params: body.params || [],
+              origin: window.location.origin,
+              name: document.title || window.location.host || "dApp"
+            }));
+          });
+        },
+        on: function () {},
+        removeListener: function () {}
+      };
+
+      window.__LQD_MOBILE_PROVIDER_RESPONSE__ = function (message) {
+        var req = pending[String(message.id)];
+        if (!req) return;
+        delete pending[String(message.id)];
+        if (message.ok) req.resolve(message.result);
+        else req.reject(new Error(message.error || "Wallet request rejected"));
+      };
+
+      window.__LQD_MOBILE_SET_ACCOUNT__ = function (address, chainId) {
+        window.lqd.selectedAddress = address || "";
+        window.lqd.chainId = chainId || window.lqd.chainId;
+        emit("lqd_accountsChanged", [window.lqd.selectedAddress].filter(Boolean));
+        emit("accountsChanged", [window.lqd.selectedAddress].filter(Boolean));
+      };
+
+      emit("lqd#initialized", { isMobileWallet: true });
+      return true;
+    })();
+  `, [wallet?.address, currentNetwork?.chainId]);
 
   useEffect(() => {
     let alive = true;
@@ -947,6 +1002,96 @@ function App() {
     setBrowserInput(next);
     setBrowserUrl(next);
     setTab("browser");
+  }
+
+  function sendBrowserProviderResponse(id, ok, result, error = "") {
+    const payload = JSON.stringify({ id, ok, result, error }).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    browserRef.current?.injectJavaScript(`
+      if (window.__LQD_MOBILE_PROVIDER_RESPONSE__) {
+        window.__LQD_MOBILE_PROVIDER_RESPONSE__(JSON.parse('${payload}'));
+      }
+      true;
+    `);
+  }
+
+  function syncBrowserAccount() {
+    const address = JSON.stringify(wallet?.address || "");
+    const chainId = JSON.stringify(currentNetwork?.chainId || "0x8b");
+    browserRef.current?.injectJavaScript(`
+      if (window.__LQD_MOBILE_SET_ACCOUNT__) {
+        window.__LQD_MOBILE_SET_ACCOUNT__(${address}, ${chainId});
+      }
+      true;
+    `);
+  }
+
+  async function approveBrowserConnect(request) {
+    return new Promise((resolve, reject) => {
+      if (!wallet?.address) {
+        reject(new Error("Unlock or create a wallet first"));
+        return;
+      }
+      const origin = request.origin || request.name || "this dApp";
+      Alert.alert(
+        "Connect dApp?",
+        `${request.name || "DApp"} wants to connect to ${shortAddress(wallet.address)}\n\nOrigin: ${origin}`,
+        [
+          { text: "Reject", style: "cancel", onPress: () => reject(new Error("Connection rejected")) },
+          { text: "Connect", onPress: () => resolve([wallet.address]) },
+        ],
+        { cancelable: true, onDismiss: () => reject(new Error("Connection rejected")) }
+      );
+    });
+  }
+
+  async function handleBrowserProviderMessage(event) {
+    let request = null;
+    try {
+      request = JSON.parse(event?.nativeEvent?.data || "{}");
+    } catch {
+      return;
+    }
+    if (request?.source !== "lqd-mobile-provider" || !request.id) return;
+
+    try {
+      let result = null;
+      switch (request.method) {
+        case "lqd_connect":
+        case "lqd_requestAccounts":
+          result = await approveBrowserConnect(request);
+          setTrustedOrigins((prev) => (prev.includes(request.origin) ? prev : [...prev, request.origin]));
+          setStatus(`Connected ${request.name || request.origin || "dApp"}`);
+          setTimeout(syncBrowserAccount, 50);
+          break;
+        case "lqd_accounts":
+          result = wallet?.address ? [wallet.address] : [];
+          break;
+        case "lqd_chainId":
+        case "eth_chainId":
+          result = currentNetwork?.chainId || "0x8b";
+          break;
+        case "lqd_getPrivateKey":
+          if (!wallet?.privateKey) throw new Error("Unlock wallet first");
+          result = { privateKey: wallet.privateKey };
+          break;
+        case "lqd_deployBuiltin": {
+          if (!wallet?.address || !wallet?.privateKey) throw new Error("Unlock wallet first");
+          const payload = Array.isArray(request.params) ? (request.params[0] || {}) : (request.params || {});
+          result = await nodeDeployBuiltin(nodeUrl, {
+            ...payload,
+            owner: payload.owner || wallet.address,
+            private_key: wallet.privateKey,
+          });
+          break;
+        }
+        default:
+          throw new Error(`Method not supported: ${request.method || "unknown"}`);
+      }
+      sendBrowserProviderResponse(request.id, true, result);
+    } catch (e) {
+      sendBrowserProviderResponse(request.id, false, null, e?.message || "Wallet request failed");
+      setStatus(e?.message || "Wallet request failed");
+    }
   }
 
   function rejectRequest(item) {
@@ -2050,8 +2195,14 @@ function App() {
                     ref={browserRef}
                     source={{ uri: browserUrl }}
                     style={styles.browserFrame}
+                    injectedJavaScriptBeforeContentLoaded={lqdProviderScript}
+                    injectedJavaScript={lqdProviderScript}
+                    onMessage={handleBrowserProviderMessage}
                     onLoadStart={() => setBrowserLoading(true)}
-                    onLoadEnd={() => setBrowserLoading(false)}
+                    onLoadEnd={() => {
+                      setBrowserLoading(false);
+                      syncBrowserAccount();
+                    }}
                     onNavigationStateChange={(navState) => {
                       setBrowserCanGoBack(navState.canGoBack);
                       setBrowserCanGoForward(navState.canGoForward);
