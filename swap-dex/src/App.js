@@ -133,7 +133,6 @@ export default function App() {
   const [amtIn,   setAmtIn]   = useState("");
   const [amtOut,  setAmtOut]  = useState("");
   const [impact,  setImpact]  = useState(0); // basis-points
-  const [swapDir, setSwapDir] = useState("AtoB");
 
   // Settings (slippage)
   const [slippage, setSlippage]       = useState("0.5");
@@ -178,7 +177,7 @@ export default function App() {
   const symB  = tokens.find(t => t.address === tokenB)?.symbol || "–";
   const decA  = parseInt(tokens.find(t => t.address === tokenA)?.decimals || "8", 10) || 8;
   const decB  = parseInt(tokens.find(t => t.address === tokenB)?.decimals || "8", 10) || 8;
-  const outDec = swapDir === "AtoB" ? decB : decA;
+  const outDec = decB;
   const activeSlip = customSlip || slippage;
   // amtOut is already human-readable; convert → raw for slippage maths
   const minReceived = amtOut && activeSlip
@@ -212,25 +211,20 @@ export default function App() {
   }
 
   // ── Quote ─────────────────────────────────────────────────────────────────
-  // amtIn is human-readable; convert to raw units before AMM math
+  // amtIn is always the visible "You Pay" amount (tokenA). The arrow swaps
+  // tokenA/tokenB, so quoting stays top-to-bottom instead of using a second
+  // hidden direction flag.
   useEffect(() => {
-    const inDec  = swapDir === "AtoB" ? decA : decB;
-    const _outDec = swapDir === "AtoB" ? decB : decA;
+    const inDec = decA;
     const rawIn  = safeBig(parseHuman(amtIn, inDec));
     const resA   = safeBig(pool.reserveA);
     const resB   = safeBig(pool.reserveB);
 
-    if (swapDir === "AtoB") {
-      const rawOut = quoteOut(rawIn, resA, resB);
-      setAmtOut(rawOut > 0n ? fmtAmount(rawOut.toString(), _outDec) : "");
-      setImpact(priceImpactBps(rawIn, resA));
-    } else {
-      const rawOut = quoteOut(rawIn, resB, resA);
-      setAmtOut(rawOut > 0n ? fmtAmount(rawOut.toString(), _outDec) : "");
-      setImpact(priceImpactBps(rawIn, resB));
-    }
+    const rawOut = quoteOut(rawIn, resA, resB);
+    setAmtOut(rawOut > 0n ? fmtAmount(rawOut.toString(), decB) : "");
+    setImpact(priceImpactBps(rawIn, resA));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amtIn, pool.reserveA, pool.reserveB, swapDir, decA, decB]);
+  }, [amtIn, pool.reserveA, pool.reserveB, decA, decB]);
 
   // ── Extension auto-connect + accountsChanged reactive listener ──────────
   useEffect(() => {
@@ -591,7 +585,7 @@ export default function App() {
     if (!amtIn || parseFloat(amtIn) <= 0) { showToast("Enter an amount", "error"); return; }
 
     // Convert human-readable input → raw base units for contract
-    const inDec = swapDir === "AtoB" ? decA : decB;
+    const inDec = decA;
     const rawIn = parseHuman(amtIn, inDec);
 
     const slipBps = parseFloat(activeSlip) * 100;
@@ -600,23 +594,21 @@ export default function App() {
       if (!ok) return;
     }
 
-    const tokenIn  = swapDir === "AtoB" ? tokenA : tokenB;
-    const tokenOut = swapDir === "AtoB" ? tokenB : tokenA;
+    const tokenIn  = tokenA;
+    const tokenOut = tokenB;
     const isNativeIn = tokenIn === "lqd";
 
     // Native LQD doesn't need approval
     if (!isNativeIn) {
-      const needApprove = swapDir === "AtoB"
-        ? safeBig(allowances.a) < safeBig(rawIn)
-        : safeBig(allowances.b) < safeBig(rawIn);
+      const needApprove = safeBig(allowances.a) < safeBig(rawIn);
       if (needApprove) {
-        showToast(`Approve ${swapDir === "AtoB" ? symA : symB} first`, "error");
+        showToast(`Approve ${symA} first`, "error");
         return;
       }
     }
 
     // minAmountOut with slippage (raw units)
-    const outDecNow = swapDir === "AtoB" ? decB : decA;
+    const outDecNow = decB;
     const rawOutBig = safeBig(parseHuman(amtOut, outDecNow));
     const slip = parseFloat(activeSlip) / 100;
     const minOut = ((rawOutBig * BigInt(Math.floor((1 - slip) * 10000))) / 10000n).toString();
@@ -853,9 +845,10 @@ export default function App() {
   }
 
   function swapSides() {
-    setTokenA(tokenB); setTokenB(tokenA);
-    setSwapDir(d => d === "AtoB" ? "BtoA" : "AtoB");
-    setAmtIn(amtOut); setAmtOut(amtIn);
+    setTokenA(tokenB);
+    setTokenB(tokenA);
+    setAmtIn(amtOut || "");
+    setAmtOut("");
   }
 
   function quoteAddLiquidityAmount(amountHuman, fromField = "A") {
@@ -1096,7 +1089,7 @@ export default function App() {
                   </div>
                   <div className="price-row">
                     <span className="price-label">Fee (0.3%)</span>
-                    <span>{fmtAmount((safeBig(parseHuman(amtIn, swapDir === "AtoB" ? decA : decB)) * 3n / 1000n).toString(), swapDir === "AtoB" ? decA : decB)} {swapDir === "AtoB" ? symA : symB}</span>
+                    <span>{fmtAmount((safeBig(parseHuman(amtIn, decA)) * 3n / 1000n).toString(), decA)} {symA}</span>
                   </div>
                   <div className="price-row">
                     <span className="price-label">Min Received ({activeSlip}% slippage)</span>
@@ -1110,14 +1103,9 @@ export default function App() {
               )}
 
               {/* Approve buttons (only shown if needed) */}
-              {swapDir === "AtoB" && tokenA && safeBig(allowances.a) < safeBig(parseHuman(amtIn, decA)) && amtIn && (
+              {tokenA && tokenA !== "lqd" && safeBig(allowances.a) < safeBig(parseHuman(amtIn, decA)) && amtIn && (
                 <button className="action-btn secondary" onClick={() => doApprove(tokenA, amtIn, decA)} disabled={loading}>
                   Approve {symA}
-                </button>
-              )}
-              {swapDir === "BtoA" && tokenB && safeBig(allowances.b) < safeBig(parseHuman(amtIn, decB)) && amtIn && (
-                <button className="action-btn secondary" onClick={() => doApprove(tokenB, amtIn, decB)} disabled={loading}>
-                  Approve {symB}
                 </button>
               )}
 
