@@ -1866,24 +1866,31 @@ function App() {
         </Modal>
 
         <View style={styles.topBar}>
-          <View style={styles.topActions}>
-            <Pressable style={styles.walletPill} onPress={() => setReceiveVisible(true)}>
-              <Text style={styles.walletPillText}>Receive</Text>
-            </Pressable>
-            <Pressable style={styles.walletPill} onPress={() => scanWithCamera("native")}>
-              <Text style={styles.walletPillText}>Scan</Text>
-            </Pressable>
-            <View style={[styles.walletPill, styles.walletPillState]}>
-              <Text style={styles.walletPillText}>{walletVisible ? "Unlocked" : "Locked"}</Text>
+          {tab === "home" && (
+            <View style={styles.topActions}>
+              <Pressable style={styles.walletPill} onPress={() => setReceiveVisible(true)}>
+                <Text style={styles.walletPillText}>Receive</Text>
+              </Pressable>
+              <Pressable style={styles.walletPill} onPress={() => scanWithCamera("native")}>
+                <Text style={styles.walletPillText}>Scan</Text>
+              </Pressable>
+              <View style={[styles.walletPill, styles.walletPillState]}>
+                <Text style={styles.walletPillText}>{walletVisible ? "Unlocked" : "Locked"}</Text>
+              </View>
             </View>
-          </View>
+          )}
           <View style={styles.topIdentity}>
             <Text style={styles.topAddress}>{shortAddress(wallet.address)}</Text>
             <Text style={styles.topNetwork}>{currentNetwork.name}</Text>
           </View>
         </View>
 
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.mainScroll}>
+        <ScrollView
+          style={{ flex: 1 }}
+          scrollEnabled={tab !== "browser"}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={[styles.mainScroll, tab === "browser" && styles.mainScrollBrowser]}
+        >
           <View style={styles.summaryGrid}>
             <Stat label="Native Balance" value={formatUnits(nativeBalance, 8, 6)} subvalue="LQD" />
             <Stat label="Network" value={currentNetwork.symbol || "LQD"} subvalue={currentNetwork.name} />
@@ -2015,8 +2022,8 @@ function App() {
           )}
 
           {tab === "browser" && (
-            <View style={styles.sectionGap}>
-              <Card title="Wallet Browser" subtitle="Paste any trusted DEX or dApp link here.">
+            <View style={[styles.sectionGap, styles.browserSection]}>
+              <Card title="Wallet Browser" subtitle="Paste any trusted DEX or dApp link here." style={styles.browserCard}>
                 <Field
                   label="Website URL"
                   value={browserInput}
@@ -2054,12 +2061,13 @@ function App() {
                     setSupportMultipleWindows={false}
                     javaScriptEnabled
                     domStorageEnabled
+                    nestedScrollEnabled
+                    scrollEnabled
+                    bounces
+                    overScrollMode="always"
                     startInLoadingState
                   />
                 </View>
-                <Text style={styles.helperText}>
-                  DEX is treated as an external site. Open it here and interact from inside the wallet browser.
-                </Text>
               </Card>
             </View>
           )}
@@ -2410,9 +2418,9 @@ function App() {
               <Card title="Add network" subtitle="Create a new custom chain entry.">
                 <Field label="Name" value={networkForm.name} onChangeText={(v) => setNetworkForm((p) => ({ ...p, name: v }))} placeholder="My Network" />
                 <Field label="Chain ID" value={networkForm.chainId} onChangeText={(v) => setNetworkForm((p) => ({ ...p, chainId: v }))} placeholder="0x8b" />
-                <Field label="Node URL" value={networkForm.nodeUrl} onChangeText={(v) => setNetworkForm((p) => ({ ...p, nodeUrl: v }))} placeholder="http://127.0.0.1:6500" />
-                <Field label="Wallet URL" value={networkForm.walletUrl} onChangeText={(v) => setNetworkForm((p) => ({ ...p, walletUrl: v }))} placeholder="http://127.0.0.1:8080" />
-                <Field label="Explorer URL" value={networkForm.explorerUrl} onChangeText={(v) => setNetworkForm((p) => ({ ...p, explorerUrl: v }))} placeholder="http://localhost:3001" />
+                <Field label="Node URL" value={networkForm.nodeUrl} onChangeText={(v) => setNetworkForm((p) => ({ ...p, nodeUrl: v }))} placeholder={PROD_CHAIN_URL} />
+                <Field label="Wallet URL" value={networkForm.walletUrl} onChangeText={(v) => setNetworkForm((p) => ({ ...p, walletUrl: v }))} placeholder={PROD_WALLET_URL} />
+                <Field label="Explorer URL" value={networkForm.explorerUrl} onChangeText={(v) => setNetworkForm((p) => ({ ...p, explorerUrl: v }))} placeholder={PROD_EXPLORER_URL} />
                 <Field label="Symbol" value={networkForm.symbol} onChangeText={(v) => setNetworkForm((p) => ({ ...p, symbol: v }))} placeholder="LQD" />
                 <Button label="Add Network" onPress={addNetworkAction} />
               </Card>
@@ -2438,10 +2446,10 @@ function App() {
           {tab === "settings" && (
             <View style={styles.sectionGap}>
               <Card title="Endpoints" subtitle="Adjust the live services used by the app.">
-                <Field label="Node URL" value={endpoints.nodeUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, nodeUrl: v }))} placeholder="http://127.0.0.1:6500" />
-                <Field label="Wallet URL" value={endpoints.walletUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, walletUrl: v }))} placeholder="http://127.0.0.1:8080" />
-                <Field label="Aggregator URL" value={endpoints.aggregatorUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, aggregatorUrl: v }))} placeholder="http://127.0.0.1:9000" />
-                <Field label="Explorer URL" value={endpoints.explorerUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, explorerUrl: v }))} placeholder="http://localhost:3001" />
+                <Field label="Node URL" value={endpoints.nodeUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, nodeUrl: v }))} placeholder={PROD_CHAIN_URL} />
+                <Field label="Wallet URL" value={endpoints.walletUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, walletUrl: v }))} placeholder={PROD_WALLET_URL} />
+                <Field label="Aggregator URL" value={endpoints.aggregatorUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, aggregatorUrl: v }))} placeholder={PROD_AGGREGATOR_URL} />
+                <Field label="Explorer URL" value={endpoints.explorerUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, explorerUrl: v }))} placeholder={PROD_EXPLORER_URL} />
               </Card>
 
               <Card title="Wallet actions" subtitle="Security and backup.">
@@ -2559,6 +2567,12 @@ const styles = StyleSheet.create({
   mainScroll: {
     padding: 16,
     paddingBottom: 28,
+    flexGrow: 1,
+  },
+  mainScrollBrowser: {
+    paddingHorizontal: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   tabRow: {
     flexDirection: "row",
@@ -2627,6 +2641,12 @@ const styles = StyleSheet.create({
     gap: 12,
     marginTop: 12,
   },
+  browserSection: {
+    flex: 1,
+    gap: 0,
+    marginTop: 0,
+    minHeight: 0,
+  },
   card: {
     backgroundColor: "#151b31",
     borderColor: "#273152",
@@ -2634,6 +2654,14 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     padding: 15,
     gap: 10,
+  },
+  browserCard: {
+    flex: 1,
+    borderRadius: 0,
+    borderLeftWidth: 0,
+    borderRightWidth: 0,
+    padding: 10,
+    minHeight: 0,
   },
   cardHeader: {
     marginBottom: 2,
@@ -2845,10 +2873,12 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   browserSurface: {
+    flex: 1,
+    minHeight: 0,
     backgroundColor: "#0f1428",
     borderColor: "#273152",
     borderWidth: 1,
-    borderRadius: 18,
+    borderRadius: 12,
     overflow: "hidden",
   },
   browserToolbar: {
@@ -2860,7 +2890,8 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   browserFrame: {
-    height: 520,
+    flex: 1,
+    minHeight: 0,
     backgroundColor: "#ffffff",
   },
   browserHint: {

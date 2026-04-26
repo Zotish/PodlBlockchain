@@ -1,4 +1,5 @@
 import * as SecureStore from "expo-secure-store";
+import { Platform } from "react-native";
 import { safeJsonParse } from "./utils";
 
 export const STORAGE_KEYS = {
@@ -17,25 +18,52 @@ export const STORAGE_KEYS = {
   backup: "lqd_mobile_backup_v1",
 };
 
+function hasWebStorage() {
+  return Platform.OS === "web" && typeof globalThis !== "undefined" && Boolean(globalThis.localStorage);
+}
+
+async function getItem(key, options = {}) {
+  if (hasWebStorage()) {
+    return globalThis.localStorage.getItem(key);
+  }
+  return SecureStore.getItemAsync(key, options);
+}
+
+async function setItem(key, value, options = {}) {
+  if (hasWebStorage()) {
+    globalThis.localStorage.setItem(key, value);
+    return;
+  }
+  await SecureStore.setItemAsync(key, value, options);
+}
+
+async function deleteItem(key) {
+  if (hasWebStorage()) {
+    globalThis.localStorage.removeItem(key);
+    return;
+  }
+  await SecureStore.deleteItemAsync(key);
+}
+
 export async function loadJSON(key, fallback = null, options = {}) {
-  const raw = await SecureStore.getItemAsync(key, options);
+  const raw = await getItem(key, options);
   const parsed = safeJsonParse(raw, undefined);
   return parsed === undefined ? fallback : parsed;
 }
 
 export async function saveJSON(key, value, options = {}) {
-  await SecureStore.setItemAsync(key, JSON.stringify(value), options);
+  await setItem(key, JSON.stringify(value), options);
 }
 
 export async function removeItem(key) {
-  await SecureStore.deleteItemAsync(key);
+  await deleteItem(key);
 }
 
 export async function loadString(key, fallback = "", options = {}) {
-  const raw = await SecureStore.getItemAsync(key, options);
+  const raw = await getItem(key, options);
   return raw ?? fallback;
 }
 
 export async function saveString(key, value, options = {}) {
-  await SecureStore.setItemAsync(key, String(value), options);
+  await setItem(key, String(value), options);
 }

@@ -3607,17 +3607,27 @@ func configuredAllowedOrigins() []string {
 		"http://localhost:3000",
 		"http://localhost:3001",
 		"http://localhost:4173",
+		"http://localhost:4174",
 		"http://127.0.0.1:3000",
 		"http://127.0.0.1:3001",
 		"http://127.0.0.1:4173",
+		"http://127.0.0.1:4174",
+		"http://192.168.",
+		"http://10.",
+		"http://172.",
+		"https://warm-dragon-34d6ff.netlify.app",
+		"https://bright-crisp-91fe94.netlify.app",
+		"https://delightful-churros-767ded.netlify.app",
 		"chrome-extension://",
 	}
-	for _, raw := range strings.Split(os.Getenv("LQD_ALLOWED_ORIGINS"), ",") {
-		origin := strings.TrimSpace(raw)
-		if origin == "" {
-			continue
+	for _, envName := range []string{"LQD_ALLOWED_ORIGINS", "LQD_ALLOWED_ORIGIN"} {
+		for _, raw := range strings.Split(os.Getenv(envName), ",") {
+			origin := strings.TrimSpace(raw)
+			if origin == "" {
+				continue
+			}
+			origins = append(origins, origin)
 		}
-		origins = append(origins, origin)
 	}
 	return origins
 }
