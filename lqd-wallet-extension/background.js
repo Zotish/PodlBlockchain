@@ -100,6 +100,34 @@ async function setAllowlist(al) {
 async function getNetworks() {
   const data = await ext.storage.local.get(["networks", "currentNetwork"]);
   const networks = data.networks || DEFAULT_NETWORKS;
+  let changed = false;
+  for (const [chainId, net] of Object.entries(networks)) {
+    if (
+      net?.nodeUrl &&
+      (net.nodeUrl.includes(":5000") ||
+        net.nodeUrl.includes(":6500") ||
+        net.nodeUrl.includes(":9000") ||
+        net.nodeUrl.includes("127.0.0.1") ||
+        net.nodeUrl.includes("localhost"))
+    ) {
+      net.nodeUrl = chainId === "0x8c" ? PROD_AGGREGATOR_URL : PROD_CHAIN_URL;
+      changed = true;
+    }
+    if (
+      net?.walletUrl &&
+      (net.walletUrl.includes(":8080") ||
+        net.walletUrl.includes("127.0.0.1") ||
+        net.walletUrl.includes("localhost"))
+    ) {
+      net.walletUrl = PROD_WALLET_URL;
+      changed = true;
+    }
+    if (net?.blockExplorer && (net.blockExplorer.includes("127.0.0.1") || net.blockExplorer.includes("localhost"))) {
+      net.blockExplorer = PROD_EXPLORER_URL;
+      changed = true;
+    }
+  }
+  if (changed) await saveNetworks(networks);
   const currentNetwork = data.currentNetwork || "0x8b";
   return { networks, currentNetwork };
 }
@@ -143,7 +171,7 @@ async function loadConfig() {
       session.nodeUrl.includes("127.0.0.1") ||
       session.nodeUrl.includes("localhost"))
   ) {
-    session.nodeUrl = PROD_CHAIN_URL;
+    session.nodeUrl = currentNetwork === "0x8c" ? PROD_AGGREGATOR_URL : PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: session.nodeUrl });
   }
   if (

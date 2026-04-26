@@ -172,6 +172,15 @@ async function init() {
     state.nodeUrl = PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: state.nodeUrl });
   }
+  if (
+    state.walletUrl &&
+    (state.walletUrl.includes(":8080") ||
+      state.walletUrl.includes("127.0.0.1") ||
+      state.walletUrl.includes("localhost"))
+  ) {
+    state.walletUrl = PROD_WALLET_URL;
+    await ext.storage.local.set({ walletUrl: state.walletUrl });
+  }
 
   // Populate settings inputs
   $("settingsNodeUrl").value  = state.nodeUrl;
@@ -891,8 +900,8 @@ $("exploreBtn").addEventListener("click", async () => {
       const jsClient = [
         `// LQD Contract Client — ${addr}`,
         `const CONTRACT_ADDRESS = "${addr}";`,
-        `const NODE_URL   = "http://127.0.0.1:6500";`,
-        `const WALLET_URL = "http://127.0.0.1:8080";`,
+        `const NODE_URL   = "${PROD_CHAIN_URL}";`,
+        `const WALLET_URL = "${PROD_WALLET_URL}";`,
         ``,
         `export const ABI = ${jsonAbi};`,
         ``,
@@ -949,7 +958,7 @@ $("exploreBtn").addEventListener("click", async () => {
           </div>
           <pre id="abiJsonPre" style="background:#1e1e2e;color:#cdd6f4;font-family:monospace;font-size:11px;padding:12px;border-radius:8px;overflow:auto;max-height:420px;white-space:pre;margin:0;"></pre>
           <div style="margin-top:8px;padding:10px;background:rgba(37,99,235,0.1);border:1px solid rgba(37,99,235,0.3);border-radius:8px;font-size:12px;color:#93c5fd;">
-            <b>Call from DApp:</b> POST http://127.0.0.1:6500/contract/call<br>
+            <b>Call from DApp:</b> POST ${PROD_CHAIN_URL}/contract/call<br>
             Body: { "address":"${addr}", "fn":"Name", "args":[], "caller":"0x..." }
           </div>
         </div>

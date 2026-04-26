@@ -444,13 +444,13 @@ on("saveEndpoints", "click", () => {
 on("presetLocal5000", "click", () => {
   const n = document.getElementById("nodeUrl");
   const w = document.getElementById("walletUrl");
-  if (n) n.value = "http://127.0.0.1:6500";
+  if (n) n.value = PROD_CHAIN_URL;
   if (w) w.value = PROD_WALLET_URL;
 });
 on("presetLocal9000", "click", () => {
   const n = document.getElementById("nodeUrl");
   const w = document.getElementById("walletUrl");
-  if (n) n.value = "http://127.0.0.1:9000";
+  if (n) n.value = PROD_AGGREGATOR_URL;
   if (w) w.value = PROD_WALLET_URL;
 });
 
@@ -920,7 +920,7 @@ const OFFICIAL_DAPPS = [
     description: "Manage LP positions & earn rewards",
     icon: "💧",
     iconBg: "linear-gradient(135deg,#1e3a5f,#2563eb)",
-    url: `${PROD_EXPLORER_URL}/pools`,
+    url: `${PROD_DEX_URL}/pools`,
     category: "DeFi",
   },
   {

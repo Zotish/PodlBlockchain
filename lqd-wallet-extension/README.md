@@ -10,7 +10,7 @@ A browser extension wallet for the LQD chain. It exposes a `window.lqd` provider
 - native send (via wallet server)
 - dapp approvals (connect + tx require user approval)
 - token watchlist in popup
-- network presets (local 5000 / 9000)
+- network presets (production chain / aggregator)
 - dapp allowlist with per-scope permissions
 - tx preview in approval list
 - backup export (encrypted JSON)
@@ -28,8 +28,9 @@ A browser extension wallet for the LQD chain. It exposes a `window.lqd` provider
 
 ## Endpoints
 Default endpoints (editable in popup):
-- Node: `http://127.0.0.1:5000`
-- Wallet: `http://127.0.0.1:8080`
+- Chain: `https://dazzling-peace-production-3529.up.railway.app`
+- Wallet: `https://enchanting-hope-production-1c63.up.railway.app`
+- Aggregator: `https://keen-enjoyment-production-0440.up.railway.app`
 
 ## Dapp API
 Injected provider:
