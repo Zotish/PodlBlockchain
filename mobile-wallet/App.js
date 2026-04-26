@@ -1866,12 +1866,6 @@ function App() {
         </Modal>
 
         <View style={styles.topBar}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.topTitle}>LQD Mobile Wallet</Text>
-            <Text style={styles.topSub}>
-              {shortAddress(wallet.address)} · {currentNetwork.name}
-            </Text>
-          </View>
           <View style={styles.topActions}>
             <Pressable style={styles.walletPill} onPress={() => setReceiveVisible(true)}>
               <Text style={styles.walletPillText}>Receive</Text>
@@ -1882,6 +1876,10 @@ function App() {
             <View style={[styles.walletPill, styles.walletPillState]}>
               <Text style={styles.walletPillText}>{walletVisible ? "Unlocked" : "Locked"}</Text>
             </View>
+          </View>
+          <View style={styles.topIdentity}>
+            <Text style={styles.topAddress}>{shortAddress(wallet.address)}</Text>
+            <Text style={styles.topNetwork}>{currentNetwork.name}</Text>
           </View>
         </View>
 
@@ -2517,33 +2515,38 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
     alignItems: "center",
-    flexWrap: "wrap",
+    justifyContent: "flex-end",
   },
   topBar: {
     paddingHorizontal: 18,
-    paddingTop: 10,
-    paddingBottom: 8,
-    flexDirection: "row",
-    alignItems: "flex-start",
+    paddingTop: Platform.select({ ios: 14, android: 26, default: 18 }),
+    paddingBottom: 12,
     gap: 12,
   },
-  topTitle: {
-    color: "#f4f7ff",
-    fontSize: 18,
-    fontWeight: "800",
+  topIdentity: {
+    alignItems: "center",
   },
-  topSub: {
-    color: "#a5afcf",
-    fontSize: 12,
-    marginTop: 2,
+  topAddress: {
+    color: "#dce4ff",
+    fontSize: 16,
+    fontWeight: "800",
+    letterSpacing: 0.2,
+  },
+  topNetwork: {
+    color: "#9ea8cc",
+    fontSize: 13,
+    marginTop: 3,
+    fontWeight: "600",
   },
   walletPill: {
     backgroundColor: "#16203a",
     borderColor: "#273152",
     borderWidth: 1,
     borderRadius: 999,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    minWidth: 92,
+    alignItems: "center",
   },
   walletPillState: {
     backgroundColor: "#18252e",
