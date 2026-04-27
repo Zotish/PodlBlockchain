@@ -124,8 +124,8 @@ function migrateLocalEndpoint(value, fallback) {
 }
 
 const BUILTIN_TEMPLATES = [
-  { value: "dex_factory", label: "DEX Factory" },
-  { value: "dex_swap", label: "DEX Swap / Router" },
+  { value: "dex_factory", label: "DEX Factory + Router" },
+  { value: "dex_swap", label: "DEX Pair / Pool" },
   { value: "lqd20", label: "LQD20 Token" },
   { value: "dao_treasury", label: "DAO Treasury" },
   { value: "nft_collection", label: "NFT Collection" },
@@ -1050,7 +1050,7 @@ function App() {
 
   function validateBuiltinDeployForm(form = deployForm) {
     if (form.template === "dex_swap" && (!isLikelyAddress(form.tokenA) || !isLikelyAddress(form.tokenB))) {
-      return "DEX Swap needs valid Token A and Token B contract addresses";
+      return "DEX Pair / Pool needs valid Token A and Token B contract addresses";
     }
     if (form.template === "lqd20" && (!/^\d+$/.test(form.tokenSupply.trim()) || BigInt(form.tokenSupply.trim() || "0") <= 0n)) {
       return "LQD20 supply must be greater than 0";
@@ -1077,6 +1077,7 @@ function App() {
           <View style={styles.sectionGapSmall}>
             <Field label="Token A contract" value={deployForm.tokenA} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenA: v }))} placeholder="0x..." />
             <Field label="Token B contract" value={deployForm.tokenB} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenB: v }))} placeholder="0x..." />
+            <Text style={styles.helperText}>Advanced standalone pair contract. For the normal DEX app, deploy Factory + Router first, then create pairs later from the DEX UI.</Text>
           </View>
         );
       case "dao_treasury":
@@ -1108,7 +1109,7 @@ function App() {
           </View>
         );
       default:
-        return <Text style={styles.helperText}>This template does not need extra constructor fields.</Text>;
+        return <Text style={styles.helperText}>Factory + Router deploy does not need token addresses. Create LQD/token or token/token pairs later from the DEX dApp.</Text>;
     }
   }
 
