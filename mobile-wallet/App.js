@@ -44,6 +44,7 @@ import {
   nodeCurrentFactory,
   nodeDeployBuiltin,
   nodeDeployContract,
+  nodeFaucet,
   nodeRecentTransactions,
   normalizeUrl,
   postJson,
@@ -158,20 +159,19 @@ const DEFAULT_CUSTOM_SOURCE = `package main
 
 import (
   "fmt"
-  lqdc "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/lqd-sdk-compat/context"
+  bc "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainComponent"
 )
 
 type ContractTemplate struct{}
 
 var Contract = &ContractTemplate{}
 
-func (c *ContractTemplate) Init(ctx *lqdc.Context, args []string) error {
+func (c *ContractTemplate) Init(ctx *bc.Context) {
   ctx.Set("hello", "world")
-  return nil
 }
 
-func (c *ContractTemplate) Ping(ctx *lqdc.Context, args []string) (string, error) {
-  return fmt.Sprintf("pong:%s", ctx.CallerAddr), nil
+func (c *ContractTemplate) Ping(ctx *bc.Context) {
+  ctx.Set("output", fmt.Sprintf("pong:%s", ctx.CallerAddr))
 }`;
 
 function encryptVault(vault, password) {
@@ -1400,6 +1400,33 @@ function App() {
     setNativeBalance(String(native?.balance || native?.Balance || native?.amount || "0"));
   }
 
+  function walletHasGasBalance() {
+    try {
+      return BigInt(String(nativeBalance || "0")) > 0n;
+    } catch {
+      return false;
+    }
+  }
+
+  async function claimFaucetAction() {
+    if (!wallet?.address) {
+      setStatus("Unlock wallet first");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await nodeFaucet(nodeUrl, wallet.address);
+      const credited = res?.credited || res?.amount || "";
+      setStatus(credited ? `Faucet credited ${formatUnits(credited, 8, 6)} LQD` : "Faucet credited");
+      await refreshNativeOnly();
+      await refreshWalletSnapshot();
+    } catch (e) {
+      setStatus(e.message || "Faucet claim failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function sendNativeAction() {
     if (!wallet?.address || !wallet?.privateKey) {
       setStatus("Unlock wallet first");
@@ -1678,6 +1705,10 @@ function App() {
       setStatus("Unlock wallet first");
       return;
     }
+    if (!walletHasGasBalance()) {
+      setStatus("Claim faucet first: this wallet has 0 LQD for gas");
+      return;
+    }
     const validationError = validateBuiltinDeployForm();
     if (validationError) {
       setStatus(validationError);
@@ -1694,6 +1725,10 @@ function App() {
       });
       if (deployForm.template === "dex_factory" && res?.address) {
         setFactoryAddress(res.address);
+      }
+      if (res?.address) {
+        setCallForm((prev) => ({ ...prev, contract: res.address }));
+        setInspectForm({ address: res.address });
       }
       rememberActivity({
         type: "deploy",
@@ -1742,6 +1777,10 @@ function App() {
       setStatus("Compile a plugin first");
       return;
     }
+    if (!walletHasGasBalance()) {
+      setStatus("Claim faucet first: this wallet has 0 LQD for gas");
+      return;
+    }
     setBusy(true);
     try {
       const formData = new FormData();
@@ -1756,6 +1795,10 @@ function App() {
         type: "application/octet-stream",
       });
       const res = await nodeDeployContract(nodeUrl, formData);
+      if (res?.address) {
+        setCallForm((prev) => ({ ...prev, contract: res.address }));
+        setInspectForm({ address: res.address });
+      }
       rememberActivity({
         type: "deploy",
         From: wallet.address,
@@ -1799,6 +1842,10 @@ function App() {
     }
     if (!isLikelyAddress(callForm.contract)) {
       setStatus("Enter a valid contract address");
+      return;
+    }
+    if (!walletHasGasBalance()) {
+      setStatus("Claim faucet first: this wallet has 0 LQD for gas");
       return;
     }
     const args = callForm.args
@@ -2165,6 +2212,7 @@ function App() {
                 <View style={styles.actionGrid}>
                   <Button label="Send" onPress={() => setTab("home")} />
                   <Button label="Receive" onPress={() => setReceiveVisible(true)} secondary />
+                  <Button label="Faucet" onPress={claimFaucetAction} secondary disabled={busy} />
                   <Button label="Open Browser" onPress={() => setTab("browser")} secondary />
                   <Button label="Activity" onPress={() => setTab("activity")} secondary />
                 </View>

@@ -71,6 +71,10 @@ export async function walletBalance(nodeUrl, address) {
   return getJson(`${normalizeUrl(nodeUrl)}/balance?address=${encodeURIComponent(address)}`);
 }
 
+export async function nodeFaucet(nodeUrl, address) {
+  return postJson(`${normalizeUrl(nodeUrl)}/faucet`, { address });
+}
+
 export async function walletSend(walletUrl, payload) {
   return postJson(`${normalizeUrl(walletUrl)}/wallet/send`, payload);
 }
