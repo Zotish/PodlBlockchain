@@ -442,6 +442,7 @@ function App() {
   const [booting, setBooting] = useState(true);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState("");
   const [tab, setTab] = useState("home");
 
   const [vaultRecord, setVaultRecord] = useState(null);
@@ -683,15 +684,6 @@ function App() {
   }, [trustedOrigins]);
 
   useEffect(() => {
-    if (!wallet?.address) return;
-    if (biometricEnabled) {
-      saveString(STORAGE_KEYS.biometricVault, JSON.stringify(wallet), { requireAuthentication: true }).catch(() => {});
-    } else {
-      removeItem(STORAGE_KEYS.biometricVault).catch(() => {});
-    }
-  }, [biometricEnabled, wallet?.address]);
-
-  useEffect(() => {
     let mounted = true;
     (async () => {
       try {
@@ -758,10 +750,11 @@ function App() {
     setVaultRecord(record);
   }
 
-  async function refreshWalletSnapshot() {
-    if (!wallet?.address) return;
+  async function refreshWalletSnapshot(addressOverride = "") {
+    const activeAddress = addressOverride || wallet?.address;
+    if (!activeAddress) return;
     const [native, factory, recent, requests, tokensResp] = await Promise.all([
-      walletBalance(nodeUrl, wallet.address).catch(() => null),
+      walletBalance(nodeUrl, activeAddress).catch(() => null),
       nodeCurrentFactory(nodeUrl).catch(() => null),
       nodeRecentTransactions(nodeUrl).catch(() => []),
       nodeBridgeRequests(nodeUrl).catch(() => []),
@@ -786,7 +779,7 @@ function App() {
       setBridgeTokens(tokensResp);
     }
 
-    await refreshTokenBalances();
+    await refreshTokenBalances(watchlist, activeAddress);
   }
 
   async function loadBridgeChains() {
@@ -883,15 +876,16 @@ function App() {
     }));
   }
 
-  async function refreshTokenBalances(nextWatchlist = watchlist) {
-    if (!wallet?.address) return;
+  async function refreshTokenBalances(nextWatchlist = watchlist, addressOverride = "") {
+    const activeAddress = addressOverride || wallet?.address;
+    if (!activeAddress) return;
     const updated = [];
     for (const token of nextWatchlist) {
       try {
         const contract = token.address || token.contract;
         const [meta, balance] = await Promise.all([
-          token.name && token.symbol ? Promise.resolve(token) : resolveTokenMeta(nodeUrl, contract, wallet.address),
-          resolveTokenBalance(nodeUrl, walletUrl, contract, wallet.address),
+          token.name && token.symbol ? Promise.resolve(token) : resolveTokenMeta(nodeUrl, contract, activeAddress),
+          resolveTokenBalance(nodeUrl, walletUrl, contract, activeAddress),
         ]);
         updated.push({
           address: contract,
@@ -1232,17 +1226,19 @@ function App() {
     if (unlockInProgress.current) return;
     unlockInProgress.current = true;
     setBusy(true);
+    setBusyAction("unlockPassword");
     try {
       const vault = decryptVault(vaultRecord.cipher, unlockPassword);
       setWallet(vault);
       setWalletVisible(true);
       setStatus(`Unlocked ${shortAddress(vault.address)}`);
-      await refreshWalletSnapshot();
+      await refreshWalletSnapshot(vault.address);
     } catch (e) {
       setStatus(e.message || "Failed to unlock");
     } finally {
       unlockInProgress.current = false;
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1255,24 +1251,26 @@ function App() {
       setStatus("Biometrics not available on this device");
       return;
     }
-    const auth = await LocalAuthentication.authenticateAsync({
-      promptMessage: "Unlock LQD Mobile Wallet",
-      fallbackLabel: "Use password",
-      cancelLabel: "Cancel",
-    });
-    if (!auth.success) {
-      setStatus("Biometric unlock cancelled");
-      return;
-    }
+    if (unlockInProgress.current) return;
+    unlockInProgress.current = true;
+    setBusy(true);
+    setBusyAction("unlockBiometric");
     try {
       const biometricRaw = await loadString(STORAGE_KEYS.biometricVault, "", { requireAuthentication: true });
-      const vault = biometricRaw ? JSON.parse(biometricRaw) : decryptVault(vaultRecord.cipher, unlockPassword || "");
+      if (!biometricRaw) {
+        throw new Error("Biometric vault is not saved yet. Unlock with password once, then enable biometrics.");
+      }
+      const vault = JSON.parse(biometricRaw);
       setWallet(vault);
       setWalletVisible(true);
       setStatus(`Unlocked ${shortAddress(vault.address)} with biometrics`);
-      await refreshWalletSnapshot();
+      await refreshWalletSnapshot(vault.address);
     } catch (e) {
       setStatus(e.message || "Biometric unlock failed");
+    } finally {
+      unlockInProgress.current = false;
+      setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1285,6 +1283,7 @@ function App() {
     }
     Keyboard.dismiss();
     setBusy(true);
+    setBusyAction("createWallet");
     try {
       const res = await walletCreate(walletUrl, password);
       const vault = {
@@ -1299,13 +1298,14 @@ function App() {
       setCreateForm(initialCreateForm);
       setStatus(`Created wallet ${shortAddress(vault.address)}`);
       Alert.alert("Wallet created", `Address: ${vault.address}`);
-      await refreshWalletSnapshot();
+      await refreshWalletSnapshot(vault.address);
     } catch (e) {
       const message = e.message || "Failed to create wallet";
       setStatus(message);
       Alert.alert("Create wallet failed", message);
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1319,6 +1319,7 @@ function App() {
     }
     Keyboard.dismiss();
     setBusy(true);
+    setBusyAction("importMnemonic");
     try {
       const res = await walletImportMnemonic(walletUrl, mnemonic, password);
       const vault = {
@@ -1333,13 +1334,14 @@ function App() {
       setImportMnemonicForm(initialImportMnemonicForm);
       setStatus(`Imported wallet ${shortAddress(vault.address)}`);
       Alert.alert("Wallet imported", `Address: ${vault.address}`);
-      await refreshWalletSnapshot();
+      await refreshWalletSnapshot(vault.address);
     } catch (e) {
       const message = e.message || "Failed to import mnemonic";
       setStatus(message);
       Alert.alert("Import failed", message);
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1353,6 +1355,7 @@ function App() {
     }
     Keyboard.dismiss();
     setBusy(true);
+    setBusyAction("importPrivateKey");
     try {
       const res = await walletImportPrivateKey(walletUrl, privateKey);
       const vault = {
@@ -1366,13 +1369,14 @@ function App() {
       setImportPkForm(initialImportPkForm);
       setStatus(`Imported private key wallet ${shortAddress(vault.address)}`);
       Alert.alert("Wallet imported", `Address: ${vault.address}`);
-      await refreshWalletSnapshot();
+      await refreshWalletSnapshot(vault.address);
     } catch (e) {
       const message = e.message || "Failed to import private key";
       setStatus(message);
       Alert.alert("Import failed", message);
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1394,9 +1398,10 @@ function App() {
     setter(value || "");
   }
 
-  async function refreshNativeOnly() {
-    if (!wallet?.address) return;
-    const native = await walletBalance(nodeUrl, wallet.address);
+  async function refreshNativeOnly(addressOverride = "") {
+    const activeAddress = addressOverride || wallet?.address;
+    if (!activeAddress) return;
+    const native = await walletBalance(nodeUrl, activeAddress);
     setNativeBalance(String(native?.balance || native?.Balance || native?.amount || "0"));
   }
 
@@ -1414,6 +1419,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("faucet");
     try {
       const res = await nodeFaucet(nodeUrl, wallet.address);
       const credited = res?.credited || res?.amount || "";
@@ -1424,6 +1430,7 @@ function App() {
       setStatus(e.message || "Faucet claim failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1443,6 +1450,7 @@ function App() {
     }
 
     setBusy(true);
+    setBusyAction("sendNative");
     try {
       const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
       const res = await walletSend(walletUrl, {
@@ -1471,6 +1479,7 @@ function App() {
       setStatus(e.message || "Send failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1485,6 +1494,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("importToken");
     try {
       const meta = await resolveTokenMeta(nodeUrl, address, wallet.address);
       const balance = await resolveTokenBalance(nodeUrl, walletUrl, address, wallet.address);
@@ -1502,6 +1512,7 @@ function App() {
       setStatus(e.message || "Token import failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1535,6 +1546,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("sendToken");
     try {
       const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
       const res = await walletContractTx(walletUrl, {
@@ -1565,6 +1577,7 @@ function App() {
       setStatus(e.message || "Token send failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
       setSelectedTokenForSend(null);
     }
   }
@@ -1609,6 +1622,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("bridgeChainSave");
     try {
       await nodeBridgeChainUpsert(nodeUrl, payload, apiKey);
       await loadBridgeChains();
@@ -1617,6 +1631,7 @@ function App() {
       setStatus(e.message || "Bridge chain save failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1628,6 +1643,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("bridgeChainRemove");
     try {
       await nodeBridgeChainRemove(nodeUrl, { id: chainId }, apiKey);
       await loadBridgeChains();
@@ -1636,6 +1652,7 @@ function App() {
       setStatus(e.message || "Bridge chain remove failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1649,6 +1666,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("bridgeTokenSave");
     try {
       const chain = bridgeChains.find((item) => String(item.id || "").toLowerCase() === String(chainId).toLowerCase())
         || bridgeChains.find((item) => String(item.chain_id || "").toLowerCase() === String(chainId).toLowerCase());
@@ -1672,6 +1690,7 @@ function App() {
       setStatus(e.message || "Bridge token save failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1715,6 +1734,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("deployBuiltin");
     try {
       const res = await nodeDeployBuiltin(nodeUrl, {
         template: deployForm.template,
@@ -1743,11 +1763,13 @@ function App() {
       setStatus(e.message || "Builtin deploy failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
   async function compileCustomPluginAction() {
     setBusy(true);
+    setBusyAction("compileCustom");
     try {
       const res = await nodeCompilePlugin(nodeUrl, customSource);
       if (!res?.success) {
@@ -1765,6 +1787,7 @@ function App() {
       setStatus(e.message || "Compile failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1782,6 +1805,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("deployCustom");
     try {
       const formData = new FormData();
       formData.append("type", "plugin");
@@ -1812,6 +1836,7 @@ function App() {
       setStatus(e.message || "Deploy failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1821,6 +1846,7 @@ function App() {
       return;
     }
     setBusy(true);
+    setBusyAction("inspectContract");
     try {
       const [abi, storage] = await Promise.all([
         nodeContractAbi(nodeUrl, inspectForm.address),
@@ -1832,6 +1858,7 @@ function App() {
       setStatus(e.message || "Contract inspect failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -1853,6 +1880,7 @@ function App() {
       .map((s) => s.trim())
       .filter(Boolean);
     setBusy(true);
+    setBusyAction("callContract");
     try {
       const res = await walletContractTx(walletUrl, {
         address: wallet.address,
@@ -1878,6 +1906,7 @@ function App() {
       setStatus(e.message || "Contract call failed");
     } finally {
       setBusy(false);
+      setBusyAction("");
     }
   }
 
@@ -2039,20 +2068,20 @@ function App() {
           <Card title="Create wallet" subtitle="Generate a fresh vault and save it locally with your password.">
             <Field label="Password" value={createForm.password} onChangeText={(v) => setCreateForm((p) => ({ ...p, password: v }))} secureTextEntry placeholder="Set a strong password" />
             <Field label="Confirm password" value={createForm.confirm} onChangeText={(v) => setCreateForm((p) => ({ ...p, confirm: v }))} secureTextEntry placeholder="Repeat password" />
-            <Button label={busy ? "Creating…" : "Create Wallet"} onPress={createWalletAction} disabled={busy} />
+            <Button label={busyAction === "createWallet" ? "Creating…" : "Create Wallet"} onPress={createWalletAction} disabled={busy} />
             <Text style={styles.helperText}>The wallet server returns the address, private key and mnemonic. The mobile vault encrypts them locally with your password.</Text>
           </Card>
 
           <Card title="Import from mnemonic" subtitle="Restore an existing wallet phrase.">
             <Field label="Mnemonic" value={importMnemonicForm.mnemonic} onChangeText={(v) => setImportMnemonicForm((p) => ({ ...p, mnemonic: v }))} multiline numberOfLines={4} placeholder="twelve or twenty-four words…" />
             <Field label="Password" value={importMnemonicForm.password} onChangeText={(v) => setImportMnemonicForm((p) => ({ ...p, password: v }))} secureTextEntry placeholder="Password for local vault" />
-            <Button label={busy ? "Importing…" : "Import Mnemonic"} onPress={importMnemonicAction} disabled={busy} />
+            <Button label={busyAction === "importMnemonic" ? "Importing…" : "Import Mnemonic"} onPress={importMnemonicAction} disabled={busy} />
           </Card>
 
           <Card title="Import private key" subtitle="Paste a raw private key if you already have one.">
             <Field label="Private key" value={importPkForm.privateKey} onChangeText={(v) => setImportPkForm((p) => ({ ...p, privateKey: v }))} placeholder="0x..." />
             <Field label="Password" value={importPkForm.password} onChangeText={(v) => setImportPkForm((p) => ({ ...p, password: v }))} secureTextEntry placeholder="Password for local vault" />
-            <Button label={busy ? "Importing…" : "Import Private Key"} onPress={importPrivateKeyAction} disabled={busy} />
+            <Button label={busyAction === "importPrivateKey" ? "Importing…" : "Import Private Key"} onPress={importPrivateKeyAction} disabled={busy} />
           </Card>
 
           {tab !== "browser" ? <Text style={styles.statusText}>{status}</Text> : null}
@@ -2071,8 +2100,8 @@ function App() {
           <Card title="Unlock" subtitle={shortAddress(vaultRecord.address)}>
             <Field label="Password" value={unlockPassword} onChangeText={setUnlockPassword} secureTextEntry placeholder="Enter vault password" />
             <View style={styles.inlineButtons}>
-              <Button label={busy ? "Unlocking…" : "Unlock Wallet"} onPress={unlockWallet} disabled={busy} />
-              <Button label="Biometric Unlock" onPress={unlockWithBiometrics} secondary disabled={!biometricAvailable || !biometricEnabled} />
+              <Button label={busyAction === "unlockPassword" ? "Unlocking…" : "Unlock Wallet"} onPress={unlockWallet} disabled={busy} />
+              <Button label={busyAction === "unlockBiometric" ? "Unlocking…" : "Biometric Unlock"} onPress={unlockWithBiometrics} secondary disabled={busy || !biometricAvailable || !biometricEnabled} />
             </View>
             <Text style={styles.helperText}>{biometricEnabled && biometricAvailable ? "Biometric unlock is available on this device." : "Biometric unlock is not enabled or not available."}</Text>
           </Card>
@@ -2212,7 +2241,7 @@ function App() {
                 <View style={styles.actionGrid}>
                   <Button label="Send" onPress={() => setTab("home")} />
                   <Button label="Receive" onPress={() => setReceiveVisible(true)} secondary />
-                  <Button label="Faucet" onPress={claimFaucetAction} secondary disabled={busy} />
+                  <Button label={busyAction === "faucet" ? "Claiming…" : "Faucet"} onPress={claimFaucetAction} secondary disabled={busy} />
                   <Button label="Open Browser" onPress={() => setTab("browser")} secondary />
                   <Button label="Activity" onPress={() => setTab("activity")} secondary />
                 </View>
@@ -2225,7 +2254,7 @@ function App() {
                   <Button label="Scan Recipient" onPress={() => scanWithCamera("native")} compact secondary />
                   <Button label="Paste" onPress={() => pasteClipboardTo((value) => setSendForm((p) => ({ ...p, to: value } )))} compact />
                 </View>
-                <Button label={busy ? "Sending…" : "Send LQD"} onPress={sendNativeAction} disabled={busy} />
+                <Button label={busyAction === "sendNative" ? "Sending…" : "Send LQD"} onPress={sendNativeAction} disabled={busy} />
               </Card>
 
               <Card title="Receive" subtitle="Your current address.">
@@ -2248,7 +2277,7 @@ function App() {
                   <Button label="Scan Token" onPress={() => scanWithCamera("import")} compact secondary />
                   <Button label="Paste" onPress={() => pasteClipboardTo((value) => setTokenImportForm({ address: value }))} compact />
                 </View>
-                <Button label={busy ? "Importing…" : "Import Token"} onPress={addTokenAction} disabled={busy} />
+                <Button label={busyAction === "importToken" ? "Importing…" : "Import Token"} onPress={addTokenAction} disabled={busy} />
               </Card>
 
               <Card title="Watchlist" subtitle="Balances auto-refresh on unlock and after actions.">
@@ -2279,7 +2308,7 @@ function App() {
                     <Button label="Scan Recipient" onPress={() => scanWithCamera("token")} compact secondary />
                     <Button label="Paste" onPress={() => pasteClipboardTo((value) => setTokenSendForm((p) => ({ ...p, to: value } )))} compact />
                   </View>
-                  <Button label={busy ? "Sending…" : "Send Token"} onPress={() => sendTokenAction(selectedTokenForSend)} disabled={busy} />
+                  <Button label={busyAction === "sendToken" ? "Sending…" : "Send Token"} onPress={() => sendTokenAction(selectedTokenForSend)} disabled={busy} />
                   <Button label="Close" onPress={() => setSelectedTokenForSend(null)} secondary />
                 </Card>
               ) : null}
@@ -2296,7 +2325,7 @@ function App() {
                 </View>
                 {renderBuiltinTemplateFields()}
                 <Field label="Gas" value={deployForm.gas} onChangeText={(v) => setDeployForm((p) => ({ ...p, gas: v }))} keyboardType="numeric" placeholder="500000" />
-                <Button label={busy ? "Deploying…" : "Deploy Builtin"} onPress={deployBuiltinAction} disabled={busy} />
+                <Button label={busyAction === "deployBuiltin" ? "Deploying…" : "Deploy Builtin"} onPress={deployBuiltinAction} disabled={busy} />
                 <Button label="Refresh Factory" onPress={refreshFactory} secondary />
                 <Text style={styles.helperText}>If the selected template is `dex_factory`, the deployed address becomes the canonical shared DEX factory for all users.</Text>
               </Card>
@@ -2304,8 +2333,8 @@ function App() {
               <Card title="Custom plugin deploy" subtitle="Compile Go plugin source and deploy it from mobile.">
                 <Field label="Source code" value={customSource} onChangeText={setCustomSource} multiline numberOfLines={10} placeholder="Go plugin source…" />
                 <View style={styles.inlineButtons}>
-                  <Button label={busy ? "Compiling…" : "Compile Plugin"} onPress={compileCustomPluginAction} disabled={busy} />
-                  <Button label="Deploy Plugin" onPress={deployCustomPluginAction} secondary disabled={busy || !compiledPluginUri} />
+                  <Button label={busyAction === "compileCustom" ? "Compiling…" : "Compile Plugin"} onPress={compileCustomPluginAction} disabled={busy} />
+                  <Button label={busyAction === "deployCustom" ? "Deploying…" : "Deploy Plugin"} onPress={deployCustomPluginAction} secondary disabled={busy || !compiledPluginUri} />
                 </View>
                 <Text style={styles.helperText}>
                   {compiledPlugin ? `Compiled: ${compiledPluginSize} bytes ready for upload.` : "Compile source first, then deploy the generated .so file."}
@@ -2318,12 +2347,12 @@ function App() {
                 <Field label="Args (comma separated)" value={callForm.args} onChangeText={(v) => setCallForm((p) => ({ ...p, args: v }))} placeholder="addr, 1000" />
                 <Field label="Value" value={callForm.value} onChangeText={(v) => setCallForm((p) => ({ ...p, value: v }))} keyboardType="decimal-pad" placeholder="0" />
                 <Field label="Gas" value={callForm.gas} onChangeText={(v) => setCallForm((p) => ({ ...p, gas: v }))} keyboardType="numeric" placeholder="200000" />
-                <Button label={busy ? "Submitting…" : "Submit Call"} onPress={callContractAction} disabled={busy} />
+                <Button label={busyAction === "callContract" ? "Submitting…" : "Submit Call"} onPress={callContractAction} disabled={busy} />
               </Card>
 
               <Card title="Inspect contract" subtitle="Read ABI and contract storage from the node.">
                 <Field label="Contract address" value={inspectForm.address} onChangeText={(v) => setInspectForm({ address: v })} placeholder="0x..." />
-                <Button label={busy ? "Loading…" : "Load ABI / Storage"} onPress={inspectContractAction} disabled={busy} />
+                <Button label={busyAction === "inspectContract" ? "Loading…" : "Load ABI / Storage"} onPress={inspectContractAction} disabled={busy} />
                 <Text style={styles.inspectTitle}>ABI</Text>
                 <Text style={styles.inspectBox}>{inspectData.abi ? JSON.stringify(inspectData.abi, null, 2) : "No ABI loaded yet."}</Text>
                 <Text style={styles.inspectTitle}>Storage</Text>
