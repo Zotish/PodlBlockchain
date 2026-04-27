@@ -359,6 +359,19 @@ const initialDeployForm = {
   template: "dex_factory",
   gas: "500000",
   gasPrice: "",
+  tokenName: "My Token",
+  tokenSymbol: "MTK",
+  tokenSupply: "1000000000000000",
+  tokenA: "",
+  tokenB: "",
+  daoName: "DAO Treasury",
+  nftName: "NFT Collection",
+  nftSymbol: "NFT",
+  bridgeName: "Bridged Token",
+  bridgeSymbol: "BRG",
+  bridgeDecimals: "18",
+  bridgeSourceToken: "",
+  lendingToken: "LQD",
 };
 
 const initialCallForm = {
@@ -1004,6 +1017,101 @@ function App() {
     setTab("browser");
   }
 
+  function builtinInitArgs(form = deployForm) {
+    switch (form.template) {
+      case "lqd20":
+        return [
+          form.tokenName.trim() || "My Token",
+          form.tokenSymbol.trim() || "MTK",
+          form.tokenSupply.trim() || "1000000000000000",
+        ];
+      case "dex_swap":
+        return [form.tokenA.trim(), form.tokenB.trim()];
+      case "dao_treasury":
+        return [form.daoName.trim() || "DAO Treasury"];
+      case "nft_collection":
+        return [
+          form.nftName.trim() || "NFT Collection",
+          form.nftSymbol.trim() || "NFT",
+        ];
+      case "bridge_token":
+        return [
+          form.bridgeName.trim() || "Bridged Token",
+          form.bridgeSymbol.trim() || "BRG",
+          form.bridgeDecimals.trim() || "18",
+          form.bridgeSourceToken.trim(),
+        ];
+      case "lending_pool":
+        return [form.lendingToken.trim() || "LQD"];
+      default:
+        return [];
+    }
+  }
+
+  function validateBuiltinDeployForm(form = deployForm) {
+    if (form.template === "dex_swap" && (!isLikelyAddress(form.tokenA) || !isLikelyAddress(form.tokenB))) {
+      return "DEX Swap needs valid Token A and Token B contract addresses";
+    }
+    if (form.template === "lqd20" && (!/^\d+$/.test(form.tokenSupply.trim()) || BigInt(form.tokenSupply.trim() || "0") <= 0n)) {
+      return "LQD20 supply must be greater than 0";
+    }
+    if (form.template === "bridge_token" && Number(form.bridgeDecimals || 0) < 0) {
+      return "Bridge token decimals must be valid";
+    }
+    return "";
+  }
+
+  function renderBuiltinTemplateFields() {
+    switch (deployForm.template) {
+      case "lqd20":
+        return (
+          <View style={styles.sectionGapSmall}>
+            <Field label="Token name" value={deployForm.tokenName} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenName: v }))} placeholder="My Token" />
+            <Field label="Token symbol" value={deployForm.tokenSymbol} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenSymbol: v.toUpperCase() }))} placeholder="MTK" />
+            <Field label="Initial supply (raw units)" value={deployForm.tokenSupply} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenSupply: v.replace(/[^\d]/g, "") }))} keyboardType="numeric" placeholder="1000000000000000" />
+            <Text style={styles.helperText}>LQD20 uses 8 decimals. Example: 10000000 tokens = 1000000000000000 raw units.</Text>
+          </View>
+        );
+      case "dex_swap":
+        return (
+          <View style={styles.sectionGapSmall}>
+            <Field label="Token A contract" value={deployForm.tokenA} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenA: v }))} placeholder="0x..." />
+            <Field label="Token B contract" value={deployForm.tokenB} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenB: v }))} placeholder="0x..." />
+          </View>
+        );
+      case "dao_treasury":
+        return (
+          <View style={styles.sectionGapSmall}>
+            <Field label="DAO name" value={deployForm.daoName} onChangeText={(v) => setDeployForm((p) => ({ ...p, daoName: v }))} placeholder="DAO Treasury" />
+          </View>
+        );
+      case "nft_collection":
+        return (
+          <View style={styles.sectionGapSmall}>
+            <Field label="Collection name" value={deployForm.nftName} onChangeText={(v) => setDeployForm((p) => ({ ...p, nftName: v }))} placeholder="NFT Collection" />
+            <Field label="Collection symbol" value={deployForm.nftSymbol} onChangeText={(v) => setDeployForm((p) => ({ ...p, nftSymbol: v.toUpperCase() }))} placeholder="NFT" />
+          </View>
+        );
+      case "bridge_token":
+        return (
+          <View style={styles.sectionGapSmall}>
+            <Field label="Bridge token name" value={deployForm.bridgeName} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeName: v }))} placeholder="Bridged Token" />
+            <Field label="Bridge token symbol" value={deployForm.bridgeSymbol} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeSymbol: v.toUpperCase() }))} placeholder="BRG" />
+            <Field label="Decimals" value={deployForm.bridgeDecimals} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeDecimals: v.replace(/[^\d]/g, "") }))} keyboardType="numeric" placeholder="18" />
+            <Field label="Source token / external address" value={deployForm.bridgeSourceToken} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeSourceToken: v }))} placeholder="0x... or external token id" />
+          </View>
+        );
+      case "lending_pool":
+        return (
+          <View style={styles.sectionGapSmall}>
+            <Field label="Lending asset" value={deployForm.lendingToken} onChangeText={(v) => setDeployForm((p) => ({ ...p, lendingToken: v }))} placeholder="LQD or token contract" />
+          </View>
+        );
+      default:
+        return <Text style={styles.helperText}>This template does not need extra constructor fields.</Text>;
+    }
+  }
+
   function sendBrowserProviderResponse(id, ok, result, error = "") {
     const payload = JSON.stringify({ id, ok, result, error }).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
     browserRef.current?.injectJavaScript(`
@@ -1569,6 +1677,11 @@ function App() {
       setStatus("Unlock wallet first");
       return;
     }
+    const validationError = validateBuiltinDeployForm();
+    if (validationError) {
+      setStatus(validationError);
+      return;
+    }
     setBusy(true);
     try {
       const res = await nodeDeployBuiltin(nodeUrl, {
@@ -1576,6 +1689,7 @@ function App() {
         owner: wallet.address,
         private_key: wallet.privateKey,
         gas: Number(deployForm.gas || 500000),
+        init_args: builtinInitArgs(),
       });
       if (deployForm.template === "dex_factory" && res?.address) {
         setFactoryAddress(res.address);
@@ -2131,6 +2245,7 @@ function App() {
                     <Chip key={item.value} label={item.label} active={deployForm.template === item.value} onPress={() => setDeployForm((p) => ({ ...p, template: item.value }))} />
                   ))}
                 </View>
+                {renderBuiltinTemplateFields()}
                 <Field label="Gas" value={deployForm.gas} onChangeText={(v) => setDeployForm((p) => ({ ...p, gas: v }))} keyboardType="numeric" placeholder="500000" />
                 <Button label={busy ? "Deploying…" : "Deploy Builtin"} onPress={deployBuiltinAction} disabled={busy} />
                 <Button label="Refresh Factory" onPress={refreshFactory} secondary />
@@ -2796,6 +2911,10 @@ const styles = StyleSheet.create({
   sectionGap: {
     gap: 12,
     marginTop: 12,
+  },
+  sectionGapSmall: {
+    gap: 10,
+    marginTop: 10,
   },
   browserSection: {
     flex: 1,
