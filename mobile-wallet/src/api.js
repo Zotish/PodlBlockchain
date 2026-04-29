@@ -155,6 +155,10 @@ export async function nodeCurrentFactory(nodeUrl) {
   return getJson(`${normalizeUrl(nodeUrl)}/dex/current`);
 }
 
+export async function nodeLiquidityPools(nodeUrl) {
+  return getJson(`${normalizeUrl(nodeUrl)}/liquidity/pools`);
+}
+
 export async function nodeRecentTransactions(nodeUrl) {
   return getJson(`${normalizeUrl(nodeUrl)}/transactions/recent`);
 }

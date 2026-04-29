@@ -45,6 +45,7 @@ import {
   nodeDeployBuiltin,
   nodeDeployContract,
   nodeFaucet,
+  nodeLiquidityPools,
   nodeRecentTransactions,
   normalizeUrl,
   postJson,
@@ -191,6 +192,48 @@ function coerceBrowserUrl(value) {
   if (!raw) return DEFAULT_BROWSER_URL;
   if (/^https?:\/\//i.test(raw)) return raw;
   return `https://${raw}`;
+}
+
+function normalizeAddress(value) {
+  const raw = String(value || "").trim();
+  return isLikelyAddress(raw) ? raw.toLowerCase() : "";
+}
+
+function tokenCandidateFromValue(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap(tokenCandidateFromValue);
+  }
+  if (!value || typeof value !== "object") {
+    return normalizeAddress(value) ? [normalizeAddress(value)] : [];
+  }
+
+  const directKeys = [
+    "contract",
+    "Contract",
+    "contract_address",
+    "contractAddress",
+    "token",
+    "Token",
+    "token_address",
+    "tokenAddress",
+    "lqd_token",
+    "lqdToken",
+    "target_token",
+    "targetToken",
+    "address",
+    "Address",
+  ];
+  const pairKeys = ["tokenA", "token_a", "TokenA", "tokenB", "token_b", "TokenB"];
+  const candidates = [];
+
+  for (const key of [...directKeys, ...pairKeys]) {
+    const candidate = normalizeAddress(value[key]);
+    if (candidate) candidates.push(candidate);
+  }
+
+  if (value.args || value.Args) candidates.push(...tokenCandidateFromValue(value.args || value.Args));
+  if (value.extra_data || value.ExtraData) candidates.push(...tokenCandidateFromValue(value.extra_data || value.ExtraData));
+  return candidates;
 }
 
 function Card({ title, subtitle, children, style }) {
@@ -753,12 +796,13 @@ function App() {
   async function refreshWalletSnapshot(addressOverride = "") {
     const activeAddress = addressOverride || wallet?.address;
     if (!activeAddress) return;
-    const [native, factory, recent, requests, tokensResp] = await Promise.all([
+    const [native, factory, recent, requests, tokensResp, poolsResp] = await Promise.all([
       walletBalance(nodeUrl, activeAddress).catch(() => null),
       nodeCurrentFactory(nodeUrl).catch(() => null),
       nodeRecentTransactions(nodeUrl).catch(() => []),
       nodeBridgeRequests(nodeUrl).catch(() => []),
       nodeBridgeTokens(nodeUrl).catch(() => []),
+      nodeLiquidityPools(nodeUrl).catch(() => null),
     ]);
 
     const balanceValue = native?.balance || native?.Balance || native?.amount || "0";
@@ -780,6 +824,12 @@ function App() {
     }
 
     await refreshTokenBalances(watchlist, activeAddress);
+    await autoDiscoverTokens({
+      recent: Array.isArray(recent) ? recent : [],
+      bridgeTokens: Array.isArray(tokensResp) ? tokensResp : [],
+      factory,
+      pools: poolsResp,
+    }, activeAddress);
   }
 
   async function loadBridgeChains() {
@@ -899,6 +949,78 @@ function App() {
       }
     }
     setWatchlist(updated);
+  }
+
+  async function importDetectedTokens(candidates, addressOverride = "", source = "activity") {
+    const activeAddress = addressOverride || wallet?.address;
+    if (!activeAddress) return 0;
+    const existing = new Set((watchlist || []).map((item) => normalizeAddress(item.address || item.contract)).filter(Boolean));
+    const unique = [...new Set((candidates || []).map(normalizeAddress).filter(Boolean))]
+      .filter((address) => !existing.has(address));
+    if (!unique.length) return 0;
+
+    const detected = [];
+    for (const address of unique) {
+      try {
+        const meta = await resolveTokenMeta(nodeUrl, address, activeAddress);
+        const hasRealMeta = Boolean(meta?.symbol && meta.symbol !== "TOKEN") || Boolean(meta?.name && meta.name !== "Token");
+        if (!hasRealMeta) continue;
+        const balance = await resolveTokenBalance(nodeUrl, walletUrl, address, activeAddress);
+        detected.push({ ...meta, address, balance, detectedFrom: source });
+      } catch {
+        // Ignore contracts that are not token-like.
+      }
+    }
+    if (!detected.length) return 0;
+    setWatchlist((prev) => mergeUniqueByKey(prev, detected, "address"));
+    return detected.length;
+  }
+
+  async function autoDiscoverTokens(snapshot = {}, addressOverride = "") {
+    const activeAddress = addressOverride || wallet?.address;
+    if (!activeAddress) return 0;
+    const currentAddress = normalizeAddress(activeAddress);
+    const recent = Array.isArray(snapshot.recent) ? snapshot.recent : recentTxs;
+    const bridgeTokenList = Array.isArray(snapshot.bridgeTokens) ? snapshot.bridgeTokens : bridgeTokens;
+    const factory = snapshot.factory || null;
+    const poolTokenCandidates = await discoverPoolTokenCandidates(snapshot.pools);
+
+    const relatedTxs = (recent || []).filter((tx) => {
+      const from = normalizeAddress(tx.From || tx.from);
+      const to = normalizeAddress(tx.To || tx.to);
+      const args = tokenCandidateFromValue(tx.args || tx.Args);
+      return from === currentAddress || to === currentAddress || args.includes(currentAddress);
+    });
+
+    const candidates = [
+      ...tokenCandidateFromValue(relatedTxs),
+      ...tokenCandidateFromValue(bridgeTokenList),
+      ...tokenCandidateFromValue(factory),
+      ...poolTokenCandidates,
+      ...tokenCandidateFromValue(deployForm.tokenA),
+      ...tokenCandidateFromValue(deployForm.tokenB),
+    ].filter((address) => address !== currentAddress);
+
+    return importDetectedTokens(candidates, activeAddress, "auto");
+  }
+
+  async function discoverPoolTokenCandidates(poolsSnapshot) {
+    const source = poolsSnapshot?.pools || poolsSnapshot;
+    const poolAddresses = Array.isArray(source)
+      ? source.map((item) => item?.address || item?.pool || item?.pair || item?.pairAddr || item)
+      : Object.keys(source || {});
+    const candidates = [];
+    for (const poolAddress of poolAddresses.slice(0, 50)) {
+      const address = normalizeAddress(poolAddress);
+      if (!address) continue;
+      try {
+        const storage = await nodeContractStorage(nodeUrl, address);
+        candidates.push(storage?.token0, storage?.token1, storage?.Token0, storage?.Token1);
+      } catch {
+        // Some liquidity entries may not be DEX pairs; skip silently.
+      }
+    }
+    return tokenCandidateFromValue(candidates);
   }
 
   function rememberActivity(entry) {
@@ -1516,6 +1638,31 @@ function App() {
     }
   }
 
+  async function autoDiscoverTokensAction() {
+    if (!wallet?.address) {
+      setStatus("Unlock wallet first");
+      return;
+    }
+    setBusy(true);
+    setBusyAction("autoDiscoverTokens");
+    try {
+      const recent = await nodeRecentTransactions(nodeUrl).catch(() => []);
+      const bridgeTokenList = await nodeBridgeTokens(nodeUrl).catch(() => []);
+      const factory = await nodeCurrentFactory(nodeUrl).catch(() => null);
+      const pools = await nodeLiquidityPools(nodeUrl).catch(() => null);
+      const importedCount = await autoDiscoverTokens({ recent, bridgeTokens: bridgeTokenList, factory, pools }, wallet.address);
+      if (!importedCount) {
+        await refreshTokenBalances(watchlist, wallet.address);
+      }
+      setStatus(importedCount ? `Auto imported ${importedCount} token${importedCount === 1 ? "" : "s"}` : "No new tokens found");
+    } catch (e) {
+      setStatus(e.message || "Auto token discovery failed");
+    } finally {
+      setBusy(false);
+      setBusyAction("");
+    }
+  }
+
   async function refreshSingleToken(address) {
     if (!wallet?.address) return;
     try {
@@ -1749,6 +1896,13 @@ function App() {
       if (res?.address) {
         setCallForm((prev) => ({ ...prev, contract: res.address }));
         setInspectForm({ address: res.address });
+        const tokenLikeTemplates = ["lqd20", "bridge_token"];
+        const candidates = tokenLikeTemplates.includes(deployForm.template)
+          ? [res.address]
+          : deployForm.template === "dex_swap"
+            ? [deployForm.tokenA, deployForm.tokenB]
+            : [];
+        await importDetectedTokens(candidates, wallet.address, "deploy");
       }
       rememberActivity({
         type: "deploy",
@@ -2278,6 +2432,7 @@ function App() {
                   <Button label="Paste" onPress={() => pasteClipboardTo((value) => setTokenImportForm({ address: value }))} compact />
                 </View>
                 <Button label={busyAction === "importToken" ? "Importing…" : "Import Token"} onPress={addTokenAction} disabled={busy} />
+                <Button label={busyAction === "autoDiscoverTokens" ? "Scanning…" : "Auto Discover Tokens"} onPress={autoDiscoverTokensAction} disabled={busy} secondary />
               </Card>
 
               <Card title="Watchlist" subtitle="Balances auto-refresh on unlock and after actions.">
