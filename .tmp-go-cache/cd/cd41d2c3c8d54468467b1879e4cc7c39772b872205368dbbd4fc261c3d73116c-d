@@ -1,0 +1,5 @@
+./conversion.go
+./conversion_binary.go
+./conversion_ternary.go
+./hints.go
+./intf_constcheck.go

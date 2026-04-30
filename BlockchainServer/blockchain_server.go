@@ -3066,8 +3066,12 @@ func (b *BlockchainServer) CompileGoPlugin(w http.ResponseWriter, r *http.Reques
 	defer os.RemoveAll(tmpDir)
 
 	// Write contract source
+	source := req.Source
+	source = strings.ReplaceAll(source, "//go:build ignore", "")
+	source = strings.ReplaceAll(source, "// +build ignore", "")
+
 	srcPath := filepath.Join(tmpDir, "contract.go")
-	if err := os.WriteFile(srcPath, []byte(req.Source), 0644); err != nil {
+	if err := os.WriteFile(srcPath, []byte(source), 0644); err != nil {
 		http.Error(w, `{"error":"failed to write source file"}`, 500)
 		return
 	}

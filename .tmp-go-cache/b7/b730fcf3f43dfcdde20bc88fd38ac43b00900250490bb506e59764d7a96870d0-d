@@ -1,0 +1,3 @@
+./rangecheck.go
+./rangecheck_commit.go
+./rangecheck_plain.go

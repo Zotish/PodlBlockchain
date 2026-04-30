@@ -1,0 +1,6 @@
+./bitreverse.go
+./doc.go
+./domain.go
+./fft.go
+./kernel_purego.go
+./options.go

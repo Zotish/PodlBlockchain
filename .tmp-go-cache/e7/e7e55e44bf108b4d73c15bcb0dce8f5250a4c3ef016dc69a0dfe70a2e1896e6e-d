@@ -1,0 +1,3 @@
+./debug.go
+./debug_unset.go
+./symbol_table.go

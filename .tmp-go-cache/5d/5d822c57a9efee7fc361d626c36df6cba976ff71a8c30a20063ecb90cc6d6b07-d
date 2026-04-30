@@ -1,0 +1,4 @@
+./doc.go
+./hashes.go
+./interface.go
+./merkle-damgard.go

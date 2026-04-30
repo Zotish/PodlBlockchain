@@ -4,11 +4,12 @@ const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
 const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
 const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
+const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
   address: "",
-  nodeUrl:   PROD_CHAIN_URL,
+  nodeUrl: PROD_CHAIN_URL,
   walletUrl: PROD_WALLET_URL,
   tokens: [],          // [{ address, symbol, name, decimals }]
   compiledBinary: null // last compiler output
@@ -71,6 +72,10 @@ function shortAddr(a) {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
+function isLocalEndpoint(url = "") {
+  return /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?/i.test(String(url).trim());
+}
+
 function tokenColor(sym) {
   const hue = ((sym || "?").charCodeAt(0) * 47 + 120) % 360;
   return `hsl(${hue},55%,42%)`;
@@ -91,7 +96,7 @@ async function waitForTx(txHash, timeoutMs = 30000) {
     try {
       const res = await nodeGet(`/tx/${encodeURIComponent(txHash)}`);
       if (res && (res.tx_hash || res.TxHash || res.hash)) return res;
-    } catch {}
+    } catch { }
   }
   return null;
 }
@@ -150,40 +155,27 @@ async function init() {
   const cfgRes = await msg("LQD_GET_NETWORKS");
   if (cfgRes?.ok) {
     const nets = cfgRes.networks || {};
-    const cur  = cfgRes.currentNetwork;
-    const net  = nets[cur];
+    const cur = cfgRes.currentNetwork;
+    const net = nets[cur];
     if (net) { state.nodeUrl = net.nodeUrl; state.walletUrl = net.walletUrl; }
   }
 
   // Load saved endpoints override
   const stored = await ext.storage.local.get(["nodeUrl", "walletUrl", "address"]);
-  if (stored.nodeUrl)   state.nodeUrl   = stored.nodeUrl;
+  if (stored.nodeUrl) state.nodeUrl = stored.nodeUrl;
   if (stored.walletUrl) state.walletUrl = stored.walletUrl;
 
-  // Auto-migrate legacy local defaults to production endpoints.
-  if (
-    state.nodeUrl &&
-    (state.nodeUrl.includes(":5000") ||
-      state.nodeUrl.includes(":6500") ||
-      state.nodeUrl.includes(":9000") ||
-      state.nodeUrl.includes("127.0.0.1") ||
-      state.nodeUrl.includes("localhost"))
-  ) {
+  if (state.nodeUrl && isLocalEndpoint(state.nodeUrl)) {
     state.nodeUrl = PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: state.nodeUrl });
   }
-  if (
-    state.walletUrl &&
-    (state.walletUrl.includes(":8080") ||
-      state.walletUrl.includes("127.0.0.1") ||
-      state.walletUrl.includes("localhost"))
-  ) {
+  if (state.walletUrl && isLocalEndpoint(state.walletUrl)) {
     state.walletUrl = PROD_WALLET_URL;
     await ext.storage.local.set({ walletUrl: state.walletUrl });
   }
 
   // Populate settings inputs
-  $("settingsNodeUrl").value  = state.nodeUrl;
+  $("settingsNodeUrl").value = state.nodeUrl;
   $("settingsWalletUrl").value = state.walletUrl;
   await loadBridgeFamilies();
   await loadBridgeTokens();
@@ -224,10 +216,10 @@ function showApp() {
   $("chipLabel").textContent = shortAddr(state.address);
   $("receiveAddr").textContent = state.address;
   _bscAccount = state.address;
-  loadBridgeFamilies().catch(() => {});
-  loadBridgeTokens().catch(() => {});
-  loadBridgeChains().catch(() => {});
-  useExtensionWalletSigner().catch(() => {});
+  loadBridgeFamilies().catch(() => { });
+  loadBridgeTokens().catch(() => { });
+  loadBridgeChains().catch(() => { });
+  useExtensionWalletSigner().catch(() => { });
   loadTokens();
   refreshBalance();
   loadActivity();
@@ -260,7 +252,7 @@ document.querySelectorAll(".nav-item").forEach(btn => {
     const page = btn.dataset.page;
     $(`page-${page}`)?.classList.add("active");
     if (page === "activity") loadActivity();
-    if (page === "bridge")   loadBridgeHistory();
+    if (page === "bridge") loadBridgeHistory();
     if (page === "settings") loadNetworkList();
   });
 });
@@ -288,7 +280,7 @@ async function refreshBalance() {
     const pend = data.pending ?? "0";
     $("heroBalance").textContent = fmtAmount(bal);
     $("statConfirmed").textContent = fmtAmount(bal) + " LQD";
-    $("statPending").textContent   = fmtAmount(pend) + " LQD";
+    $("statPending").textContent = fmtAmount(pend) + " LQD";
   } catch (e) { toast("Balance load failed: " + e.message, "error"); }
 }
 
@@ -310,10 +302,10 @@ $("openSendBtn").addEventListener("click", () => {
 $("cancelSendBtn").addEventListener("click", () => { $("sendCard").style.display = "none"; });
 
 $("doSendBtn").addEventListener("click", async () => {
-  const to  = $("sendTo").value.trim();
+  const to = $("sendTo").value.trim();
   const amt = $("sendAmt").value.trim();
-  const gp  = parseInt($("sendGasPrice").value) || 1;
-  const gl  = parseInt($("sendGasLimit").value) || 21000;
+  const gp = parseInt($("sendGasPrice").value) || 1;
+  const gl = parseInt($("sendGasLimit").value) || 21000;
   if (!to || !amt) { toast("Fill all fields", "error"); return; }
 
   // Convert human LQD (e.g. "1.5") → raw base units (e.g. "150000000")
@@ -334,7 +326,7 @@ $("doSendBtn").addEventListener("click", async () => {
     await recordLocalActivity({ type: "send", to, value: rawValue, tx_hash: hash });
     $("sendTo").value = ""; $("sendAmt").value = "";
     await refreshBalance();
-    try { window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: state.address } })); } catch {}
+    try { window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: state.address } })); } catch { }
   } catch (e) { showResult("sendResult", "✗ " + e.message, true); toast(e.message, "error"); }
   finally { $("doSendBtn").disabled = false; }
 });
@@ -381,8 +373,8 @@ async function fetchTokenMeta(addr) {
   ]);
   // BalanceOf needs arg
   let bal = "0";
-  try { const r = await contractCall(addr, "BalanceOf", [state.address]); bal = r.output || "0"; } catch {}
-  return { name: name || "Unknown", symbol: symbol || addr.slice(2,6).toUpperCase(), decimals: parseInt(decimals) || 8, balance: bal };
+  try { const r = await contractCall(addr, "BalanceOf", [state.address]); bal = r.output || "0"; } catch { }
+  return { name: name || "Unknown", symbol: symbol || addr.slice(2, 6).toUpperCase(), decimals: parseInt(decimals) || 8, balance: bal };
 }
 
 function renderTokenList() {
@@ -396,13 +388,13 @@ function renderTokenList() {
     const row = document.createElement("div");
     row.className = "token-row";
     row.innerHTML = `
-      <div class="token-icon-sm" style="background:${tokenColor(t.symbol)}">${(t.symbol||"?")[0]}</div>
+      <div class="token-icon-sm" style="background:${tokenColor(t.symbol)}">${(t.symbol || "?")[0]}</div>
       <div class="token-info">
         <div class="token-sym">${t.symbol}</div>
-        <div class="token-name">${t.name} · ${t.address.slice(0,10)}…</div>
+        <div class="token-name">${t.name} · ${t.address.slice(0, 10)}…</div>
       </div>
       <div style="text-align:right;">
-        <div class="token-bal">${fmtAmount(t.balance || "0", parseInt(t.decimals)||8)}</div>
+        <div class="token-bal">${fmtAmount(t.balance || "0", parseInt(t.decimals) || 8)}</div>
         <div style="display:flex;gap:6px;margin-top:4px;justify-content:flex-end;">
           <button class="btn btn-secondary btn-sm sendTokBtn" data-addr="${t.address}" data-sym="${t.symbol}">Send</button>
           <button class="btn btn-secondary btn-sm refreshTokBtn" data-addr="${t.address}">⟳</button>
@@ -424,7 +416,7 @@ async function refreshTokenBal(addr) {
     const r = await contractCall(addr, "BalanceOf", [state.address]);
     const idx = state.tokens.findIndex(t => t.address.toLowerCase() === addr.toLowerCase());
     if (idx >= 0) { state.tokens[idx].balance = r.output || "0"; saveTokens(); renderTokenList(); }
-  } catch {}
+  } catch { }
 }
 
 $("doImportTokenBtn").addEventListener("click", async () => {
@@ -455,7 +447,7 @@ $("autoImportBtn").addEventListener("click", async () => {
           upsertToken({ address: addr, ...meta });
           found++;
         }
-      } catch {}
+      } catch { }
     }
     toast(`Auto-scan done. Found ${found} token(s).`, "success");
   } catch (e) { toast("Scan failed: " + e.message, "error"); }
@@ -478,7 +470,7 @@ function openSendToken(addr, sym) {
 $("cancelSendTokenBtn").addEventListener("click", () => { $("sendTokenCard").style.display = "none"; });
 
 $("doSendTokenBtn").addEventListener("click", async () => {
-  const to  = $("sendTokenTo").value.trim();
+  const to = $("sendTokenTo").value.trim();
   const amt = $("sendTokenAmt").value.trim();
   if (!to || !amt) { toast("Fill all fields", "error"); return; }
   // Convert human token amount → raw base units using token's own decimals
@@ -493,7 +485,7 @@ $("doSendTokenBtn").addEventListener("click", async () => {
     await recordLocalActivity({ type: "token", to, contract: _sendTokenAddr, value: rawAmt, tx_hash: hash });
     await refreshTokenBal(_sendTokenAddr);
     await refreshBalance();
-    try { window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: state.address, token: _sendTokenAddr } })); } catch {}
+    try { window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: state.address, token: _sendTokenAddr } })); } catch { }
   } catch (e) { showResult("sendTokenResult", "✗ " + e.message, true); }
   finally { $("doSendTokenBtn").disabled = false; }
 });
@@ -504,18 +496,18 @@ $("doSendTokenBtn").addEventListener("click", async () => {
 
 // ── Quick Deploy args ──────────────────────────────────────────────
 const QUICK_ARGS = {
-  lqd20:         [{ id:"q_name",    label:"Token Name",        ph:"My Token"            },
-                   { id:"q_sym",     label:"Symbol",            ph:"MTK"                 },
-                   { id:"q_supply",  label:"Initial Supply",    ph:"1000000000000000"    }],
-  dex_swap:      [],   // no init args at deploy time
-  bridge_token:  [{ id:"q_bname",   label:"Token Name",        ph:"Wrapped BNB"         },
-                   { id:"q_bsym",    label:"Symbol",            ph:"wBNB"                },
-                   { id:"q_bdec",    label:"Decimals",          ph:"18"                  },
-                   { id:"q_bbsc",    label:"BSC Token Address", ph:"0x..."               }],
-  lending_pool:  [],
-  nft_collection:[{ id:"q_nname",   label:"Collection Name",   ph:"My NFT"              },
-                   { id:"q_nsym",    label:"Symbol",            ph:"MNFT"                }],
-  dao_treasury:  [],
+  lqd20: [{ id: "q_name", label: "Token Name", ph: "My Token" },
+  { id: "q_sym", label: "Symbol", ph: "MTK" },
+  { id: "q_supply", label: "Initial Supply", ph: "1000000000000000" }],
+  dex_swap: [],   // no init args at deploy time
+  bridge_token: [{ id: "q_bname", label: "Token Name", ph: "Wrapped BNB" },
+  { id: "q_bsym", label: "Symbol", ph: "wBNB" },
+  { id: "q_bdec", label: "Decimals", ph: "18" },
+  { id: "q_bbsc", label: "BSC Token Address", ph: "0x..." }],
+  lending_pool: [],
+  nft_collection: [{ id: "q_nname", label: "Collection Name", ph: "My NFT" },
+  { id: "q_nsym", label: "Symbol", ph: "MNFT" }],
+  dao_treasury: [],
 };
 
 $("quickDeployType").addEventListener("change", renderQuickArgs);
@@ -583,7 +575,7 @@ fileInput.addEventListener("change", () => { if (fileInput.files[0]) setFile(fil
 let _contractFile = null;
 function setFile(f) {
   _contractFile = f;
-  $("fileDropName").textContent = `📄 ${f.name} (${(f.size/1024).toFixed(1)} KB)`;
+  $("fileDropName").textContent = `📄 ${f.name} (${(f.size / 1024).toFixed(1)} KB)`;
 }
 
 $("fileDeployBtn").addEventListener("click", async () => {
@@ -644,7 +636,7 @@ function renderCallFnSelect() {
   _callAbi.forEach((fn, i) => {
     const opt = document.createElement("option");
     opt.value = i;
-    opt.textContent = `${fn.name}(${(fn.inputs||[]).map(inp => inp.type || inp).join(", ")})`;
+    opt.textContent = `${fn.name}(${(fn.inputs || []).map(inp => inp.type || inp).join(", ")})`;
     sel.appendChild(opt);
   });
   $("callArgsSection").innerHTML = "";
@@ -676,7 +668,7 @@ $("callFnSelect").addEventListener("change", () => {
     : '<div class="notice" style="margin-bottom:12px;">No arguments required.</div>';
 });
 
-$("doCallBtn").addEventListener("click",  () => executeCall(false));
+$("doCallBtn").addEventListener("click", () => executeCall(false));
 $("doWriteBtn").addEventListener("click", () => executeCall(true));
 
 async function executeCall(isWrite) {
@@ -685,7 +677,7 @@ async function executeCall(isWrite) {
   let fn, args;
 
   if (selVal === "__manual__") {
-    fn   = $("manualFnName")?.value?.trim() || "";
+    fn = $("manualFnName")?.value?.trim() || "";
     args = ($("manualFnArgs")?.value || "").split(",").map(s => s.trim()).filter(Boolean);
   } else {
     const idx = parseInt(selVal);
@@ -728,7 +720,7 @@ $("compileType").addEventListener("change", () => {
 let _compiledType = "gocode";
 
 $("doCompileBtn").addEventListener("click", async () => {
-  const type   = $("compileType").value;
+  const type = $("compileType").value;
   const source = $("compileSource").value.trim();
   if (!source) { toast("Enter source code", "error"); return; }
 
@@ -755,7 +747,7 @@ $("doCompileBtn").addEventListener("click", async () => {
 
       // Decode base64 → Uint8Array → store as Blob
       const binStr = atob(res.binary);
-      const bytes  = new Uint8Array(binStr.length);
+      const bytes = new Uint8Array(binStr.length);
       for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
       state.compiledBinary = new Blob([bytes], { type: "application/octet-stream" });
       _compiledType = "plugin";
@@ -847,7 +839,7 @@ $("exploreBtn").addEventListener("click", async () => {
 
     const abi = Array.isArray(abiData) ? abiData : (abiData?.entries || abiData?.abi || abiData?.functions || []);
     const storage = storageData?.State?.storage ?? storageData?.State ?? storageData ?? {};
-    const events  = Array.isArray(eventsData) ? eventsData : (eventsData?.events || []);
+    const events = Array.isArray(eventsData) ? eventsData : (eventsData?.events || []);
 
     // Overview
     $("exp-overview").innerHTML = `
@@ -866,7 +858,7 @@ $("exploreBtn").addEventListener("click", async () => {
     $("exp-storage").innerHTML = storageEntries.length
       ? `<table style="width:100%;border-collapse:collapse;font-size:13px;">
            <tr style="color:var(--muted)"><th style="text-align:left;padding:6px 0;">Key</th><th style="text-align:left;padding:6px 0;">Value</th></tr>
-           ${storageEntries.map(([k,v]) => `<tr style="border-top:1px solid var(--border)">
+           ${storageEntries.map(([k, v]) => `<tr style="border-top:1px solid var(--border)">
              <td style="padding:8px 0;font-family:monospace;color:var(--accent2);max-width:200px;overflow:hidden;text-overflow:ellipsis;">${k}</td>
              <td style="padding:8px 0 8px 12px;word-break:break-all;max-width:300px;">${v}</td></tr>`).join("")}
          </table>`
@@ -874,7 +866,7 @@ $("exploreBtn").addEventListener("click", async () => {
 
     // Events
     $("exp-events").innerHTML = events.length
-      ? `<div class="activity-list">${events.slice(0,50).map(ev => `
+      ? `<div class="activity-list">${events.slice(0, 50).map(ev => `
           <div class="activity-row">
             <div class="act-icon">📡</div>
             <div class="act-info">
@@ -890,8 +882,8 @@ $("exploreBtn").addEventListener("click", async () => {
     } else {
       const jsonAbi = JSON.stringify(abi, null, 2);
       const wrappers = abi.map(fn => {
-        const params  = (fn.inputs||[]).map((_,i) => `arg${i+1}`).join(", ");
-        const hasArgs = (fn.inputs||[]).length > 0;
+        const params = (fn.inputs || []).map((_, i) => `arg${i + 1}`).join(", ");
+        const hasArgs = (fn.inputs || []).length > 0;
         return hasArgs
           ? `export const ${fn.name} = (${params}, from, pk) => callWrite("${fn.name}", [${params}], from, pk);`
           : `export const ${fn.name} = (caller="") => callRead("${fn.name}", [], caller);`;
@@ -928,17 +920,17 @@ $("exploreBtn").addEventListener("click", async () => {
 
       // Store in window so onclick can access without escaping hell
       window._lqdAbiJson = jsonAbi;
-      window._lqdAbiJs   = jsClient;
+      window._lqdAbiJs = jsClient;
 
       const fnRows = abi.map(fn => {
-        const isRead = (fn.inputs||[]).length === 0;
-        const badge  = isRead
+        const isRead = (fn.inputs || []).length === 0;
+        const badge = isRead
           ? `style="padding:2px 8px;border-radius:4px;font-size:11px;background:rgba(22,163,74,0.15);color:#4ade80;"`
           : `style="padding:2px 8px;border-radius:4px;font-size:11px;background:rgba(37,99,235,0.15);color:#93c5fd;"`;
         return `<div class="stat-box" style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;">
           <div>
             <div style="font-weight:700;font-size:13px;font-family:monospace;">${fn.name}</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:2px;">${(fn.inputs||[]).join(", ") || "no params"}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px;">${(fn.inputs || []).join(", ") || "no params"}</div>
           </div>
           <span ${badge}>${isRead ? "read" : "write"}</span>
         </div>`;
@@ -978,7 +970,7 @@ $("exploreBtn").addEventListener("click", async () => {
 
       // Populate <pre> elements via textContent — safe, no escaping needed
       document.getElementById("abiJsonPre").textContent = jsonAbi;
-      document.getElementById("abiJsPre").textContent   = jsClient;
+      document.getElementById("abiJsPre").textContent = jsClient;
 
       // ── Attach all event listeners here (CSP-safe, no inline onclick) ──
       const doAbiCopy = (text, btnId) => {
@@ -996,24 +988,24 @@ $("exploreBtn").addEventListener("click", async () => {
       };
 
       const showAbiPanel = (active) => {
-        const panels = { json:"abiPanelJson", js:"abiPanelJs", table:"abiPanelTable" };
-        const tabs   = { json:"abiTabJson",   js:"abiTabJs",   table:"abiTabTable"   };
+        const panels = { json: "abiPanelJson", js: "abiPanelJs", table: "abiPanelTable" };
+        const tabs = { json: "abiTabJson", js: "abiTabJs", table: "abiTabTable" };
         Object.keys(panels).forEach(k => {
           const panel = document.getElementById(panels[k]);
-          const tab   = document.getElementById(tabs[k]);
+          const tab = document.getElementById(tabs[k]);
           if (panel) panel.style.display = (k === active) ? "block" : "none";
           if (tab) {
             tab.style.background = (k === active) ? "var(--accent)" : "var(--surface2)";
-            tab.style.color      = (k === active) ? "#fff"          : "var(--text)";
+            tab.style.color = (k === active) ? "#fff" : "var(--text)";
           }
         });
       };
 
-      document.getElementById("abiTabJson") .addEventListener("click", () => showAbiPanel("json"));
-      document.getElementById("abiTabJs")   .addEventListener("click", () => showAbiPanel("js"));
+      document.getElementById("abiTabJson").addEventListener("click", () => showAbiPanel("json"));
+      document.getElementById("abiTabJs").addEventListener("click", () => showAbiPanel("js"));
       document.getElementById("abiTabTable").addEventListener("click", () => showAbiPanel("table"));
-      document.getElementById("copyJsonBtn").addEventListener("click", () => doAbiCopy(jsonAbi,   "copyJsonBtn"));
-      document.getElementById("copyJsBtn")  .addEventListener("click", () => doAbiCopy(jsClient,  "copyJsBtn"));
+      document.getElementById("copyJsonBtn").addEventListener("click", () => doAbiCopy(jsonAbi, "copyJsonBtn"));
+      document.getElementById("copyJsBtn").addEventListener("click", () => doAbiCopy(jsClient, "copyJsBtn"));
     }
 
     $("explorerResult").style.display = "block";
@@ -1282,7 +1274,7 @@ $("useWalletSignerBtn").addEventListener("click", async () => {
 $("doBridgeLockBtn").addEventListener("click", async () => {
   const family = String(bridgeFamilyId || $("bridgeFamilySelect")?.value || "evm").toLowerCase();
   const token = bridgeTokenAddressForSelection();
-  const amt    = $("bridgeLockAmt").value.trim();
+  const amt = $("bridgeLockAmt").value.trim();
   const lqdRecipient = $("bridgeLqdRecipient").value.trim() || state.address;
   bridgeMode = $("bridgeModeSelect")?.value || "public";
   bridgeChainId = $("bridgeChainSelect")?.value || bridgeChainId;
@@ -1380,7 +1372,7 @@ $("doBurnBtn").addEventListener("click", async () => {
   bridgeChainId = $("burnChainSelect")?.value || bridgeChainId;
   syncBridgeFamilyToUI(bridgeFamilyId);
   const tokenAddr = $("burnTokenAddr").value.trim();
-  const amt       = $("burnAmt").value.trim();
+  const amt = $("burnAmt").value.trim();
   const bscRecipient = $("burnBscRecipient").value.trim();
   if (!tokenAddr || !amt || !bscRecipient) { toast("Fill all fields", "error"); return; }
   try {
@@ -1407,9 +1399,9 @@ async function loadBridgeHistory() {
     const data = await nodeGet(`/bridge/requests?mode=${encodeURIComponent(bridgeMode)}`);
     const list = Array.isArray(data) ? data : (data.requests || []);
     if (!list.length) { $("bridgeHistory").innerHTML = '<div class="notice">No bridge requests found.</div>'; return; }
-  $("bridgeHistory").innerHTML = `
+    $("bridgeHistory").innerHTML = `
               <div class="activity-list">
-        ${list.slice(0,20).map(r => `
+        ${list.slice(0, 20).map(r => `
           <div class="activity-row">
             <div class="act-icon">${r.direction === "bsc_to_lqd" ? "→" : "←"}</div>
             <div class="act-info">
@@ -1648,7 +1640,7 @@ if (bridgeTokenAdminRemoveBtn) bridgeTokenAdminRemoveBtn.addEventListener("click
 async function recordLocalActivity(entry) {
   const key = `lqd_activity_${state.address}`;
   let acts = [];
-  try { acts = JSON.parse(localStorage.getItem(key) || "[]"); } catch {}
+  try { acts = JSON.parse(localStorage.getItem(key) || "[]"); } catch { }
   acts.unshift({ ...entry, time: Date.now() });
   if (acts.length > 200) acts = acts.slice(0, 200);
   localStorage.setItem(key, JSON.stringify(acts));
@@ -1657,12 +1649,12 @@ async function recordLocalActivity(entry) {
 function loadActivity() {
   const key = `lqd_activity_${state.address}`;
   let acts = [];
-  try { acts = JSON.parse(localStorage.getItem(key) || "[]"); } catch {}
+  try { acts = JSON.parse(localStorage.getItem(key) || "[]"); } catch { }
 
   // Also pull from extension background activity
   msg("LQD_GET_ACTIVITY").then(res => {
     const bgActs = res?.list || [];
-    const all = [...bgActs, ...acts].sort((a,b) => (b.time||0) - (a.time||0)).slice(0, 200);
+    const all = [...bgActs, ...acts].sort((a, b) => (b.time || 0) - (a.time || 0)).slice(0, 200);
     renderActivity(all);
   }).catch(() => renderActivity(acts));
 }
@@ -1670,13 +1662,13 @@ function loadActivity() {
 function renderActivity(acts) {
   const container = $("activityList");
   if (!acts.length) { container.innerHTML = '<div class="notice">No activity yet.</div>'; return; }
-  const icons = { send:"↑", receive:"↓", token:"🪙", contract:"📜", deploy:"🚀", bridge:"🌉" };
+  const icons = { send: "↑", receive: "↓", token: "🪙", contract: "📜", deploy: "🚀", bridge: "🌉" };
   container.innerHTML = `<div class="activity-list">
     ${acts.map(a => `
       <div class="activity-row">
         <div class="act-icon">${icons[a.type] || "•"}</div>
         <div class="act-info">
-          <div class="act-type">${(a.type||"tx").toUpperCase()}${a.function ? " · " + a.function : ""}${a.contractType ? " · " + a.contractType : ""}</div>
+          <div class="act-type">${(a.type || "tx").toUpperCase()}${a.function ? " · " + a.function : ""}${a.contractType ? " · " + a.contractType : ""}</div>
           <div class="act-hash">${a.tx_hash ? "Tx: " + a.tx_hash : (a.contract ? "Contract: " + a.contract : (a.to ? "To: " + a.to : ""))}</div>
           <div class="act-time">${a.time ? new Date(a.time).toLocaleString() : ""}</div>
         </div>
@@ -1691,7 +1683,7 @@ $("refreshActivityBtn").addEventListener("click", loadActivity);
 // SETTINGS PAGE
 // ══════════════════════════════════════════════════════════════════
 $("saveEndpointsBtn").addEventListener("click", async () => {
-  state.nodeUrl   = $("settingsNodeUrl").value.trim()  || state.nodeUrl;
+  state.nodeUrl = $("settingsNodeUrl").value.trim() || state.nodeUrl;
   state.walletUrl = $("settingsWalletUrl").value.trim() || state.walletUrl;
   await ext.storage.local.set({ nodeUrl: state.nodeUrl, walletUrl: state.walletUrl });
   toast("Endpoints saved!", "success");
@@ -1728,12 +1720,12 @@ async function loadNetworkList() {
   const { networks, currentNetwork } = res;
   const container = $("networkList");
   container.innerHTML = Object.entries(networks).map(([chainId, net]) => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px;background:var(--card2);border:1px solid ${chainId===currentNetwork?"var(--accent)":"var(--border)"};border-radius:var(--rs);margin-bottom:8px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px;background:var(--card2);border:1px solid ${chainId === currentNetwork ? "var(--accent)" : "var(--border)"};border-radius:var(--rs);margin-bottom:8px;">
       <div>
-        <div style="font-weight:600;">${net.name} ${chainId===currentNetwork?"<span style='color:var(--green);font-size:11px;'>● Active</span>":""}</div>
-        <div style="font-size:11px;color:var(--muted);">Chain: ${chainId} · ${net.nodeUrl||""}</div>
+        <div style="font-weight:600;">${net.name} ${chainId === currentNetwork ? "<span style='color:var(--green);font-size:11px;'>● Active</span>" : ""}</div>
+        <div style="font-size:11px;color:var(--muted);">Chain: ${chainId} · ${net.nodeUrl || ""}</div>
       </div>
-      ${chainId!==currentNetwork ? `<button class="btn btn-secondary btn-sm switchNetBtn" data-chain="${chainId}">Switch</button>` : ""}
+      ${chainId !== currentNetwork ? `<button class="btn btn-secondary btn-sm switchNetBtn" data-chain="${chainId}">Switch</button>` : ""}
     </div>`).join("");
 
   container.querySelectorAll(".switchNetBtn").forEach(b => {
@@ -1750,9 +1742,9 @@ async function loadNetworkList() {
 
 $("addNetworkBtn").addEventListener("click", async () => {
   const net = {
-    name:      $("newNetName").value.trim(),
-    chainId:   $("newNetChain").value.trim(),
-    nodeUrl:   $("newNetNode").value.trim(),
+    name: $("newNetName").value.trim(),
+    chainId: $("newNetChain").value.trim(),
+    nodeUrl: $("newNetNode").value.trim(),
     walletUrl: $("newNetWallet").value.trim(),
   };
   if (!net.name || !net.chainId || !net.nodeUrl) { toast("Fill required fields", "error"); return; }
@@ -1768,7 +1760,7 @@ $("addNetworkBtn").addEventListener("click", async () => {
   // Intercept: background keeps private key in memory while unlocked
   // We send a custom message to get it
   const origGetPK = getPrivateKey;
-  window._getPrivateKey = async function() {
+  window._getPrivateKey = async function () {
     const res = await msg("LQD_REQUEST", { payload: { id: "fp-pk-" + Date.now(), method: "lqd_getSessionKey" } });
     if (res?.result) return res.result;
     // If not supported, ask user inline
@@ -1788,7 +1780,7 @@ async function getPrivateKey() {
     const res = await msg("LQD_REQUEST", { payload: { id: "fp-pk-" + Date.now(), method: "lqd_accounts" } });
     // If session is unlocked, get key via reveal secret approach
     // Actually: ask user for password then decrypt
-    const data = await ext.storage.local.get(["walletCipher","walletIv","walletSalt"]);
+    const data = await ext.storage.local.get(["walletCipher", "walletIv", "walletSalt"]);
     if (!data.walletCipher) throw new Error("No wallet stored");
     // Use the background reveal mechanism
     const pass = prompt("Enter your wallet password to sign this transaction:");

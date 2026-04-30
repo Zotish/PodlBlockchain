@@ -2,16 +2,60 @@ const ext = typeof chrome !== "undefined" ? chrome : browser;
 const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
 const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
 const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
-
+const PROD_BRIDGE_ADMIN_URL = "https://delightful-churros-767ded.netlify.app";
+const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
+const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
+const OFFICIAL_DAPPS = [
+  {
+    name: "LQD DEX",
+    description: "Swap & provide liquidity on PosDL chain",
+    icon: "⇄",
+    iconBg: "linear-gradient(135deg,#0f172a,#7c3aed)",
+    url: PROD_DEX_URL,
+    category: "DeFi",
+  },
+  {
+    name: "Block Explorer",
+    description: "Browse blocks, transactions & addresses",
+    icon: "🔍",
+    iconBg: "linear-gradient(135deg,#0c4a6e,#0369a1)",
+    url: PROD_EXPLORER_URL,
+    category: "Tools",
+  },
+  {
+    name: "LQD Bridge",
+    description: "Bridge assets between LQD and BSC",
+    icon: "⬡",
+    iconBg: "linear-gradient(135deg,#064e3b,#059669)",
+    url: PROD_BRIDGE_ADMIN_URL,
+    category: "Bridge",
+  },
+  {
+    name: "Liquidity Pools",
+    description: "Manage LP positions & earn rewards",
+    icon: "💧",
+    iconBg: "linear-gradient(135deg,#1e3a5f,#2563eb)",
+    url: `${PROD_DEX_URL}/pools`,
+    category: "DeFi",
+  },
+  {
+    name: "Validators",
+    description: "View validators & staking statistics",
+    icon: "✦",
+    iconBg: "linear-gradient(135deg,#3b0764,#7e22ce)",
+    url: `${PROD_EXPLORER_URL}/validators`,
+    category: "Staking",
+  },
+];
 // ── Screens & DOM refs ────────────────────────────────────────────────────────
 const screens = {
   onboarding: document.getElementById("onboarding"),
-  create:     document.getElementById("create"),
-  import:     document.getElementById("import"),
-  main:       document.getElementById("main"),
-  settings:   document.getElementById("settings"),
-  networks:   document.getElementById("networks"),
-  locked:     document.getElementById("locked")
+  create: document.getElementById("create"),
+  import: document.getElementById("import"),
+  main: document.getElementById("main"),
+  settings: document.getElementById("settings"),
+  networks: document.getElementById("networks"),
+  locked: document.getElementById("locked")
 };
 
 function showScreen(name) {
@@ -80,17 +124,14 @@ function parseAmount(human, decimals = 8) {
   return full.replace(/^0+/, "") || "0";
 }
 
+function isLocalEndpoint(url = "") {
+  return /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?/i.test(String(url).trim());
+}
+
 async function getNodeUrl() {
   const data = await ext.storage.local.get(["nodeUrl"]);
   let url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
-  // Auto-migrate: port 5000 (macOS conflict) or 9000 (aggregator wrong format) → 6500
-  if (
-    url.includes(":5000") ||
-    url.includes(":6500") ||
-    url.includes(":9000") ||
-    url.includes("127.0.0.1") ||
-    url.includes("localhost")
-  ) {
+  if (isLocalEndpoint(url)) {
     url = PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: url });
   }
@@ -150,7 +191,8 @@ async function refreshBalance() {
   const data = await ext.storage.local.get(["address", "nodeUrl"]);
   if (!data.address) return;
   try {
-    const url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+    let url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+    if (isLocalEndpoint(url)) url = PROD_CHAIN_URL;
     const res = await fetch(`${url}/balance?address=${encodeURIComponent(data.address)}`);
     const json = await res.json();
     const raw = json.balance || json.Balance || "0";
@@ -184,8 +226,8 @@ function parseErr(err) {
   // Convert raw-unit blockchain error to human-readable LQD values
   msg = msg.replace(/balance=(\d+)/g, (_, n) => `balance=${formatLQD(n)} LQD`);
   msg = msg.replace(/required=(\d+)/g, (_, n) => `required=${formatLQD(n)} LQD`);
-  msg = msg.replace(/value (\d+)/g,    (_, n) => `value ${formatLQD(n)} LQD`);
-  msg = msg.replace(/fee (\d+)/g,      (_, n) => `fee ${formatLQD(n)} LQD`);
+  msg = msg.replace(/value (\d+)/g, (_, n) => `value ${formatLQD(n)} LQD`);
+  msg = msg.replace(/fee (\d+)/g, (_, n) => `fee ${formatLQD(n)} LQD`);
   return msg;
 }
 
@@ -291,6 +333,14 @@ on("addNetworkBtn", "click", () => {
 // ── Init / load ───────────────────────────────────────────────────────────────
 async function load() {
   const data = await ext.storage.local.get(["address", "nodeUrl", "walletUrl", "tokenWatchlist", "locked", "txActivity"]);
+  if (data.nodeUrl && isLocalEndpoint(data.nodeUrl)) {
+    data.nodeUrl = PROD_CHAIN_URL;
+    await ext.storage.local.set({ nodeUrl: data.nodeUrl });
+  }
+  if (data.walletUrl && isLocalEndpoint(data.walletUrl)) {
+    data.walletUrl = PROD_WALLET_URL;
+    await ext.storage.local.set({ walletUrl: data.walletUrl });
+  }
   const nodeUrlEl = document.getElementById("nodeUrl");
   const walletUrlEl = document.getElementById("walletUrl");
   if (nodeUrlEl) nodeUrlEl.value = data.nodeUrl || PROD_CHAIN_URL;
@@ -340,7 +390,9 @@ on("createBtn", "click", async () => {
   if (pass !== pass2) { if (out) out.textContent = "Passwords do not match"; return; }
   if (out) out.textContent = "Creating…";
 
-  const walletServer = await getWalletUrl();
+  const data = await ext.storage.local.get(["walletUrl"]);
+  let walletServer = (data.walletUrl || PROD_WALLET_URL).replace(/\/$/, "");
+  if (isLocalEndpoint(walletServer)) walletServer = PROD_WALLET_URL;
   try {
     const res = await fetch(`${walletServer}/wallet/new`, {
       method: "POST",
@@ -355,7 +407,7 @@ on("createBtn", "click", async () => {
     }, (result) => {
       if (!result?.ok) { if (out) out.textContent = result?.error || "Import failed"; return; }
       if (json.mnemonic) {
-        ext.runtime.sendMessage({ type: "LQD_STORE_MNEMONIC", mnemonic: json.mnemonic, password: pass }, () => {});
+        ext.runtime.sendMessage({ type: "LQD_STORE_MNEMONIC", mnemonic: json.mnemonic, password: pass }, () => { });
       }
       // Auto-unlock immediately after create — password is already known
       ext.runtime.sendMessage({ type: "LQD_UNLOCK", password: pass }, (unlockRes) => {
@@ -493,7 +545,7 @@ on("refreshBalance", "click", refreshBalance);
 on("copyAddrBtn", "click", async () => {
   const data = await ext.storage.local.get(["address"]);
   if (data.address) {
-    try { await navigator.clipboard.writeText(data.address); } catch {}
+    try { await navigator.clipboard.writeText(data.address); } catch { }
   }
 });
 
@@ -508,7 +560,7 @@ on("receiveClose", "click", () => document.getElementById("receiveModal").classL
 on("copyReceiveAddress", "click", async () => {
   const data = await ext.storage.local.get(["address"]);
   if (data.address) {
-    try { await navigator.clipboard.writeText(data.address); } catch {}
+    try { await navigator.clipboard.writeText(data.address); } catch { }
   }
 });
 
@@ -529,14 +581,15 @@ on("openSend", "click", async () => {
   // Fetch fresh balance and show it
   const data = await ext.storage.local.get(["address", "nodeUrl"]);
   if (data.address) {
-    const url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+    let url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+    if (isLocalEndpoint(url)) url = PROD_CHAIN_URL;
     try {
       const res = await fetch(`${url}/balance?address=${encodeURIComponent(data.address)}`);
       const json = await res.json();
       _sendRawBalance = json.balance || json.Balance || "0";
       const el = document.getElementById("sendBalanceDisplay");
       if (el) el.textContent = `Balance: ${formatLQD(_sendRawBalance)} LQD`;
-    } catch {}
+    } catch { }
   }
 });
 
@@ -544,16 +597,16 @@ on("sendMaxBtn", "click", async () => {
   const fee = await estimateFee(21000);
   try {
     const bal = BigInt(_sendRawBalance || "0");
-    const f   = BigInt(fee || 21000);
+    const f = BigInt(fee || 21000);
     const maxRaw = bal > f ? bal - f : 0n;
     const DECIMALS = 8;
-    const intPart  = maxRaw / BigInt(10 ** DECIMALS);
-    const fracRaw  = maxRaw % BigInt(10 ** DECIMALS);
+    const intPart = maxRaw / BigInt(10 ** DECIMALS);
+    const fracRaw = maxRaw % BigInt(10 ** DECIMALS);
     const fracPart = fracRaw.toString().padStart(DECIMALS, "0").replace(/0+$/, "");
     const human = fracPart ? `${intPart}.${fracPart}` : String(intPart);
     const el = document.getElementById("sendAmount");
     if (el) el.value = human;
-  } catch {}
+  } catch { }
 });
 on("sendCancel", "click", () => {
   document.getElementById("sendModal").classList.add("hidden");
@@ -605,7 +658,7 @@ on("sendSubmit", "click", async () => {
       refreshActivity();
       try {
         window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: toAddr } }));
-      } catch {}
+      } catch { }
     }
   });
 });
@@ -673,10 +726,10 @@ on("tokenSendSubmit", "click", async () => {
       if (statusEl) statusEl.textContent = hash ? `✓ Sent! Tx: ${hash.slice(0, 18)}…` : "✓ Submitted";
       refreshActivity();
       refreshBalance();
-      ext.storage.local.get(["tokenWatchlist"]).then((d) => renderTokens(d.tokenWatchlist || [])).catch(() => {});
+      ext.storage.local.get(["tokenWatchlist"]).then((d) => renderTokens(d.tokenWatchlist || [])).catch(() => { });
       try {
         window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address: toAddr, token: activeTokenForSend.address } }));
-      } catch {}
+      } catch { }
     }
   });
 });
@@ -693,13 +746,14 @@ function switchTab(active) {
   document.getElementById(active.pane)?.classList.remove("hidden");
 }
 
-on("tabTokens",   "click", () => switchTab({ tab: "tabTokens",   pane: "tokensPane"   }));
+on("tabTokens", "click", () => switchTab({ tab: "tabTokens", pane: "tokensPane" }));
 on("tabActivity", "click", () => switchTab({ tab: "tabActivity", pane: "activityPane" }));
-on("tabDapps",    "click", () => { switchTab({ tab: "tabDapps", pane: "dappsPane" }); renderDappStore(); refreshPending(); refreshAllowlist(); });
+on("tabDapps", "click", () => { switchTab({ tab: "tabDapps", pane: "dappsPane" }); renderDappStore(); refreshPending(); refreshAllowlist(); });
 
 // ── Tokens ────────────────────────────────────────────────────────────────────
 async function fetchTokenMeta(contractAddr, nodeUrl) {
-  const base = (nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+  let base = (nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+  if (isLocalEndpoint(base)) base = PROD_CHAIN_URL;
   const call = async (fn) => {
     try {
       const res = await fetch(`${base}/contract/call`, {
@@ -724,7 +778,8 @@ async function fetchTokenMeta(contractAddr, nodeUrl) {
 }
 
 async function fetchTokenBalance(contractAddr, walletAddr, nodeUrl) {
-  const base = (nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+  let base = (nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
+  if (isLocalEndpoint(base)) base = PROD_CHAIN_URL;
   const call = async (fn) => {
     try {
       const res = await fetch(`${base}/contract/call`, {
@@ -753,7 +808,7 @@ async function renderTokens(watchlist) {
 
   const data = await ext.storage.local.get(["address", "nodeUrl"]);
   const addr = data.address;
-  const nodeUrl = data.nodeUrl || PROD_CHAIN_URL;
+  const nodeUrl = isLocalEndpoint(data.nodeUrl) ? PROD_CHAIN_URL : (data.nodeUrl || PROD_CHAIN_URL);
 
   container.innerHTML = "";
   for (const token of watchlist) {
@@ -873,7 +928,7 @@ on("activityCopy", "click", async () => {
   const hashLine = lines.find((l) => l.startsWith("Hash:"));
   if (hashLine) {
     const hash = hashLine.replace("Hash:", "").trim();
-    if (hash && hash !== "-") try { await navigator.clipboard.writeText(hash); } catch {}
+    if (hash && hash !== "-") try { await navigator.clipboard.writeText(hash); } catch { }
   }
 });
 
@@ -887,51 +942,7 @@ if (ext.storage?.onChanged) {
 
 // ── Official dApp Registry ────────────────────────────────────────────────────
 // To add/remove dApps, edit this list. url can be absolute or relative.
-const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
-const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
-const PROD_BRIDGE_URL = "https://delightful-churros-767ded.netlify.app";
-const OFFICIAL_DAPPS = [
-  {
-    name: "LQD DEX",
-    description: "Swap & provide liquidity on PosDL chain",
-    icon: "⇄",
-    iconBg: "linear-gradient(135deg,#0f172a,#7c3aed)",
-    url: PROD_DEX_URL,
-    category: "DeFi",
-  },
-  {
-    name: "Block Explorer",
-    description: "Browse blocks, transactions & addresses",
-    icon: "🔍",
-    iconBg: "linear-gradient(135deg,#0c4a6e,#0369a1)",
-    url: PROD_EXPLORER_URL,
-    category: "Tools",
-  },
-  {
-    name: "LQD Bridge",
-    description: "Bridge assets between LQD and BSC",
-    icon: "⬡",
-    iconBg: "linear-gradient(135deg,#064e3b,#059669)",
-    url: PROD_BRIDGE_URL,
-    category: "Bridge",
-  },
-  {
-    name: "Liquidity Pools",
-    description: "Manage LP positions & earn rewards",
-    icon: "💧",
-    iconBg: "linear-gradient(135deg,#1e3a5f,#2563eb)",
-    url: `${PROD_DEX_URL}/pools`,
-    category: "DeFi",
-  },
-  {
-    name: "Validators",
-    description: "View validators & staking statistics",
-    icon: "✦",
-    iconBg: "linear-gradient(135deg,#3b0764,#7e22ce)",
-    url: `${PROD_EXPLORER_URL}/validators`,
-    category: "Staking",
-  },
-];
+
 
 function renderDappStore() {
   const container = document.getElementById("dappStoreList");
@@ -971,8 +982,8 @@ function refreshPending() {
 
 function renderPending(list) {
   const container = document.getElementById("pendingList");
-  const section   = document.getElementById("pendingSection");
-  const badge     = document.getElementById("pendingCount");
+  const section = document.getElementById("pendingSection");
+  const badge = document.getElementById("pendingCount");
   if (!container) return;
 
   // Show/hide the whole pending block based on whether requests exist
@@ -981,7 +992,7 @@ function renderPending(list) {
     return;
   }
   if (section) section.classList.remove("hidden");
-  if (badge)   badge.textContent = String(list.length);
+  if (badge) badge.textContent = String(list.length);
   container.innerHTML = "";
   for (const item of list) {
     const div = document.createElement("div");

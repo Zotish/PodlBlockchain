@@ -1,0 +1,4 @@
+./gate_testing.go
+./gkr.go
+./solver_hints.go
+./sumcheck.go

@@ -1,0 +1,5 @@
+./marshal.go
+./prove.go
+./setup.go
+./solidity.go
+./verify.go

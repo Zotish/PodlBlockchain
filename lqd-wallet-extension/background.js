@@ -4,7 +4,7 @@ const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
 const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
 const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
-
+const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
 // ── Default networks ──────────────────────────────────────────────────────────
 const DEFAULT_NETWORKS = {
   "0x8b": {
@@ -44,7 +44,7 @@ function resetAutoLock() {
     ext.alarms.clear("autoLock");
     ext.alarms.create("autoLock", { delayInMinutes: AUTO_LOCK_MINUTES });
     ext.storage.local.set({ lastActive: Date.now() });
-  } catch {}
+  } catch { }
 }
 
 // ── Badge ─────────────────────────────────────────────────────────────────────
@@ -56,7 +56,7 @@ function updateBadge(count) {
     } else {
       ext.action.setBadgeText({ text: "" });
     }
-  } catch {}
+  } catch { }
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ function notifyApproval(method, origin) {
       title: "LQD Wallet — Action Required",
       message: `${origin || "A dApp"} requests: ${method}. Open LQD Wallet to approve.`
     });
-  } catch {}
+  } catch { }
 }
 
 // ── Allowlist ─────────────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ ext.storage.local.get(["allowlist"]).then((data) => {
     if (al[origin]) { delete al[origin]; changed = true; }
   }
   if (changed) ext.storage.local.set({ allowlist: al });
-}).catch(() => {});
+}).catch(() => { });
 
 async function getAllowlist() {
   const data = await ext.storage.local.get(["allowlist"]);
@@ -102,27 +102,15 @@ async function getNetworks() {
   const networks = data.networks || DEFAULT_NETWORKS;
   let changed = false;
   for (const [chainId, net] of Object.entries(networks)) {
-    if (
-      net?.nodeUrl &&
-      (net.nodeUrl.includes(":5000") ||
-        net.nodeUrl.includes(":6500") ||
-        net.nodeUrl.includes(":9000") ||
-        net.nodeUrl.includes("127.0.0.1") ||
-        net.nodeUrl.includes("localhost"))
-    ) {
+    if (net?.nodeUrl && isLocalEndpoint(net.nodeUrl)) {
       net.nodeUrl = chainId === "0x8c" ? PROD_AGGREGATOR_URL : PROD_CHAIN_URL;
       changed = true;
     }
-    if (
-      net?.walletUrl &&
-      (net.walletUrl.includes(":8080") ||
-        net.walletUrl.includes("127.0.0.1") ||
-        net.walletUrl.includes("localhost"))
-    ) {
+    if (net?.walletUrl && isLocalEndpoint(net.walletUrl)) {
       net.walletUrl = PROD_WALLET_URL;
       changed = true;
     }
-    if (net?.blockExplorer && (net.blockExplorer.includes("127.0.0.1") || net.blockExplorer.includes("localhost"))) {
+    if (net?.blockExplorer && isLocalEndpoint(net.blockExplorer)) {
       net.blockExplorer = PROD_EXPLORER_URL;
       changed = true;
     }
@@ -162,29 +150,20 @@ async function loadConfig() {
     session.nodeUrl = net.nodeUrl;
     session.walletUrl = net.walletUrl;
   }
-  // Migrate legacy local defaults to production endpoints.
-  if (
-    session.nodeUrl &&
-    (session.nodeUrl.includes(":5000") ||
-      session.nodeUrl.includes(":6500") ||
-      session.nodeUrl.includes(":9000") ||
-      session.nodeUrl.includes("127.0.0.1") ||
-      session.nodeUrl.includes("localhost"))
-  ) {
+  if (session.nodeUrl && isLocalEndpoint(session.nodeUrl)) {
     session.nodeUrl = currentNetwork === "0x8c" ? PROD_AGGREGATOR_URL : PROD_CHAIN_URL;
     await ext.storage.local.set({ nodeUrl: session.nodeUrl });
   }
-  if (
-    session.walletUrl &&
-    (session.walletUrl.includes(":8080") ||
-      session.walletUrl.includes("127.0.0.1") ||
-      session.walletUrl.includes("localhost"))
-  ) {
+  if (session.walletUrl && isLocalEndpoint(session.walletUrl)) {
     session.walletUrl = PROD_WALLET_URL;
     await ext.storage.local.set({ walletUrl: session.walletUrl });
   }
   const data = await ext.storage.local.get(["address"]);
   if (data.address) session.address = data.address;
+}
+
+function isLocalEndpoint(url = "") {
+  return /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?/i.test(String(url).trim());
 }
 
 // ── Crypto helpers ────────────────────────────────────────────────────────────
@@ -269,7 +248,7 @@ async function unlock(password) {
         sw_pk: pk
       });
     }
-  } catch {}
+  } catch { }
   resetAutoLock();
   return session.address;
 }
@@ -280,9 +259,9 @@ function lock() {
   // Clear persisted session on explicit lock
   try {
     if (ext.storage.session) {
-      ext.storage.session.remove(["sw_unlocked", "sw_address", "sw_pk"]).catch(() => {});
+      ext.storage.session.remove(["sw_unlocked", "sw_address", "sw_pk"]).catch(() => { });
     }
-  } catch {}
+  } catch { }
 }
 
 // ── Session restore after SW restart ─────────────────────────────────────────
@@ -296,10 +275,10 @@ async function restoreSessionIfNeeded() {
     const d = await ext.storage.session.get(["sw_unlocked", "sw_address", "sw_pk"]);
     if (d.sw_unlocked && d.sw_address && d.sw_pk) {
       session.unlocked = true;
-      session.address  = d.sw_address;
+      session.address = d.sw_address;
       session.privateKey = d.sw_pk;
     }
-  } catch {}
+  } catch { }
   _sessionRestored = true;
 }
 
@@ -368,12 +347,12 @@ async function recordActivity(entry) {
 function pushAccounts() {
   const accounts = session.unlocked && session.address ? [session.address] : [];
   for (const [, port] of portsByTab.entries()) {
-    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch {}
+    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch { }
   }
 }
 function pushChainId() {
   for (const [, port] of portsByTab.entries()) {
-    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch {}
+    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch { }
   }
 }
 async function storePendingList() {
@@ -560,7 +539,7 @@ ext.runtime.onConnect.addListener((port) => {
   const tabId = port.sender?.tab?.id ?? null;
   const url = port.sender?.tab?.url || "";
   let origin = "";
-  try { origin = url ? new URL(url).origin : ""; } catch {}
+  try { origin = url ? new URL(url).origin : ""; } catch { }
   if (tabId == null) return;
   portsByTab.set(tabId, port);
   port.onDisconnect.addListener(() => portsByTab.delete(tabId));
@@ -569,8 +548,8 @@ ext.runtime.onConnect.addListener((port) => {
   // restoreSessionIfNeeded() ensures the session is hydrated before we push.
   restoreSessionIfNeeded().then(async () => {
     const accounts = session.unlocked && session.address ? [session.address] : [];
-    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch {}
-    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch {}
+    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch { }
+    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch { }
 
     // Flush any pending results that were saved when this tab's port was gone (SW restart)
     try {
@@ -591,7 +570,7 @@ ext.runtime.onConnect.addListener((port) => {
           await ext.storage.session.set({ pendingResults: remaining });
         }
       }
-    } catch {}
+    } catch { }
   });
 
   port.onMessage.addListener((message) => {
@@ -615,7 +594,7 @@ ext.runtime.onConnect.addListener((port) => {
         // Do NOT send an immediate error — the Promise in the dApp keeps waiting.
         // The response is sent only when the user Approves or Denies in the popup.
         // Send a non-resolving "pending" push so the dApp can show a waiting state.
-        try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_APPROVAL_PENDING", payload: { id: payload.id, method: payload.method } }); } catch {}
+        try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_APPROVAL_PENDING", payload: { id: payload.id, method: payload.method } }); } catch { }
       });
       return;
     }
@@ -705,7 +684,7 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Helper: send result to DApp via port; if port is gone, save to session for reconnect
       async function deliverResult(resMsg) {
         if (port) {
-          try { port.postMessage(resMsg); return; } catch {}
+          try { port.postMessage(resMsg); return; } catch { }
         }
         // Port gone (SW was restarted) — save result to session storage so content.js
         // can pick it up on its next reconnect/check.
@@ -716,7 +695,7 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
             pr[resMsg.id] = resMsg;
             await ext.storage.session.set({ pendingResults: pr });
           }
-        } catch {}
+        } catch { }
       }
 
       if (!message.allow) {
