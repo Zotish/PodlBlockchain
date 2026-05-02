@@ -1,4 +1,4 @@
-const DEFAULT_TIMEOUT_MS = 15000;
+const DEFAULT_TIMEOUT_MS = 30000;
 
 export function normalizeUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
@@ -143,6 +143,10 @@ export async function nodeCompilePlugin(nodeUrl, source) {
   return postJson(`${normalizeUrl(nodeUrl)}/contract/compile-plugin`, { source }, { timeoutMs: 180000 });
 }
 
+export async function nodeCompile(nodeUrl, type, source) {
+  return postJson(`${normalizeUrl(nodeUrl)}/contract/compile`, { type, source }, { timeoutMs: 60000 });
+}
+
 export async function nodeContractAbi(nodeUrl, address) {
   return getJson(`${normalizeUrl(nodeUrl)}/contract/getAbi?address=${encodeURIComponent(address)}`);
 }
@@ -157,6 +161,14 @@ export async function nodeCurrentFactory(nodeUrl) {
 
 export async function nodeLiquidityPools(nodeUrl) {
   return getJson(`${normalizeUrl(nodeUrl)}/liquidity/pools`);
+}
+
+export async function nodeEstimateGas(nodeUrl, payload) {
+  return postJson(`${normalizeUrl(nodeUrl)}/contract/estimate_gas`, payload);
+}
+
+export async function nodeStatus(nodeUrl) {
+  return getJson(`${normalizeUrl(nodeUrl)}/node/status`).catch(() => ({ online: false }));
 }
 
 export async function nodeRecentTransactions(nodeUrl) {

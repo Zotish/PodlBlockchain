@@ -1034,6 +1034,25 @@ async function loadBridgeTokens() {
   }
 }
 
+async function refreshBridgeFees() {
+  try {
+    const fee = await nodeGet("/node/base_fee");
+    const val = Number(fee?.base_fee || fee || 10);
+    state.baseFee = val;
+    const gasPriceInputs = ["sendGasPrice", "bridgeGasPrice"]; // we'll add bridgeGasPrice to HTML if needed
+    gasPriceInputs.forEach(id => {
+      const el = $(id);
+      if (el && (!el.value || el.value === "1")) el.value = val;
+    });
+  } catch {}
+}
+
+function checkDuplicateBridgeRequest(hash) {
+  if (!hash) return false;
+  const history = Array.isArray(state.bridgeRequests) ? state.bridgeRequests : [];
+  return history.some(r => r.source_tx_hash === hash || r.tx_hash === hash);
+}
+
 function syncBridgeFamilyToUI(familyId) {
   const nextFamily = String(familyId || "evm").toLowerCase();
   bridgeFamilyId = nextFamily;
@@ -1281,9 +1300,16 @@ $("doBridgeLockBtn").addEventListener("click", async () => {
   syncBridgeFamilyToUI(family);
   if (!token) { toast("Select a mapped token or enter a custom BSC token address", "error"); return; }
   if (!amt) { toast("Enter amount", "error"); return; }
+  
   try {
+    $("doBridgeLockBtn").disabled = true;
+    $("doBridgeLockBtn").textContent = "Processing...";
+
     if (isExternalBridgeFamily(family)) {
       const meta = bridgeMetadataFromUI("bridge");
+      if (checkDuplicateBridgeRequest(meta.source_tx_hash)) {
+        throw new Error("This transaction hash has already been registered in the bridge.");
+      }
       if (!meta.source_tx_hash || !meta.source_address) {
         toast("Enter source tx hash and source address for this non-EVM bridge", "error");
         return;
@@ -1363,8 +1389,14 @@ $("doBridgeLockBtn").addEventListener("click", async () => {
         tx_hash: txHash, lqd_recipient: lqdRecipient, token, amount: amt, mode: bridgeMode
       });
     }
-    setTimeout(loadBridgeHistory, 5000);
-  } catch (e) { showResult("bridgeLockResult", "✗ " + e.message, true); }
+    setTimeout(loadBridgeHistory, 3000);
+  } catch (e) { 
+    showResult("bridgeLockResult", "✗ " + e.message, true); 
+    toast(e.message, "error");
+  } finally {
+    $("doBridgeLockBtn").disabled = false;
+    $("doBridgeLockBtn").textContent = "Lock on BSC →";
+  }
 });
 
 $("doBurnBtn").addEventListener("click", async () => {
@@ -1393,24 +1425,61 @@ $("doBurnBtn").addEventListener("click", async () => {
 });
 
 $("refreshBridgeBtn").addEventListener("click", loadBridgeHistory);
+function getBridgeStatusColor(status) {
+  const s = String(status || "pending").toLowerCase();
+  if (s.includes("complete") || s.includes("success") || s.includes("confirmed")) return "#4ade80"; // Green
+  if (s.includes("fail") || s.includes("error") || s.includes("reject")) return "#f87171"; // Red
+  return "#fbbf24"; // Yellow/Orange for pending/processing
+}
+
 async function loadBridgeHistory() {
   try {
     bridgeMode = $("bridgeModeSelect")?.value || bridgeMode;
     const data = await nodeGet(`/bridge/requests?mode=${encodeURIComponent(bridgeMode)}`);
     const list = Array.isArray(data) ? data : (data.requests || []);
-    if (!list.length) { $("bridgeHistory").innerHTML = '<div class="notice">No bridge requests found.</div>'; return; }
-    $("bridgeHistory").innerHTML = `
-              <div class="activity-list">
-        ${list.slice(0, 20).map(r => `
-          <div class="activity-row">
-            <div class="act-icon">${r.direction === "bsc_to_lqd" ? "→" : "←"}</div>
-            <div class="act-info">
-              <div class="act-type">${r.direction === "bsc_to_lqd" ? "BSC → LQD" : "LQD → BSC"} · ${r.token || ""} · ${r.mode || bridgeMode} · ${(r.family || "evm").toUpperCase()}</div>
-              <div class="act-hash">Amount: ${r.amount || "?"} · Status: ${r.status || "pending"}${r.source_tx_hash ? ` · SourceTx: ${r.source_tx_hash}` : ""}</div>
-            </div>
-          </div>`).join("")}
+    state.bridgeRequests = list;
+    const historyEl = $("bridgeHistory");
+    if (!historyEl) return;
+    
+    // Fetch and display estimate fees
+    const feeInfo = await nodeGet(`/bridge/fees?chain_id=${bridgeChainId}`);
+    if (feeInfo?.base_fee) {
+       $("bridgeFeeEstimate").textContent = `Est. Fee: ${feeInfo.base_fee} LQD`;
+    }
+
+    if (!list.length) {
+      historyEl.innerHTML = '<div class="notice">No bridge requests found.</div>';
+      return;
+    }
+    
+    historyEl.innerHTML = `
+      <div class="activity-list">
+        ${list.slice(0, 20).map(r => {
+          const statusColor = getBridgeStatusColor(r.status);
+          const isLock = r.direction === "bsc_to_lqd" || r.direction === "lock";
+          return `
+            <div class="activity-row" style="border-left: 3px solid ${statusColor}; padding-left: 12px; margin-bottom: 12px; background: var(--surface2); border-radius: 8px;">
+              <div class="act-icon" style="background: ${statusColor}20; color: ${statusColor};">${isLock ? "📥" : "📤"}</div>
+              <div class="act-info">
+                <div class="act-type" style="display:flex; justify-content:space-between; align-items:center;">
+                  <span>${isLock ? "Lock & Mint (External → LQD)" : "Burn & Unlock (LQD → External)"}</span>
+                  <span style="font-size: 10px; font-weight: 800; text-transform: uppercase; color: ${statusColor}; background: ${statusColor}15; padding: 2px 6px; border-radius: 4px;">${r.status || "pending"}</span>
+                </div>
+                <div class="act-hash" style="margin-top: 4px;">
+                  <strong>${r.amount || "0"} ${r.token || "LQD"}</strong> · ${r.mode || "public"} · ${(r.family || "evm").toUpperCase()}
+                </div>
+                <div style="font-size: 11px; opacity: 0.6; margin-top: 4px; display: flex; flex-direction: column; gap: 2px;">
+                  ${r.source_tx_hash ? `<div>Source: <span class="mono">${shortAddr(r.source_tx_hash)}</span></div>` : ""}
+                  ${r.tx_hash && r.tx_hash !== r.source_tx_hash ? `<div>LQD Tx: <span class="mono">${shortAddr(r.tx_hash)}</span></div>` : ""}
+                  <div>Created: ${new Date(r.created_at || Date.now()).toLocaleString()}</div>
+                </div>
+              </div>
+            </div>`;
+        }).join("")}
       </div>`;
-  } catch { $("bridgeHistory").innerHTML = '<div class="notice">Could not load bridge history.</div>'; }
+  } catch (e) {
+    $("bridgeHistory").innerHTML = '<div class="notice">Could not load bridge history.</div>';
+  }
 }
 
 async function refreshBridgeChainsAdmin() {

@@ -1,6 +1,7 @@
 import "react-native-get-random-values";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Dimensions,
   FlatList,
@@ -11,6 +12,7 @@ import {
   PixelRatio,
   Platform,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   Share,
@@ -24,6 +26,7 @@ import * as Clipboard from "expo-clipboard";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as FileSystem from "expo-file-system";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as SecureStore from "expo-secure-store";
 import CryptoJS from "crypto-js";
 import QRCode from "react-native-qrcode-svg";
 import { WebView } from "react-native-webview";
@@ -49,9 +52,11 @@ import {
   nodeCurrentFactory,
   nodeDeployBuiltin,
   nodeDeployContract,
+  nodeEstimateGas,
   nodeFaucet,
   nodeLiquidityPools,
   nodeRecentTransactions,
+  nodeStatus,
   normalizeUrl,
   postJson,
   resolveTokenBalance,
@@ -87,6 +92,7 @@ const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app"
 const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
 const DEFAULT_BROWSER_URL = PROD_EXPLORER_URL;
+const DEFAULT_TIMEOUT_MS = 30000;
 
 const DEFAULT_NETWORKS = [
   {
@@ -131,14 +137,45 @@ function migrateLocalEndpoint(value, fallback) {
 }
 
 const BUILTIN_TEMPLATES = [
-  { value: "dex_factory", label: "DEX Factory + Router" },
-  { value: "dex_swap", label: "DEX Pair / Pool" },
   { value: "lqd20", label: "LQD20 Token" },
-  { value: "dao_treasury", label: "DAO Treasury" },
-  { value: "nft_collection", label: "NFT Collection" },
+  { value: "dex_swap", label: "DEX Pair" },
+  { value: "dex_factory", label: "DEX Factory" },
+  { value: "dex_router", label: "DEX Router" },
   { value: "bridge_token", label: "Bridge Token" },
   { value: "lending_pool", label: "Lending Pool" },
+  { value: "nft_collection", label: "NFT Collection" },
+  { value: "dao_treasury", label: "DAO Treasury" },
 ];
+
+const QUICK_ARGS = {
+  lqd20: [
+    { key: "q_name", label: "Token Name", ph: "My Token" },
+    { key: "q_sym", label: "Symbol", ph: "MTK" },
+    { key: "q_supply", label: "Initial Supply", ph: "1000000000000000" }
+  ],
+  dex_swap: [
+    { key: "tokenA", label: "Token A Address", ph: "0x..." },
+    { key: "tokenB", label: "Token B Address", ph: "0x..." }
+  ],
+  bridge_token: [
+    { key: "q_bname", label: "Token Name", ph: "Wrapped BNB" },
+    { key: "q_bsym", label: "Symbol", ph: "wBNB" },
+    { key: "q_bdec", label: "Decimals", ph: "18" },
+    { key: "q_bbsc", label: "BSC Token Address", ph: "0x..." }
+  ],
+  nft_collection: [
+    { key: "q_nname", label: "Collection Name", ph: "My NFT" },
+    { key: "q_nsym", label: "Symbol", ph: "MNFT" }
+  ],
+  dao_treasury: [
+    { key: "daoName", label: "DAO Name", ph: "My DAO" }
+  ],
+  lending_pool: [
+    { key: "lendingToken", label: "Lending Asset", ph: "LQD or token address" }
+  ],
+  dex_factory: [],
+  dex_router: []
+};
 
 const TABS = [
   { id: "home", label: "Home", icon: "⌂" },
@@ -331,22 +368,55 @@ function Stat({ label, value, subvalue }) {
   );
 }
 
-function TokenRow({ item, onSend, onRefresh, onRemove }) {
+const TokenRow = ({ item, onSend, onRefresh, onRemove }) => (
+  <View style={styles.rowCard}>
+    <View style={styles.rowIcon}>
+      <Text style={styles.rowIconText}>{String(item.symbol || "?").substring(0, 1).toUpperCase()}</Text>
+    </View>
+    <View style={{ flex: 1 }}>
+      <Text style={styles.rowTitle}>{item.name || "Token"}</Text>
+      <Text style={styles.rowSub}>{item.symbol} · {shortAddress(item.address)}</Text>
+      <Text style={styles.rowValue}>{item.balance} {item.symbol}</Text>
+    </View>
+    <View style={styles.rowActions}>
+      <Button label="Send" onPress={onSend} compact />
+      <Button label="↻" onPress={onRefresh} compact secondary />
+      <Button label="✕" onPress={onRemove} compact danger />
+    </View>
+  </View>
+);
+
+const BridgeRow = ({ item }) => {
+  const isLock = item.direction === "bsc_to_lqd" || item.direction === "lock";
+  const s = String(item.status || "pending").toLowerCase();
+  let statusColor = "#fbbf24"; // yellow
+  if (s.includes("complete") || s.includes("success") || s.includes("confirmed")) statusColor = "#4ade80";
+  if (s.includes("fail") || s.includes("error") || s.includes("reject")) statusColor = "#f87171";
+
   return (
-    <View style={styles.rowCard}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.rowTitle}>{item.symbol} · {shortAddress(item.address)}</Text>
-        <Text style={styles.rowSub}>{item.name}</Text>
-        <Text style={styles.tokenBalance}>{formatUnits(item.balance || "0", item.decimals || 8)} {item.symbol}</Text>
+    <View style={[styles.rowCard, { borderLeftWidth: 4, borderLeftColor: statusColor }]}>
+      <View style={[styles.rowIcon, { backgroundColor: statusColor + "20" }]}>
+        <Text style={{ color: statusColor, fontSize: scale(16) }}>{isLock ? "📥" : "📤"}</Text>
       </View>
-      <View style={styles.rowActions}>
-        <Button label="Send" onPress={onSend} compact />
-        <Button label="Refresh" onPress={onRefresh} compact secondary />
-        <Button label="Remove" onPress={onRemove} compact danger />
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={styles.rowTitle}>{isLock ? "Lock & Mint" : "Burn & Unlock"}</Text>
+          <View style={{ backgroundColor: statusColor + "15", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+            <Text style={{ color: statusColor, fontSize: scale(10), fontWeight: "800" }}>{s.toUpperCase()}</Text>
+          </View>
+        </View>
+        <Text style={styles.rowSub}>
+          <Text style={{ fontWeight: "700", color: "#f4f7ff" }}>{item.amount || "0"} {item.token || "LQD"}</Text>
+          {" · "}{item.mode || "public"}{" · "}{(item.family || "evm").toUpperCase()}
+        </Text>
+        <Text style={styles.rowSub} numberOfLines={1}>
+          {item.source_tx_hash ? `Source: ${shortAddress(item.source_tx_hash)}` : ""}
+          {item.tx_hash && item.tx_hash !== item.source_tx_hash ? ` · LQD: ${shortAddress(item.tx_hash)}` : ""}
+        </Text>
       </View>
     </View>
   );
-}
+};
 
 function ActivityRow({ item }) {
   const hash = item.TxHash || item.tx_hash || item.hash || "";
@@ -539,6 +609,20 @@ function App() {
 
   const [bridgeForm, setBridgeForm] = useState(initialBridgeForm);
   const [bridgeMode, setBridgeMode] = useState("public");
+
+  const [callAbi, setCallAbi] = useState([]);
+  const [callSelectedFnIdx, setCallSelectedFnIdx] = useState(null);
+  const [callArgs, setCallArgs] = useState({});
+  const [explorerTab, setExplorerTab] = useState("overview");
+  const [explorerEvents, setExplorerEvents] = useState([]);
+  const [compileType, setCompileType] = useState("goplugin");
+  const [compiledBinary, setCompiledBinary] = useState(null);
+  const [bridgeBaseFee, setBridgeBaseFee] = useState(10);
+  const [isNodeOnline, setIsNodeOnline] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [processingMessage, setProcessingMessage] = useState("");
+  const [toast, setToast] = useState({ visible: false, message: "", type: "info" });
+
   const [backupText, setBackupText] = useState("");
   const [settingsAutoRefresh, setSettingsAutoRefresh] = useState(true);
   const [walletVisible, setWalletVisible] = useState(false);
@@ -786,11 +870,22 @@ function App() {
     const cipher = encryptVault(vault, password);
     const record = { address: vault.address, cipher, createdAt: Date.now() };
     await saveJSON(STORAGE_KEYS.vault, record);
+    
+    // Security Hardening: Try to store raw private key in hardware-backed SecureStore if available
+    if (SecureStore && typeof SecureStore.setItemAsync === "function") {
+      try {
+        await SecureStore.setItemAsync(`pk_${vault.address}`, vault.privateKey, {
+          keychainAccessible: SecureStore.KeychainAccessibility ? SecureStore.KeychainAccessibility.WHEN_PASSCODE_SET_THIS_DEVICE_ONLY : (SecureStore.WHEN_PASSCODE_SET_THIS_DEVICE_ONLY || 0),
+        });
+      } catch (e) {
+        console.warn("SecureStore set failed:", e.message);
+      }
+    }
+
     if (biometricEnabled) {
       try {
         await saveString(STORAGE_KEYS.biometricVault, JSON.stringify(vault), { requireAuthentication: true });
       } catch {
-        // Do not block wallet creation if biometric-secured storage is unavailable on a device.
       }
     } else {
       await removeItem(STORAGE_KEYS.biometricVault);
@@ -799,42 +894,61 @@ function App() {
   }
 
   async function refreshWalletSnapshot(addressOverride = "") {
-    const activeAddress = addressOverride || wallet?.address;
-    if (!activeAddress) return;
-    const [native, factory, recent, requests, tokensResp, poolsResp] = await Promise.all([
-      walletBalance(nodeUrl, activeAddress).catch(() => null),
-      nodeCurrentFactory(nodeUrl).catch(() => null),
-      nodeRecentTransactions(nodeUrl).catch(() => []),
-      nodeBridgeRequests(nodeUrl).catch(() => []),
-      nodeBridgeTokens(nodeUrl).catch(() => []),
-      nodeLiquidityPools(nodeUrl).catch(() => null),
-    ]);
+    if (isRefreshing) return;
+    const rawAddr = addressOverride || wallet?.address;
+    if (!rawAddr) return;
+    const activeAddress = rawAddr.trim();
+    
+    setIsRefreshing(true);
+    try {
+      const [status, native, factory, recent, requests, tokensResp, poolsResp, feeResp] = await Promise.all([
+        getJson(`${normalizeUrl(nodeUrl)}/blockchain`).catch(() => ({ online: false })),
+        walletBalance(nodeUrl, activeAddress).catch(() => null),
+        nodeCurrentFactory(nodeUrl).catch(() => null),
+        nodeRecentTransactions(nodeUrl).catch(() => []),
+        nodeBridgeRequests(nodeUrl).catch(() => []),
+        nodeBridgeTokens(nodeUrl).catch(() => []),
+        nodeLiquidityPools(nodeUrl).catch(() => null),
+        nodeBaseFee(nodeUrl).catch(() => 10),
+      ]);
+      setIsNodeOnline(!!status?.online || !!status?.version);
+      if (feeResp) setBridgeBaseFee(Number(feeResp?.base_fee || feeResp || 10));
 
-    const balanceValue = native?.balance || native?.Balance || native?.amount || "0";
-    setNativeBalance(String(balanceValue));
-    if (factory?.address) {
-      setFactoryAddress(factory.address);
-    }
-    if (Array.isArray(recent)) {
-      setRecentTxs(recent);
-      const local = [...activity];
-      const merged = mergeUniqueByKey(local, recent, "TxHash");
-      setActivity(merged.slice(0, 100));
-    }
-    if (Array.isArray(requests)) {
-      setBridgeRequests(requests);
-    }
-    if (Array.isArray(tokensResp)) {
-      setBridgeTokens(tokensResp);
-    }
+      if (native) {
+        let val = "0";
+        if (native.balance !== undefined && native.balance !== null) val = String(native.balance);
+        else if (native.Balance !== undefined && native.Balance !== null) val = String(native.Balance);
+        else if (native.amount !== undefined && native.amount !== null) val = String(native.amount);
+        setNativeBalance(val);
+      }
+      if (factory?.address) {
+        setFactoryAddress(factory.address);
+      }
+      if (Array.isArray(recent)) {
+        setRecentTxs(recent);
+        const local = [...activity];
+        const merged = mergeUniqueByKey(local, recent, "TxHash");
+        setActivity(merged.slice(0, 100));
+      }
+      if (Array.isArray(requests)) {
+        setBridgeRequests(requests);
+      }
+      if (Array.isArray(tokensResp)) {
+        setBridgeTokens(tokensResp);
+      }
 
-    await refreshTokenBalances(watchlist, activeAddress);
-    await autoDiscoverTokens({
-      recent: Array.isArray(recent) ? recent : [],
-      bridgeTokens: Array.isArray(tokensResp) ? tokensResp : [],
-      factory,
-      pools: poolsResp,
-    }, activeAddress);
+      await refreshTokenBalances(watchlist, activeAddress);
+      await autoDiscoverTokens({
+        recent: Array.isArray(recent) ? recent : [],
+        bridgeTokens: Array.isArray(tokensResp) ? tokensResp : [],
+        factory,
+        pools: poolsResp,
+      }, activeAddress);
+    } catch (e) {
+      console.warn("Refresh failed:", e.message);
+    } finally {
+      setIsRefreshing(false);
+    }
   }
 
   async function loadBridgeChains() {
@@ -934,26 +1048,34 @@ function App() {
   async function refreshTokenBalances(nextWatchlist = watchlist, addressOverride = "") {
     const activeAddress = addressOverride || wallet?.address;
     if (!activeAddress) return;
-    const updated = [];
-    for (const token of nextWatchlist) {
-      try {
-        const contract = token.address || token.contract;
-        const [meta, balance] = await Promise.all([
-          token.name && token.symbol ? Promise.resolve(token) : resolveTokenMeta(nodeUrl, contract, activeAddress),
-          resolveTokenBalance(nodeUrl, walletUrl, contract, activeAddress),
-        ]);
-        updated.push({
-          address: contract,
-          name: meta.name || token.name || "Token",
-          symbol: meta.symbol || token.symbol || "TOKEN",
-          decimals: Number(meta.decimals || token.decimals || 8),
-          balance: String(balance || "0"),
-        });
-      } catch {
-        updated.push(token);
-      }
+    
+    try {
+      const updated = await Promise.all(nextWatchlist.map(async (token) => {
+        try {
+          const contract = token.address || token.contract;
+          if (!contract) return token;
+          
+          const [meta, balance] = await Promise.all([
+            token.name && token.symbol ? Promise.resolve(token) : resolveTokenMeta(nodeUrl, contract, activeAddress).catch(() => ({})),
+            resolveTokenBalance(nodeUrl, walletUrl, contract, activeAddress).catch(() => "0"),
+          ]);
+          
+          return {
+            ...token,
+            address: contract,
+            name: meta?.name || token.name || "Token",
+            symbol: meta?.symbol || token.symbol || "TOKEN",
+            decimals: Number(meta?.decimals || token.decimals || 8),
+            balance: String(balance || "0"),
+          };
+        } catch (e) {
+          return { ...token, balance: token.balance || "0" };
+        }
+      }));
+      setWatchlist(updated);
+    } catch (e) {
+      console.warn("Batch token refresh failed:", e.message);
     }
-    setWatchlist(updated);
   }
 
   async function importDetectedTokens(candidates, addressOverride = "", source = "activity") {
@@ -1138,100 +1260,42 @@ function App() {
     setTab("browser");
   }
 
-  function builtinInitArgs(form = deployForm) {
-    switch (form.template) {
-      case "lqd20":
-        return [
-          form.tokenName.trim() || "My Token",
-          form.tokenSymbol.trim() || "MTK",
-          form.tokenSupply.trim() || "1000000000000000",
-        ];
-      case "dex_swap":
-        return [form.tokenA.trim(), form.tokenB.trim()];
-      case "dao_treasury":
-        return [form.daoName.trim() || "DAO Treasury"];
-      case "nft_collection":
-        return [
-          form.nftName.trim() || "NFT Collection",
-          form.nftSymbol.trim() || "NFT",
-        ];
-      case "bridge_token":
-        return [
-          form.bridgeName.trim() || "Bridged Token",
-          form.bridgeSymbol.trim() || "BRG",
-          form.bridgeDecimals.trim() || "18",
-          form.bridgeSourceToken.trim(),
-        ];
-      case "lending_pool":
-        return [form.lendingToken.trim() || "LQD"];
-      default:
-        return [];
-    }
+  function builtinInitArgs() {
+    const fields = QUICK_ARGS[deployForm.template] || [];
+    return fields.map((f) => String(deployForm[f.key] || "").trim());
   }
 
   function validateBuiltinDeployForm(form = deployForm) {
     if (form.template === "dex_swap" && (!isLikelyAddress(form.tokenA) || !isLikelyAddress(form.tokenB))) {
       return "DEX Pair / Pool needs valid Token A and Token B contract addresses";
     }
-    if (form.template === "lqd20" && (!/^\d+$/.test(form.tokenSupply.trim()) || BigInt(form.tokenSupply.trim() || "0") <= 0n)) {
+    if (form.template === "lqd20" && (!/^\d+$/.test(form.q_supply.trim()) || BigInt(form.q_supply.trim() || "0") <= 0n)) {
       return "LQD20 supply must be greater than 0";
     }
-    if (form.template === "bridge_token" && Number(form.bridgeDecimals || 0) < 0) {
+    if (form.template === "bridge_token" && Number(form.q_bdec || 0) < 0) {
       return "Bridge token decimals must be valid";
     }
     return "";
   }
 
   function renderBuiltinTemplateFields() {
-    switch (deployForm.template) {
-      case "lqd20":
-        return (
-          <View style={styles.sectionGapSmall}>
-            <Field label="Token name" value={deployForm.tokenName} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenName: v }))} placeholder="My Token" />
-            <Field label="Token symbol" value={deployForm.tokenSymbol} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenSymbol: v.toUpperCase() }))} placeholder="MTK" />
-            <Field label="Initial supply (raw units)" value={deployForm.tokenSupply} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenSupply: v.replace(/[^\d]/g, "") }))} keyboardType="numeric" placeholder="1000000000000000" />
-            <Text style={styles.helperText}>LQD20 uses 8 decimals. Example: 10000000 tokens = 1000000000000000 raw units.</Text>
-          </View>
-        );
-      case "dex_swap":
-        return (
-          <View style={styles.sectionGapSmall}>
-            <Field label="Token A contract" value={deployForm.tokenA} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenA: v }))} placeholder="0x..." />
-            <Field label="Token B contract" value={deployForm.tokenB} onChangeText={(v) => setDeployForm((p) => ({ ...p, tokenB: v }))} placeholder="0x..." />
-            <Text style={styles.helperText}>Advanced standalone pair contract. For the normal DEX app, deploy Factory + Router first, then create pairs later from the DEX UI.</Text>
-          </View>
-        );
-      case "dao_treasury":
-        return (
-          <View style={styles.sectionGapSmall}>
-            <Field label="DAO name" value={deployForm.daoName} onChangeText={(v) => setDeployForm((p) => ({ ...p, daoName: v }))} placeholder="DAO Treasury" />
-          </View>
-        );
-      case "nft_collection":
-        return (
-          <View style={styles.sectionGapSmall}>
-            <Field label="Collection name" value={deployForm.nftName} onChangeText={(v) => setDeployForm((p) => ({ ...p, nftName: v }))} placeholder="NFT Collection" />
-            <Field label="Collection symbol" value={deployForm.nftSymbol} onChangeText={(v) => setDeployForm((p) => ({ ...p, nftSymbol: v.toUpperCase() }))} placeholder="NFT" />
-          </View>
-        );
-      case "bridge_token":
-        return (
-          <View style={styles.sectionGapSmall}>
-            <Field label="Bridge token name" value={deployForm.bridgeName} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeName: v }))} placeholder="Bridged Token" />
-            <Field label="Bridge token symbol" value={deployForm.bridgeSymbol} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeSymbol: v.toUpperCase() }))} placeholder="BRG" />
-            <Field label="Decimals" value={deployForm.bridgeDecimals} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeDecimals: v.replace(/[^\d]/g, "") }))} keyboardType="numeric" placeholder="18" />
-            <Field label="Source token / external address" value={deployForm.bridgeSourceToken} onChangeText={(v) => setDeployForm((p) => ({ ...p, bridgeSourceToken: v }))} placeholder="0x... or external token id" />
-          </View>
-        );
-      case "lending_pool":
-        return (
-          <View style={styles.sectionGapSmall}>
-            <Field label="Lending asset" value={deployForm.lendingToken} onChangeText={(v) => setDeployForm((p) => ({ ...p, lendingToken: v }))} placeholder="LQD or token contract" />
-          </View>
-        );
-      default:
-        return <Text style={styles.helperText}>Factory + Router deploy does not need token addresses. Create LQD/token or token/token pairs later from the DEX dApp.</Text>;
+    const fields = QUICK_ARGS[deployForm.template] || [];
+    if (!fields.length) {
+      return <Text style={styles.helperText}>This template does not require initial arguments.</Text>;
     }
+    return (
+      <View style={styles.sectionGapSmall}>
+        {fields.map((f) => (
+          <Field 
+            key={f.key} 
+            label={f.label} 
+            value={deployForm[f.key] || ""} 
+            onChangeText={(v) => setDeployForm((p) => ({ ...p, [f.key]: v }))} 
+            placeholder={f.ph} 
+          />
+        ))}
+      </View>
+    );
   }
 
   function sendBrowserProviderResponse(id, ok, result, error = "") {
@@ -1356,6 +1420,13 @@ function App() {
     setBusyAction("unlockPassword");
     try {
       const vault = decryptVault(vaultRecord.cipher, unlockPassword);
+      // Try to recover private key from hardware store
+      if (SecureStore && typeof SecureStore.getItemAsync === "function") {
+        try {
+          const pk = await SecureStore.getItemAsync(`pk_${vault.address}`);
+          if (pk) vault.privateKey = pk;
+        } catch {}
+      }
       setWallet(vault);
       setWalletVisible(true);
       setStatus(`Unlocked ${shortAddress(vault.address)}`);
@@ -1388,6 +1459,13 @@ function App() {
         throw new Error("Biometric vault is not saved yet. Unlock with password once, then enable biometrics.");
       }
       const vault = JSON.parse(biometricRaw);
+      // Try to recover private key from hardware store
+      if (SecureStore && typeof SecureStore.getItemAsync === "function") {
+        try {
+          const pk = await SecureStore.getItemAsync(`pk_${vault.address}`);
+          if (pk) vault.privateKey = pk;
+        } catch {}
+      }
       setWallet(vault);
       setWalletVisible(true);
       setStatus(`Unlocked ${shortAddress(vault.address)} with biometrics`);
@@ -1526,10 +1604,17 @@ function App() {
   }
 
   async function refreshNativeOnly(addressOverride = "") {
-    const activeAddress = addressOverride || wallet?.address;
-    if (!activeAddress) return;
-    const native = await walletBalance(nodeUrl, activeAddress);
-    setNativeBalance(String(native?.balance || native?.Balance || native?.amount || "0"));
+    const rawAddr = addressOverride || wallet?.address;
+    if (!rawAddr) return;
+    const activeAddress = rawAddr.trim();
+    const native = await walletBalance(nodeUrl, activeAddress).catch(() => null);
+    if (native) {
+      let val = "0";
+      if (native.balance !== undefined && native.balance !== null) val = String(native.balance);
+      else if (native.Balance !== undefined && native.Balance !== null) val = String(native.Balance);
+      else if (native.amount !== undefined && native.amount !== null) val = String(native.amount);
+      setNativeBalance(val);
+    }
   }
 
   function walletHasGasBalance() {
@@ -1578,6 +1663,7 @@ function App() {
 
     setBusy(true);
     setBusyAction("sendNative");
+    setProcessingMessage("Broadcasting Transaction...");
     try {
       const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
       const res = await walletSend(walletUrl, {
@@ -1586,11 +1672,13 @@ function App() {
         value: amount,
         data: "",
         gas: 21000,
-        gas_price: baseFee || 10,
+        gas_price: Number(baseFee || bridgeBaseFee || 10),
         private_key: wallet.privateKey,
       });
       const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
-      setStatus(hash ? `Native sent: ${shortAddress(hash, 8, 6)}` : "Native sent");
+      if (!hash) throw new Error(res?.error || "Transaction failed");
+
+      showToast("Transaction Sent Successfully", "success");
       rememberActivity({
         type: "send",
         From: wallet.address,
@@ -1603,10 +1691,11 @@ function App() {
       await refreshNativeOnly();
       await refreshWalletSnapshot();
     } catch (e) {
-      setStatus(e.message || "Send failed");
+      showToast(e.message || "Send failed", "error");
     } finally {
       setBusy(false);
       setBusyAction("");
+      setProcessingMessage("");
     }
   }
 
@@ -1926,22 +2015,40 @@ function App() {
     }
   }
 
-  async function compileCustomPluginAction() {
+  async function compileAction() {
+    if (!customSource.trim()) {
+      setStatus("Enter source code");
+      return;
+    }
     setBusy(true);
-    setBusyAction("compileCustom");
+    setBusyAction("compile");
     try {
-      const res = await nodeCompilePlugin(nodeUrl, customSource);
-      if (!res?.success) {
-        throw new Error(res?.error || "Plugin compilation failed");
+      // Normalize line endings and remove non-ASCII hidden characters that cause Go syntax errors
+      const normalizedSource = customSource
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/[^\x00-\x7F]/g, ""); 
+      let res;
+      if (compileType === "goplugin") {
+        res = await nodeCompilePlugin(nodeUrl, normalizedSource);
+        if (!res?.success) throw new Error(res?.error || "Plugin compilation failed");
+        
+        const uri = `${FileSystem.cacheDirectory || ""}lqd-mobile-plugin.so`;
+        await FileSystem.writeAsStringAsync(uri, res.binary, { encoding: FileSystem.EncodingType.Base64 });
+        setCompiledPluginUri(uri);
+        setCompiledBinary(res.binary);
+        setCompiledPluginSize(Number(res.size || 0));
+        setStatus(`Plugin compiled (${res.size || 0} bytes)`);
+      } else {
+        res = await nodeCompile(nodeUrl, {
+          type: compileType,
+          source: normalizedSource,
+        });
+        if (!res?.success && !res?.binary && !res?.bytecode) throw new Error(res?.error || "Compilation failed");
+        setCompiledBinary(res.binary || res.bytecode || null);
+        setCompiledPluginSize(Number(res.size || 0));
+        setStatus(`Compiled ${compileType} (${res.size || 0} bytes)`);
       }
-      const uri = `${FileSystem.cacheDirectory || ""}lqd-mobile-plugin.so`;
-      await FileSystem.writeAsStringAsync(uri, res.binary, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      setCompiledPlugin(res);
-      setCompiledPluginUri(uri);
-      setCompiledPluginSize(Number(res.size || 0));
-      setStatus(`Plugin compiled (${res.size || 0} bytes)`);
     } catch (e) {
       setStatus(e.message || "Compile failed");
     } finally {
@@ -1950,13 +2057,13 @@ function App() {
     }
   }
 
-  async function deployCustomPluginAction() {
+  async function deployCompiledAction() {
     if (!wallet?.address || !wallet?.privateKey) {
       setStatus("Unlock wallet first");
       return;
     }
-    if (!compiledPluginUri) {
-      setStatus("Compile a plugin first");
+    if (!compiledBinary) {
+      setStatus("Compile source first");
       return;
     }
     if (!walletHasGasBalance()) {
@@ -1964,19 +2071,32 @@ function App() {
       return;
     }
     setBusy(true);
-    setBusyAction("deployCustom");
+    setBusyAction("deployCompiled");
     try {
       const formData = new FormData();
-      formData.append("type", "plugin");
+      const type = compileType === "goplugin" ? "plugin" : compileType;
+      formData.append("type", type);
       formData.append("owner", wallet.address);
       formData.append("private_key", wallet.privateKey);
       formData.append("gas", "500000");
-      formData.append("gas_price", "0");
-      formData.append("contract_file", {
-        uri: compiledPluginUri,
-        name: "contract.so",
-        type: "application/octet-stream",
-      });
+      
+      if (compileType === "goplugin") {
+        formData.append("contract_file", {
+          uri: compiledPluginUri,
+          name: "contract.so",
+          type: "application/octet-stream",
+        });
+      } else {
+        // For other types, create a temporary file from bytecode/binary
+        const uri = `${FileSystem.cacheDirectory || ""}contract.lqd`;
+        await FileSystem.writeAsStringAsync(uri, compiledBinary, { encoding: FileSystem.EncodingType.Base64 });
+        formData.append("contract_file", {
+          uri,
+          name: "contract.lqd",
+          type: "application/octet-stream",
+        });
+      }
+
       const res = await nodeDeployContract(nodeUrl, formData);
       if (res?.address) {
         setCallForm((prev) => ({ ...prev, contract: res.address }));
@@ -1990,7 +2110,8 @@ function App() {
         Timestamp: Math.floor(Date.now() / 1000),
         Status: "success",
       });
-      setStatus(`Custom plugin deployed: ${shortAddress(res?.address || "")}`);
+      setStatus(`Contract deployed: ${shortAddress(res?.address || "")}`);
+      setCompiledBinary(null);
     } catch (e) {
       setStatus(e.message || "Deploy failed");
     } finally {
@@ -1999,20 +2120,137 @@ function App() {
     }
   }
 
+  async function loadAbiAction() {
+    const addr = callForm.contract.trim();
+    if (!isLikelyAddress(addr)) {
+      setStatus("Enter a valid contract address");
+      return;
+    }
+    setBusy(true);
+    setBusyAction("loadAbi");
+    try {
+      const data = await nodeContractAbi(nodeUrl, addr);
+      const abi = Array.isArray(data) ? data : (data.entries || data.abi || data.functions || []);
+      setCallAbi(abi);
+      setStatus(`ABI loaded: ${abi.length} function(s)`);
+    } catch (e) {
+      setCallAbi([]);
+      setStatus("No ABI found — using manual mode");
+    } finally {
+      setBusy(false);
+      setBusyAction("");
+    }
+  }
+
+  async function executeCallAction(isWrite) {
+    if (!wallet?.address || !wallet?.privateKey) {
+      setStatus("Unlock wallet first");
+      return;
+    }
+    const addr = callForm.contract.trim();
+    if (!isLikelyAddress(addr)) {
+      setStatus("Enter a valid contract address");
+      return;
+    }
+
+    let fnName = "";
+    let args = [];
+
+    if (callSelectedFnIdx != null && callAbi[callSelectedFnIdx]) {
+      const fnDef = callAbi[callSelectedFnIdx];
+      fnName = fnDef.name;
+      args = (fnDef.inputs || []).map((_, i) => callArgs[`arg${i}`] || "");
+    } else {
+      fnName = callForm.functionName.trim();
+      args = callForm.args.split(",").map((s) => s.trim()).filter(Boolean);
+    }
+
+    if (!fnName) {
+      setStatus("Select a function or enter name manually");
+      return;
+    }
+
+    if (isWrite && !walletHasGasBalance()) {
+      setStatus("Claim faucet first: this wallet has 0 LQD for gas");
+      return;
+    }
+
+    setBusy(true);
+    setBusyAction(isWrite ? "callContractWrite" : "callContractRead");
+    try {
+      let res;
+      if (isWrite) {
+        let estimatedGas = 2000000;
+        try {
+          const gasRes = await nodeEstimateGas(nodeUrl, {
+            address: addr,
+            fn: fnName,
+            args,
+            caller: wallet.address,
+            value: callForm.value || "0"
+          });
+          if (gasRes?.gas_limit) {
+             estimatedGas = Math.ceil(Number(gasRes.gas_limit) * 1.2); // Add 20% safety margin
+          }
+        } catch { /* fallback to default */ }
+
+        res = await walletContractTx(walletUrl, {
+          address: wallet.address,
+          contract_address: addr,
+          function: fnName,
+          args,
+          value: callForm.value || "0",
+          gas: Number(callForm.gas) || estimatedGas,
+          gas_price: Number(callForm.gasPrice || bridgeBaseFee || 10),
+          private_key: wallet.privateKey,
+        });
+        const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
+        showToast(hash ? `Tx submitted: ${shortAddress(hash, 8, 6)}` : "Tx submitted", "success");
+        rememberActivity({
+          type: "contract",
+          From: wallet.address,
+          To: addr,
+          TxHash: hash,
+          Timestamp: Math.floor(Date.now() / 1000),
+          Status: "success",
+        });
+        setTimeout(refreshWalletSnapshot, 2000);
+      } else {
+        res = await nodeCallContract(nodeUrl, { address: addr, fn: fnName, args, caller: wallet.address });
+        const output = res?.result || res?.output || res?.data || JSON.stringify(res);
+        showToast(`Read result: ${output}`);
+      }
+    } catch (e) {
+      const msg = e.message || "Call failed";
+      showToast(msg, "error");
+    } finally {
+      setBusy(false);
+      setBusyAction("");
+    }
+  }
+
   async function inspectContractAction() {
-    if (!isLikelyAddress(inspectForm.address)) {
+    const addr = inspectForm.address.trim();
+    if (!isLikelyAddress(addr)) {
       setStatus("Enter a valid contract address");
       return;
     }
     setBusy(true);
     setBusyAction("inspectContract");
     try {
-      const [abi, storage] = await Promise.all([
-        nodeContractAbi(nodeUrl, inspectForm.address),
-        nodeContractStorage(nodeUrl, inspectForm.address),
+      const [abiData, storageData, eventsData] = await Promise.all([
+        nodeContractAbi(nodeUrl, addr).catch(() => null),
+        nodeContractStorage(nodeUrl, addr).catch(() => null),
+        getJson(`${nodeUrl}/contract/events?address=${encodeURIComponent(addr)}`).catch(() => null),
       ]);
+
+      const abi = Array.isArray(abiData) ? abiData : (abiData?.entries || abiData?.abi || abiData?.functions || []);
+      const storage = storageData?.State?.storage ?? storageData?.State ?? storageData ?? {};
+      const events = Array.isArray(eventsData) ? eventsData : (eventsData?.events || []);
+
       setInspectData({ abi, storage });
-      setStatus(`Loaded contract ${shortAddress(inspectForm.address)}`);
+      setExplorerEvents(events);
+      setStatus(`Loaded contract ${shortAddress(addr)}`);
     } catch (e) {
       setStatus(e.message || "Contract inspect failed");
     } finally {
@@ -2021,53 +2259,7 @@ function App() {
     }
   }
 
-  async function callContractAction() {
-    if (!wallet?.address || !wallet?.privateKey) {
-      setStatus("Unlock wallet first");
-      return;
-    }
-    if (!isLikelyAddress(callForm.contract)) {
-      setStatus("Enter a valid contract address");
-      return;
-    }
-    if (!walletHasGasBalance()) {
-      setStatus("Claim faucet first: this wallet has 0 LQD for gas");
-      return;
-    }
-    const args = callForm.args
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    setBusy(true);
-    setBusyAction("callContract");
-    try {
-      const res = await walletContractTx(walletUrl, {
-        address: wallet.address,
-        contract_address: callForm.contract.trim(),
-        function: callForm.functionName.trim(),
-        args,
-        value: callForm.value || "0",
-        gas: Number(callForm.gas || 200000),
-        gas_price: Number(callForm.gasPrice || 0),
-        private_key: wallet.privateKey,
-      });
-      const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
-      setStatus(hash ? `Contract call submitted: ${shortAddress(hash, 8, 6)}` : "Contract call submitted");
-      rememberActivity({
-        type: "contract",
-        From: wallet.address,
-        To: callForm.contract.trim(),
-        TxHash: hash,
-        Timestamp: Math.floor(Date.now() / 1000),
-        Status: "success",
-      });
-    } catch (e) {
-      setStatus(e.message || "Contract call failed");
-    } finally {
-      setBusy(false);
-      setBusyAction("");
-    }
-  }
+
 
   async function addNetworkAction() {
     if (!networkForm.name.trim() || !networkForm.chainId.trim() || !networkForm.nodeUrl.trim() || !networkForm.walletUrl.trim()) {
@@ -2273,6 +2465,11 @@ function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" />
+      {toast.visible && (
+        <View style={[styles.toast, { backgroundColor: toast.type === 'error' ? '#ef4444' : '#38bdf8' }]}>
+          <Text style={styles.toastText}>{toast.message}</Text>
+        </View>
+      )}
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <Modal visible={receiveVisible} transparent animationType="fade" onRequestClose={() => setReceiveVisible(false)}>
           <View style={styles.modalBackdrop}>
@@ -2375,7 +2572,23 @@ function App() {
             </View>
           )}
           <View style={styles.topIdentity}>
-            <Text style={styles.topAddress}>{shortAddress(wallet.address)}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+              <View>
+                <Text style={styles.walletAddress}>{shortAddress(wallet.address, 10, 8)}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isNodeOnline ? '#4ade80' : '#f87171', marginRight: 6 }} />
+                  <Text style={{ color: '#94a3b8', fontSize: scale(10) }}>{isNodeOnline ? 'Node Online' : 'Node Offline'}</Text>
+                </View>
+              </View>
+              <Pressable 
+                onPress={() => refreshWalletSnapshot()} 
+                style={({ pressed }) => [
+                  { opacity: pressed ? 0.6 : 1, padding: 8, backgroundColor: '#1e293b', borderRadius: 20 }
+                ]}
+              >
+                <Text style={{ color: '#38bdf8', fontSize: scale(12), fontWeight: '600' }}>Refresh</Text>
+              </Pressable>
+            </View>
             <Text style={styles.topNetwork}>{currentNetwork.name}</Text>
           </View>
         </View>
@@ -2400,7 +2613,7 @@ function App() {
                 <View style={styles.actionGrid}>
                   <Button label="Send" onPress={() => setTab("home")} />
                   <Button label="Receive" onPress={() => setReceiveVisible(true)} secondary />
-                  <Button label={busyAction === "faucet" ? "Claiming…" : "Faucet"} onPress={claimFaucetAction} secondary disabled={busy} />
+                  <Button label={busyAction === "faucet" ? "Claiming…" : "Faucet"} onPress={claimFaucetAction} secondary disabled={busy || !isNodeOnline} />
                   <Button label="Open Browser" onPress={() => setTab("browser")} secondary />
                   <Button label="Activity" onPress={() => setTab("activity")} secondary />
                 </View>
@@ -2410,7 +2623,7 @@ function App() {
                 <Field label="To" value={sendForm.to} onChangeText={(v) => setSendForm((p) => ({ ...p, to: v }))} placeholder="0x..." />
                 <Field label="Amount" value={sendForm.amount} onChangeText={(v) => setSendForm((p) => ({ ...p, amount: v }))} keyboardType="decimal-pad" placeholder="0.0" />
                 <View style={styles.inlineButtons}>
-                  <Button label="Scan Recipient" onPress={() => scanWithCamera("native")} compact secondary />
+                  <Button label="Scan Recipient" onPress={() => scanWithCamera("native")} compact secondary disabled={!isNodeOnline} />
                   <Button label="Paste" onPress={() => pasteClipboardTo((value) => setSendForm((p) => ({ ...p, to: value } )))} compact />
                 </View>
                 <Button label={busyAction === "sendNative" ? "Sending…" : "Send LQD"} onPress={sendNativeAction} disabled={busy} />
@@ -2490,33 +2703,139 @@ function App() {
                 <Text style={styles.helperText}>If the selected template is `dex_factory`, the deployed address becomes the canonical shared DEX factory for all users.</Text>
               </Card>
 
-              <Card title="Custom plugin deploy" subtitle="Compile Go plugin source and deploy it from mobile.">
-                <Field label="Source code" value={customSource} onChangeText={setCustomSource} multiline numberOfLines={10} placeholder="Go plugin source…" />
-                <View style={styles.inlineButtons}>
-                  <Button label={busyAction === "compileCustom" ? "Compiling…" : "Compile Plugin"} onPress={compileCustomPluginAction} disabled={busy} />
-                  <Button label={busyAction === "deployCustom" ? "Deploying…" : "Deploy Plugin"} onPress={deployCustomPluginAction} secondary disabled={busy || !compiledPluginUri} />
+              <Card title="Custom Compiler" subtitle="Compile and deploy contract source.">
+                <Text style={styles.inspectTitle}>Language / Type</Text>
+                <View style={styles.templateWrap}>
+                  {['goplugin', 'gocode', 'dsl', 'solidity'].map(t => (
+                    <Chip key={t} label={t.toUpperCase()} active={compileType === t} onPress={() => setCompileType(t)} />
+                  ))}
                 </View>
-                <Text style={styles.helperText}>
-                  {compiledPlugin ? `Compiled: ${compiledPluginSize} bytes ready for upload.` : "Compile source first, then deploy the generated .so file."}
-                </Text>
+                
+                <Field label="Source code" value={customSource} onChangeText={setCustomSource} multiline numberOfLines={10} placeholder="Enter source code here..." />
+                
+                <View style={styles.inlineButtons}>
+                  <Button label={busyAction === "compile" ? "Compiling…" : "Compile Source"} onPress={compileAction} disabled={busy} />
+                  <Button label={busyAction === "deployCompiled" ? "Deploying…" : "Deploy Compiled"} onPress={deployCompiledAction} secondary disabled={busy || !compiledBinary} />
+                </View>
+                
+                {compiledBinary && (
+                  <Text style={styles.helperText}>✓ Ready: {compiledPluginSize} bytes compiled.</Text>
+                )}
+                
+                {compileType === "goplugin" && (
+                  <Text style={styles.helperText}>💡 Tip: Go plugins must use 'package main' and are highly efficient.</Text>
+                )}
               </Card>
 
               <Card title="Call contract" subtitle="Read or write via wallet signed calls.">
-                <Field label="Contract address" value={callForm.contract} onChangeText={(v) => setCallForm((p) => ({ ...p, contract: v }))} placeholder="0x..." />
-                <Field label="Function" value={callForm.functionName} onChangeText={(v) => setCallForm((p) => ({ ...p, functionName: v }))} placeholder="Transfer / BalanceOf / Ping" />
-                <Field label="Args (comma separated)" value={callForm.args} onChangeText={(v) => setCallForm((p) => ({ ...p, args: v }))} placeholder="addr, 1000" />
+                <Field label="Contract address" value={callForm.contract} onChangeText={(v) => { setCallForm((p) => ({ ...p, contract: v })); setCallAbi([]); }} placeholder="0x..." />
+                <Button label={busyAction === "loadAbi" ? "Loading ABI…" : "Load ABI"} onPress={loadAbiAction} disabled={busy} secondary />
+                
+                {callAbi.length > 0 ? (
+                  <View style={styles.sectionGapSmall}>
+                    <Text style={styles.inspectTitle}>Select Function</Text>
+                    <View style={styles.templateWrap}>
+                      {callAbi.map((fn, idx) => (
+                        <Chip 
+                          key={`${fn.name}-${idx}`} 
+                          label={`${fn.name}(${(fn.inputs || []).length})`} 
+                          active={callSelectedFnIdx === idx} 
+                          onPress={() => {
+                            setCallSelectedFnIdx(idx);
+                            setCallArgs({});
+                          }} 
+                        />
+                      ))}
+                    </View>
+                    
+                    {callSelectedFnIdx != null && callAbi[callSelectedFnIdx] && (
+                      <View style={styles.sectionGapSmall}>
+                        {(callAbi[callSelectedFnIdx].inputs || []).map((inp, i) => (
+                          <Field 
+                            key={`arg-${i}`}
+                            label={`${inp.name || 'arg'+i} (${inp.type || 'string'})`}
+                            value={callArgs[`arg${i}`] || ""}
+                            onChangeText={(v) => setCallArgs(p => ({ ...p, [`arg${i}`]: v }))}
+                            placeholder={inp.type || "value"}
+                          />
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                ) : (
+                  <View style={styles.sectionGapSmall}>
+                    <Field label="Function" value={callForm.functionName} onChangeText={(v) => setCallForm((p) => ({ ...p, functionName: v }))} placeholder="Transfer / BalanceOf / Ping" />
+                    <Field label="Args (comma separated)" value={callForm.args} onChangeText={(v) => setCallForm((p) => ({ ...p, args: v }))} placeholder="addr, 1000" />
+                  </View>
+                )}
+
                 <Field label="Value" value={callForm.value} onChangeText={(v) => setCallForm((p) => ({ ...p, value: v }))} keyboardType="decimal-pad" placeholder="0" />
                 <Field label="Gas" value={callForm.gas} onChangeText={(v) => setCallForm((p) => ({ ...p, gas: v }))} keyboardType="numeric" placeholder="200000" />
-                <Button label={busyAction === "callContract" ? "Submitting…" : "Submit Call"} onPress={callContractAction} disabled={busy} />
+                
+                <View style={styles.inlineButtons}>
+                  <Button 
+                    label={busyAction === "callContractRead" ? "Reading…" : "Read Call"} 
+                    onPress={() => executeCallAction(false)} 
+                    disabled={busy} 
+                    compact 
+                  />
+                  <Button 
+                    label={busyAction === "callContractWrite" ? "Writing…" : "Write Call"} 
+                    onPress={() => executeCallAction(true)} 
+                    disabled={busy} 
+                    compact 
+                    secondary={busyAction !== "callContractWrite"}
+                  />
+                </View>
               </Card>
 
-              <Card title="Inspect contract" subtitle="Read ABI and contract storage from the node.">
+              <Card title="Contract Explorer" subtitle="Inspect contract metadata, storage and events.">
                 <Field label="Contract address" value={inspectForm.address} onChangeText={(v) => setInspectForm({ address: v })} placeholder="0x..." />
-                <Button label={busyAction === "inspectContract" ? "Loading…" : "Load ABI / Storage"} onPress={inspectContractAction} disabled={busy} />
-                <Text style={styles.inspectTitle}>ABI</Text>
-                <Text style={styles.inspectBox}>{inspectData.abi ? JSON.stringify(inspectData.abi, null, 2) : "No ABI loaded yet."}</Text>
-                <Text style={styles.inspectTitle}>Storage</Text>
-                <Text style={styles.inspectBox}>{inspectData.storage ? JSON.stringify(inspectData.storage, null, 2) : "No storage loaded yet."}</Text>
+                <Button label={busyAction === "inspectContract" ? "Loading Explorer…" : "Explore Contract"} onPress={inspectContractAction} disabled={busy} />
+                
+                <View style={styles.subtabHeader}>
+                  {['overview', 'storage', 'abi', 'events'].map(t => (
+                    <Pressable key={t} onPress={() => setExplorerTab(t)} style={[styles.subtabItem, explorerTab === t && styles.subtabItemActive]}>
+                      <Text style={[styles.subtabText, explorerTab === t && styles.subtabTextActive]}>{t.charAt(0).toUpperCase() + t.slice(1)}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                {explorerTab === "overview" && (
+                  <View style={styles.inspectContent}>
+                    <Text style={styles.inspectTitle}>Basic Info</Text>
+                    <Text style={styles.helperText}>Address: {inspectForm.address}</Text>
+                    <Text style={styles.helperText}>Functions: {inspectData.abi?.length || 0}</Text>
+                    <Text style={styles.helperText}>Events: {explorerEvents.length || 0}</Text>
+                  </View>
+                )}
+
+                {explorerTab === "storage" && (
+                  <ScrollView style={styles.inspectScroll}>
+                    <Text style={styles.inspectBox}>{inspectData.storage ? JSON.stringify(inspectData.storage, null, 2) : "No storage loaded."}</Text>
+                  </ScrollView>
+                )}
+
+                {explorerTab === "abi" && (
+                  <ScrollView style={styles.inspectScroll}>
+                    <Text style={styles.inspectBox}>{inspectData.abi ? JSON.stringify(inspectData.abi, null, 2) : "No ABI loaded."}</Text>
+                  </ScrollView>
+                )}
+
+                {explorerTab === "events" && (
+                  <ScrollView style={styles.inspectScroll}>
+                    {explorerEvents.length > 0 ? (
+                      explorerEvents.map((ev, i) => (
+                        <View key={i} style={styles.eventRow}>
+                          <Text style={styles.eventTitle}>{ev.event || ev.name || "Event"}</Text>
+                          <Text style={styles.eventBody}>{JSON.stringify(ev.data || ev.payload || {})}</Text>
+                        </View>
+                      ))
+                    ) : (
+                      <Text style={styles.helperText}>No events found.</Text>
+                    )}
+                  </ScrollView>
+                )}
               </Card>
             </View>
           )}
@@ -2660,6 +2979,7 @@ function App() {
                 </View>
                 <Field label={isExternalBridgeFamily ? "LQD recipient" : "BSC recipient"} value={isExternalBridgeFamily ? bridgeForm.toLqd : bridgeForm.toBsc} onChangeText={(v) => setBridgeForm((p) => (isExternalBridgeFamily ? { ...p, toLqd: v } : { ...p, toBsc: v }))} placeholder="0x..." />
                 <Field label="Amount" value={bridgeForm.amount} onChangeText={(v) => setBridgeForm((p) => ({ ...p, amount: v }))} keyboardType="decimal-pad" placeholder="0.0" />
+                <Text style={styles.helperText}>Network Base Fee: {bridgeBaseFee} LQD</Text>
                 <View style={styles.inlineButtons}>
                   <Button label="Scan Recipient" onPress={() => scanWithCamera("bridge")} compact secondary />
                   <Button label="Paste" onPress={() => pasteClipboardTo((value) => setBridgeForm((p) => (isExternalBridgeFamily ? { ...p, toLqd: value } : { ...p, toBsc: value } )))} compact />
@@ -2692,6 +3012,14 @@ function App() {
                           setStatus("Solana/Substrate/XRPL/TON/NEAR/Aptos bridge needs a recent blockhash / sequence");
                           return;
                         }
+                        
+                        // Pillar 3: Double-Spend Protection
+                        const isDup = bridgeRequests.some(r => r.source_tx_hash === sourceTxHash || r.tx_hash === sourceTxHash);
+                        if (isDup) {
+                          Alert.alert("Duplicate Request", "This transaction has already been registered in the bridge.");
+                          return;
+                        }
+
                         const lockPayload = {
                           chain_id: bridgeChainId,
                           family: currentBridgeFamily,
@@ -2837,15 +3165,20 @@ function App() {
                 />
               </Card>
 
-              <Card title="Bridge state" subtitle="Recent requests and token mappings from the node.">
-                <Text style={styles.inspectTitle}>Requests</Text>
-                <Text style={styles.inspectBox}>{JSON.stringify(bridgeRequests, null, 2)}</Text>
+              <Card title="Recent bridge requests" subtitle="Track your cross-chain transfer status.">
+                {bridgeRequests.length > 0 ? (
+                  bridgeRequests.slice(0, 10).map((r, i) => <BridgeRow key={i} item={r} />)
+                ) : (
+                  <Text style={styles.helperText}>No bridge requests found.</Text>
+                )}
+                <Button label="Refresh Bridge Status" onPress={() => refreshWalletSnapshot()} secondary />
+              </Card>
+
+              <Card title="Bridge registry" subtitle="Token mappings and chain configuration.">
                 <Text style={styles.inspectTitle}>Chains</Text>
-                <Text style={styles.inspectBox}>{JSON.stringify(bridgeChains, null, 2)}</Text>
-                <Text style={styles.inspectTitle}>Families</Text>
-                <Text style={styles.inspectBox}>{JSON.stringify(bridgeFamilies, null, 2)}</Text>
+                <Text style={styles.inspectBox}>{JSON.stringify(bridgeChains.map(c => c.name || c.id), null, 2)}</Text>
                 <Text style={styles.inspectTitle}>Tokens</Text>
-                <Text style={styles.inspectBox}>{JSON.stringify(bridgeTokens, null, 2)}</Text>
+                <Text style={styles.inspectBox}>{JSON.stringify(bridgeTokens.map(t => t.symbol), null, 2)}</Text>
               </Card>
             </View>
           )}
@@ -2994,6 +3327,20 @@ function App() {
           ))}
         </View>
       </KeyboardAvoidingView>
+
+      {!!processingMessage && (
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(11, 16, 32, 0.9)', zIndex: 9999, justifyContent: 'center', alignItems: 'center', padding: scale(40) }}>
+          <ActivityIndicator size="large" color="#38bdf8" />
+          <Text style={{ color: '#fff', marginTop: scale(20), fontSize: scale(18), fontWeight: '700', textAlign: 'center' }}>{processingMessage}</Text>
+          <Text style={{ color: '#94a3b8', marginTop: scale(10), fontSize: scale(13), textAlign: 'center' }}>This depends on network speed. Please do not close the app.</Text>
+        </View>
+      )}
+
+      {toast.visible && (
+        <View style={{ position: 'absolute', bottom: scale(80), left: scale(20), right: scale(20), backgroundColor: toast.type === "success" ? "#10b981" : toast.type === "error" ? "#ef4444" : "#3b82f6", borderRadius: scale(12), padding: scale(16), zIndex: 10000, flexDirection: 'row', alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4.65, elevation: 8 }}>
+          <Text style={{ color: '#fff', fontSize: scale(14), fontWeight: '700', flex: 1 }}>{toast.message}</Text>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -3463,6 +3810,80 @@ const styles = StyleSheet.create({
     fontSize: scale(12),
     lineHeight: scale(18),
     marginTop: scale(8),
+  },
+  subtabHeader: {
+    flexDirection: "row",
+    gap: scale(6),
+    marginTop: scale(10),
+    marginBottom: scale(8),
+    flexWrap: "wrap",
+  },
+  subtabItem: {
+    paddingVertical: scale(6),
+    paddingHorizontal: scale(12),
+    borderRadius: scale(10),
+    backgroundColor: "#1b2342",
+    borderWidth: 1,
+    borderColor: "#303a5e",
+  },
+  subtabItemActive: {
+    backgroundColor: "#2c2557",
+    borderColor: "#8a78ff",
+  },
+  subtabText: {
+    color: "#9aa5ca",
+    fontSize: scale(12),
+    fontWeight: "700",
+  },
+  subtabTextActive: {
+    color: "#f4f7ff",
+  },
+  inspectContent: {
+    marginTop: scale(6),
+    gap: scale(6),
+  },
+  inspectScroll: {
+    maxHeight: scale(250),
+    marginTop: scale(6),
+  },
+  eventRow: {
+    paddingVertical: scale(8),
+    borderBottomWidth: 1,
+    borderBottomColor: "#273152",
+  },
+  eventTitle: {
+    color: "#8a78ff",
+    fontSize: scale(13),
+    fontWeight: "800",
+  },
+  eventBody: {
+    color: "#c6cee8",
+    fontSize: scale(11),
+    lineHeight: scale(16),
+    marginTop: scale(2),
+  },
+  toast: {
+    position: 'absolute',
+    top: scale(50),
+    left: scale(20),
+    right: scale(20),
+    padding: scale(16),
+    borderRadius: scale(12),
+    zIndex: 9999,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  toastText: {
+    color: '#fff',
+    fontSize: scale(14),
+    fontWeight: '700',
+    textAlign: 'center',
+    flex: 1,
   },
 });
 
