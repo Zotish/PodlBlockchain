@@ -2273,8 +2273,12 @@ function App() {
         setTimeout(() => refreshWalletSnapshot(), 6000);
       } else {
         res = await nodeCallContract(nodeUrl, { address: addr, fn: fnName, args, caller: wallet.address });
-        const output = res?.result || res?.output || res?.data || JSON.stringify(res);
-        showToast(`Result: ${String(output).slice(0, 50)}`, "info");
+        const output = res?.result ?? res?.output ?? res?.data ?? res?.val ?? JSON.stringify(res);
+        if (output === undefined || output === null || output === "{}") {
+           showToast("Read completed with no result", "info");
+        } else {
+           Alert.alert(`Read: ${fnName}`, String(output));
+        }
       }
     } catch (e) {
       showToast(e.message || "Action failed", "error");
