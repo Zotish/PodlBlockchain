@@ -1045,6 +1045,38 @@ function App() {
     }));
   }
 
+  async function autoDiscoverTokens(data, addressOverride = "") {
+    const activeAddress = addressOverride || wallet?.address;
+    if (!activeAddress) return;
+
+    const candidates = new Set();
+    
+    // 1. Discover from recent transactions (Transfers and Deploys)
+    if (Array.isArray(data?.recent)) {
+      data.recent.forEach(tx => {
+        const addr = tx.Contract || tx.To;
+        if (addr && isLikelyAddress(addr) && addr.toLowerCase() !== activeAddress.toLowerCase()) {
+          candidates.add(addr);
+        }
+        // Also check if user is the sender to a contract
+        if (tx.From?.toLowerCase() === activeAddress.toLowerCase() && isLikelyAddress(tx.To)) {
+           candidates.add(tx.To);
+        }
+      });
+    }
+
+    // 2. Discover from bridge tokens
+    if (Array.isArray(data?.bridgeTokens)) {
+      data.bridgeTokens.forEach(t => {
+        if (t.address) candidates.add(t.address);
+      });
+    }
+
+    if (candidates.size > 0) {
+      await importDetectedTokens(Array.from(candidates).map(a => ({ address: a })), activeAddress, "auto");
+    }
+  }
+
   async function refreshTokenBalances(nextWatchlist = watchlist, addressOverride = "") {
     const activeAddress = addressOverride || wallet?.address;
     if (!activeAddress) return;
