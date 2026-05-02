@@ -902,7 +902,7 @@ function App() {
     setIsRefreshing(true);
     try {
       const [status, native, factory, recent, requests, tokensResp, poolsResp, feeResp] = await Promise.all([
-        getJson(`${normalizeUrl(nodeUrl)}/blockchain`).catch(() => ({ online: false })),
+        nodeStatus(nodeUrl).catch(() => ({ online: false })),
         walletBalance(nodeUrl, activeAddress).catch(() => null),
         nodeCurrentFactory(nodeUrl).catch(() => null),
         nodeRecentTransactions(nodeUrl).catch(() => []),
@@ -2688,7 +2688,7 @@ function App() {
                 <View style={styles.actionGrid}>
                   <Button label="Send" onPress={() => setTab("home")} />
                   <Button label="Receive" onPress={() => setReceiveVisible(true)} secondary />
-                  <Button label={busyAction === "faucet" ? "Claiming…" : "Faucet"} onPress={claimFaucetAction} secondary disabled={busy || !isNodeOnline} />
+                  <Button label={busyAction === "faucet" ? "Claiming…" : "Faucet"} onPress={claimFaucetAction} secondary disabled={busy} />
                   <Button label="Open Browser" onPress={() => setTab("browser")} secondary />
                   <Button label="Activity" onPress={() => setTab("activity")} secondary />
                 </View>
@@ -2899,9 +2899,22 @@ function App() {
                 )}
 
                 {explorerTab === "abi" && (
-                  <ScrollView style={styles.inspectScroll}>
-                    <Text style={styles.inspectBox}>{inspectData.abi ? JSON.stringify(inspectData.abi, null, 2) : "No ABI loaded."}</Text>
-                  </ScrollView>
+                  <View style={styles.sectionGapSmall}>
+                    <ScrollView style={[styles.inspectScroll, { backgroundColor: "#0f172a", borderRadius: scale(8), padding: scale(10) }]} nestedScrollEnabled>
+                      <Text style={[styles.inspectBox, { color: "#8a78ff" }]}>{inspectData.abi ? JSON.stringify(inspectData.abi, null, 2) : "No ABI loaded."}</Text>
+                    </ScrollView>
+                    {inspectData.abi && (
+                      <Button 
+                        label="Copy ABI JSON" 
+                        secondary 
+                        compact 
+                        onPress={() => {
+                          Clipboard.setStringAsync(JSON.stringify(inspectData.abi));
+                          showToast("ABI Copied", "success");
+                        }} 
+                      />
+                    )}
+                  </View>
                 )}
 
                 {explorerTab === "events" && (
@@ -3411,16 +3424,16 @@ function App() {
       </KeyboardAvoidingView>
 
       {!!processingMessage && (
-        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(11, 16, 32, 0.9)', zIndex: 9999, justifyContent: 'center', alignItems: 'center', padding: scale(40) }}>
-          <ActivityIndicator size="large" color="#38bdf8" />
-          <Text style={{ color: '#fff', marginTop: scale(20), fontSize: scale(18), fontWeight: '700', textAlign: 'center' }}>{processingMessage}</Text>
-          <Text style={{ color: '#94a3b8', marginTop: scale(10), fontSize: scale(13), textAlign: 'center' }}>This depends on network speed. Please do not close the app.</Text>
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(7, 10, 21, 0.96)', zIndex: 99999, justifyContent: 'center', alignItems: 'center', padding: scale(40) }}>
+          <ActivityIndicator size="large" color="#8a78ff" />
+          <Text style={{ color: '#f4f7ff', marginTop: scale(20), fontSize: scale(18), fontWeight: '800', textAlign: 'center' }}>{processingMessage}</Text>
+          <Text style={{ color: '#9aa5ca', marginTop: scale(10), fontSize: scale(13), textAlign: 'center' }}>Broadcasting to the LQD network. Please wait...</Text>
         </View>
       )}
 
       {toast.visible && (
-        <View style={{ position: 'absolute', bottom: scale(80), left: scale(20), right: scale(20), backgroundColor: toast.type === "success" ? "#10b981" : toast.type === "error" ? "#ef4444" : "#3b82f6", borderRadius: scale(12), padding: scale(16), zIndex: 10000, flexDirection: 'row', alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4.65, elevation: 8 }}>
-          <Text style={{ color: '#fff', fontSize: scale(14), fontWeight: '700', flex: 1 }}>{toast.message}</Text>
+        <View style={{ position: 'absolute', bottom: scale(100), left: scale(20), right: scale(20), backgroundColor: toast.type === "success" ? "#10b981" : toast.type === "error" ? "#ef4444" : "#4f46e5", borderRadius: scale(14), padding: scale(18), zIndex: 100000, flexDirection: 'row', alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.44, shadowRadius: 10.32, elevation: 16 }}>
+          <Text style={{ color: '#fff', fontSize: scale(14), fontWeight: '800', flex: 1, textAlign: 'center' }}>{toast.message}</Text>
         </View>
       )}
     </SafeAreaView>
