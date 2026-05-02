@@ -1688,15 +1688,6 @@ function App() {
         Status: "success",
       });
       setSendForm(initialSendForm);
-      showToast("Transaction Sent Successfully", "success");
-      rememberActivity({
-        type: "send",
-        From: wallet.address,
-        To: sendForm.to.trim(),
-        TxHash: hash,
-        Timestamp: Math.floor(Date.now() / 1000),
-        Status: "success",
-      });
       setTimeout(() => refreshWalletSnapshot(), 1000);
       setTimeout(() => refreshWalletSnapshot(), 5000); // Second refresh to catch block inclusion
     } catch (e) {
@@ -1996,26 +1987,35 @@ function App() {
       if (deployForm.template === "dex_factory" && res?.address) {
         setFactoryAddress(res.address);
       }
-      if (res?.address) {
-        setCallForm((prev) => ({ ...prev, contract: res.address }));
-        setInspectForm({ address: res.address });
+      const contractAddr = res?.address || "";
+      if (contractAddr) {
+        setCallForm((prev) => ({ ...prev, contract: contractAddr }));
+        setInspectForm({ address: contractAddr });
         const tokenLikeTemplates = ["lqd20", "bridge_token"];
         const candidates = tokenLikeTemplates.includes(deployForm.template)
-          ? [res.address]
+          ? [contractAddr]
           : deployForm.template === "dex_swap"
             ? [deployForm.tokenA, deployForm.tokenB]
             : [];
         await importDetectedTokens(candidates, wallet.address, "deploy");
+        Alert.alert(
+          "Deployment Success",
+          `Contract deployed at:\n${contractAddr}`,
+          [
+            { text: "Copy Address", onPress: () => Clipboard.setStringAsync(contractAddr) },
+            { text: "OK" }
+          ]
+        );
       }
       rememberActivity({
         type: "deploy",
         From: wallet.address,
-        To: res?.address,
+        To: contractAddr || "New Contract",
         TxHash: res?.tx_hash,
         Timestamp: Math.floor(Date.now() / 1000),
         Status: "success",
       });
-      setStatus(`Deployed ${deployForm.template}: ${shortAddress(res?.address || "")}`);
+      setStatus(`Deployed ${deployForm.template}: ${shortAddress(contractAddr)}`);
     } catch (e) {
       setStatus(e.message || "Builtin deploy failed");
     } finally {
@@ -2107,19 +2107,29 @@ function App() {
       }
 
       const res = await nodeDeployContract(nodeUrl, formData);
-      if (res?.address) {
-        setCallForm((prev) => ({ ...prev, contract: res.address }));
-        setInspectForm({ address: res.address });
+      const contractAddr = res?.contract_address || res?.ContractAddress || res?.address || "";
+      if (contractAddr) {
+        setCallForm((prev) => ({ ...prev, contract: contractAddr }));
+        setInspectForm({ address: contractAddr });
+        Alert.alert(
+          "Deployment Success",
+          `Contract deployed at:\n${contractAddr}`,
+          [
+            { text: "Copy Address", onPress: () => Clipboard.setStringAsync(contractAddr) },
+            { text: "OK" }
+          ]
+        );
+        showToast("Contract Deployed!", "success");
       }
       rememberActivity({
         type: "deploy",
         From: wallet.address,
-        To: res?.address,
+        To: contractAddr || "New Contract",
         TxHash: res?.tx_hash,
         Timestamp: Math.floor(Date.now() / 1000),
         Status: "success",
       });
-      setStatus(`Contract deployed: ${shortAddress(res?.address || "")}`);
+      setStatus(`Contract deployed: ${shortAddress(contractAddr || "")}`);
       setCompiledBinary(null);
     } catch (e) {
       setStatus(e.message || "Deploy failed");
@@ -2273,7 +2283,22 @@ function App() {
     }
   }
 
-
+  async function openFromScan(data) {
+    try {
+      const clean = data.trim();
+      if (isLikelyAddress(clean)) {
+        // If it looks like a contract/token address, auto-import it
+        showToast("Address detected, importing...", "info");
+        await importDetectedTokens([{ address: clean }], wallet.address, "scan");
+        setTab("tokens");
+        return;
+      }
+      setStatus(`Scanned: ${clean}`);
+      showToast("Scanned: " + shortAddress(clean), "info");
+    } catch (e) {
+      showToast("Scan handle failed", "error");
+    }
+  }
 
   async function addNetworkAction() {
     if (!networkForm.name.trim() || !networkForm.chainId.trim() || !networkForm.nodeUrl.trim() || !networkForm.walletUrl.trim()) {
