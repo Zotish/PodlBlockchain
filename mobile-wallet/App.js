@@ -1688,8 +1688,17 @@ function App() {
         Status: "success",
       });
       setSendForm(initialSendForm);
-      await refreshNativeOnly();
-      await refreshWalletSnapshot();
+      showToast("Transaction Sent Successfully", "success");
+      rememberActivity({
+        type: "send",
+        From: wallet.address,
+        To: sendForm.to.trim(),
+        TxHash: hash,
+        Timestamp: Math.floor(Date.now() / 1000),
+        Status: "success",
+      });
+      setTimeout(() => refreshWalletSnapshot(), 1000);
+      setTimeout(() => refreshWalletSnapshot(), 5000); // Second refresh to catch block inclusion
     } catch (e) {
       showToast(e.message || "Send failed", "error");
     } finally {
@@ -2177,6 +2186,7 @@ function App() {
 
     setBusy(true);
     setBusyAction(isWrite ? "callContractWrite" : "callContractRead");
+    setProcessingMessage(isWrite ? `Executing ${fnName}...` : `Reading ${fnName}...`);
     try {
       let res;
       if (isWrite) {
@@ -2190,9 +2200,9 @@ function App() {
             value: callForm.value || "0"
           });
           if (gasRes?.gas_limit) {
-             estimatedGas = Math.ceil(Number(gasRes.gas_limit) * 1.2); // Add 20% safety margin
+             estimatedGas = Math.ceil(Number(gasRes.gas_limit) * 1.2);
           }
-        } catch { /* fallback to default */ }
+        } catch { /* fallback */ }
 
         res = await walletContractTx(walletUrl, {
           address: wallet.address,
@@ -2205,7 +2215,9 @@ function App() {
           private_key: wallet.privateKey,
         });
         const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
-        showToast(hash ? `Tx submitted: ${shortAddress(hash, 8, 6)}` : "Tx submitted", "success");
+        if (!hash) throw new Error(res?.error || "Transaction failed");
+
+        showToast(`${fnName} Submitted Successfully`, "success");
         rememberActivity({
           type: "contract",
           From: wallet.address,
@@ -2213,19 +2225,21 @@ function App() {
           TxHash: hash,
           Timestamp: Math.floor(Date.now() / 1000),
           Status: "success",
+          Data: fnName
         });
-        setTimeout(refreshWalletSnapshot, 2000);
+        setTimeout(() => refreshWalletSnapshot(), 1000);
+        setTimeout(() => refreshWalletSnapshot(), 6000);
       } else {
         res = await nodeCallContract(nodeUrl, { address: addr, fn: fnName, args, caller: wallet.address });
         const output = res?.result || res?.output || res?.data || JSON.stringify(res);
-        showToast(`Read result: ${output}`);
+        showToast(`Result: ${String(output).slice(0, 50)}`, "info");
       }
     } catch (e) {
-      const msg = e.message || "Call failed";
-      showToast(msg, "error");
+      showToast(e.message || "Action failed", "error");
     } finally {
       setBusy(false);
       setBusyAction("");
+      setProcessingMessage("");
     }
   }
 
@@ -2750,15 +2764,22 @@ function App() {
                     
                     {callSelectedFnIdx != null && callAbi[callSelectedFnIdx] && (
                       <View style={styles.sectionGapSmall}>
-                        {(callAbi[callSelectedFnIdx].inputs || []).map((inp, i) => (
-                          <Field 
-                            key={`arg-${i}`}
-                            label={`${inp.name || 'arg'+i} (${inp.type || 'string'})`}
-                            value={callArgs[`arg${i}`] || ""}
-                            onChangeText={(v) => setCallArgs(p => ({ ...p, [`arg${i}`]: v }))}
-                            placeholder={inp.type || "value"}
-                          />
-                        ))}
+                        {(callAbi[callSelectedFnIdx].inputs || []).map((inp, i) => {
+                          const label = inp.name || `arg${i}`;
+                          const lower = label.toLowerCase();
+                          let ph = inp.type || "value";
+                          if (lower.includes("addr") || lower.includes("to") || lower.includes("from")) ph = "0x... Address";
+                          else if (lower.includes("val") || lower.includes("amount")) ph = "Number or Amount";
+                          return (
+                            <Field 
+                              key={`arg-${i}`}
+                              label={`${label} (${inp.type || 'string'})`}
+                              value={callArgs[`arg${i}`] || ""}
+                              onChangeText={(v) => setCallArgs(p => ({ ...p, [`arg${i}`]: v }))}
+                              placeholder={ph}
+                            />
+                          );
+                        })}
                       </View>
                     )}
                   </View>

@@ -168,7 +168,12 @@ export async function nodeEstimateGas(nodeUrl, payload) {
 }
 
 export async function nodeStatus(nodeUrl) {
-  return getJson(`${normalizeUrl(nodeUrl)}/node/status`).catch(() => ({ online: false }));
+  try {
+    const res = await getJson(`${normalizeUrl(nodeUrl)}/blockchain`);
+    return { online: !!(res?.status === "ok" || res?.version || res?.height), ...res };
+  } catch {
+    return { online: false };
+  }
 }
 
 export async function nodeRecentTransactions(nodeUrl) {
