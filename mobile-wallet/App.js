@@ -424,14 +424,7 @@ const BridgeRow = ({ item }) => {
   );
 };
 
-function txTouchesAddress(tx, address) {
-  if (!tx || !address) return false;
-  const active = normalizeAddress(address);
-  const from = normalizeAddress(tx.From || tx.from || tx.sender || "");
-  const to = normalizeAddress(tx.To || tx.to || tx.recipient || "");
-  const contract = normalizeAddress(tx.Contract || tx.contract || "");
-  return from === active || to === active || contract === active;
-}
+
 
 function ActivityRow({ item }) {
   const hash = item.TxHash || item.tx_hash || item.hash || "";

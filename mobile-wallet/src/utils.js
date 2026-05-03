@@ -78,8 +78,9 @@ export function mergeUniqueByKey(list, next, key = "address") {
 export function txTouchesAddress(tx, address) {
   if (!tx || !address) return false;
   const a = String(address).trim().toLowerCase();
-  const from = String(tx.From || tx.from || "").trim().toLowerCase();
-  const to = String(tx.To || tx.to || "").trim().toLowerCase();
-  return from === a || to === a;
+  const from = String(tx.From || tx.from || tx.sender || "").trim().toLowerCase();
+  const to = String(tx.To || tx.to || tx.recipient || "").trim().toLowerCase();
+  const contract = String(tx.Contract || tx.contract || "").trim().toLowerCase();
+  return from === a || to === a || contract === a;
 }
 
