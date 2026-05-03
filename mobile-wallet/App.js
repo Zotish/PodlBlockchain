@@ -698,46 +698,93 @@ function App() {
     }
     const isTrusted = trustedOrigins.includes(currentOrigin);
     const selectedAddress = isTrusted ? JSON.stringify(wallet?.address || "") : "null";
+    const chainIdStr = JSON.stringify(currentNetwork?.chainId || "0x8b");
+    const networkVersion = JSON.stringify(parseInt(currentNetwork?.chainId || "0x8b", 16).toString());
 
     return `
     (function() {
+      if (window.lqd && window.lqd.isMobileWallet && window.lqd._initialized) return;
+
       var requestId = 0;
       var pending = {};
       var eventListeners = {};
 
       function emit(event, data) {
-        (eventListeners[event] || []).forEach(cb => cb(data));
+        if (eventListeners[event]) {
+          eventListeners[event].forEach(cb => { try { cb(data); } catch(e) {} });
+        }
       }
 
-      window.lqd = {
+      var provider = {
+        isLQD: true,
         isLQDWallet: true,
         isMobileWallet: true,
+        _initialized: true,
         selectedAddress: ${selectedAddress},
-        chainId: ${JSON.stringify(currentNetwork?.chainId || "0x8b")},
-        request: function (payload) {
-          var body = payload || {};
+        chainId: ${chainIdStr},
+        networkVersion: ${networkVersion},
+
+        request: function (args) {
+          var payload = args || {};
+          if (typeof args === 'string') payload = { method: args, params: [] };
+          
           var id = String(requestId++);
           return new Promise(function (resolve, reject) {
             pending[id] = { resolve: resolve, reject: reject };
             window.ReactNativeWebView.postMessage(JSON.stringify({
               source: "lqd-mobile-provider",
               id: id,
-              method: body.method,
-              params: body.params || [],
+              method: payload.method,
+              params: payload.params || [],
               origin: window.location.origin,
               name: document.title || window.location.host || "dApp"
             }));
           });
         },
+
+        send: function(method, params) {
+          if (typeof method === 'string') return this.request({ method: method, params: params });
+          return this.request(method);
+        },
+
+        sendAsync: function(payload, callback) {
+          this.request(payload).then(res => callback(null, { id: payload.id, jsonrpc: "2.0", result: res }))
+                               .catch(err => callback(err));
+        },
+
         on: function (event, cb) {
           eventListeners[event] = eventListeners[event] || [];
           eventListeners[event].push(cb);
+          return this;
         },
+
         removeListener: function (event, cb) {
-          if (!eventListeners[event]) return;
+          if (!eventListeners[event]) return this;
           eventListeners[event] = eventListeners[event].filter(i => i !== cb);
+          return this;
+        },
+
+        off: function (event, cb) {
+          return this.removeListener(event, cb);
+        },
+
+        once: function(event, cb) {
+          var self = this;
+          var wrap = function(data) { self.removeListener(event, wrap); cb(data); };
+          return this.on(event, wrap);
+        },
+
+        isConnected: function() {
+          return !!this.selectedAddress;
         }
       };
+
+      // Define modern getters
+      Object.defineProperty(provider, 'selectedAddress', { get: function() { return window.lqd._address || ${selectedAddress}; } });
+      provider._address = ${selectedAddress};
+
+      window.lqd = provider;
+      window.ethereum = provider;
 
       window.__LQD_MOBILE_PROVIDER_RESPONSE__ = function (message) {
         var req = pending[String(message.id)];
@@ -745,7 +792,8 @@ function App() {
         delete pending[String(message.id)];
         if (message.ok) {
           if (message.method === "lqd_requestAccounts" || message.method === "eth_requestAccounts") {
-             window.lqd.selectedAddress = message.result[0];
+             window.lqd._address = message.result[0];
+             emit("accountsChanged", [window.lqd._address]);
           }
           req.resolve(message.result);
         }
@@ -753,14 +801,20 @@ function App() {
       };
 
       window.__LQD_MOBILE_SET_ACCOUNT__ = function (address, chainId) {
-        window.lqd.selectedAddress = address || "";
-        window.lqd.chainId = chainId || window.lqd.chainId;
-        emit("lqd_accountsChanged", [window.lqd.selectedAddress].filter(Boolean));
-        emit("accountsChanged", [window.lqd.selectedAddress].filter(Boolean));
+        window.lqd._address = address || "";
+        if (chainId) window.lqd.chainId = chainId;
+        emit("accountsChanged", [address].filter(Boolean));
+        if (chainId) emit("chainChanged", chainId);
       };
 
-      emit("lqd#initialized", { isMobileWallet: true });
+      // Dispatch initialization events
+      setTimeout(function() {
+        window.dispatchEvent(new CustomEvent("lqd#initialized", { detail: provider }));
+        window.dispatchEvent(new CustomEvent("ethereum#initialized", { detail: provider }));
+      }, 100);
+      
       return true;
+    })();
     `;
   }, [wallet?.address, currentNetwork?.chainId, trustedOrigins]);
 
@@ -1204,6 +1258,9 @@ function App() {
       setTab("approvals");
       return;
     }
+
+    // Default: Method not supported
+    respondBrowser(req.id, false, null, `Method not supported: ${method}`);
   }
 
   useEffect(() => {
