@@ -139,7 +139,8 @@ function migrateLocalEndpoint(value, fallback) {
 const BUILTIN_TEMPLATES = [
   { value: "lqd20", label: "LQD20 Token" },
   { value: "dex_swap", label: "DEX Pair" },
-  { value: "dex_factory", label: "DEX (Factory + Router)" },
+  { value: "dex_factory", label: "DEX Factory" },
+  { value: "dex_router", label: "DEX Router" },
   { value: "bridge_token", label: "Bridge Token" },
   { value: "lending_pool", label: "Lending Pool" },
   { value: "nft_collection", label: "NFT Collection" },
@@ -173,6 +174,7 @@ const QUICK_ARGS = {
     { key: "lendingToken", label: "Lending Asset", ph: "LQD or token address" }
   ],
   dex_factory: [],
+  dex_router: []
 };
 
 const TABS = [

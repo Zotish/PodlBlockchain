@@ -3193,7 +3193,7 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 
 	// Validate template name (whitelist)
 	validTemplates := map[string]bool{
-		"lqd20": true, "wlqd": true, "dex_swap": true, "dex_factory": true, "dex_pair": true,
+		"lqd20": true, "wlqd": true, "dex_swap": true, "dex_factory": true, "dex_router": true, "dex_pair": true,
 		"bridge_token": true, "lending_pool": true, "nft_collection": true, "dao_treasury": true,
 	}
 	if !validTemplates[req.Template] {
@@ -3370,10 +3370,17 @@ func prebuiltBuiltinPluginPath(projectRoot, template string) string {
 
 func loadBuiltinPluginBytes(projectRoot, template string) ([]byte, error) {
 	prebuiltPath := prebuiltBuiltinPluginPath(projectRoot, template)
+	if template == "dex_router" {
+		prebuiltPath = prebuiltBuiltinPluginPath(projectRoot, "dex_factory")
+	}
 	if soBytes, err := os.ReadFile(prebuiltPath); err == nil && len(soBytes) > 0 {
 		return soBytes, nil
 	}
-	return compileBuiltinTemplate(projectRoot, template)
+	sourceTemplate := template
+	if template == "dex_router" {
+		sourceTemplate = "dex_factory"
+	}
+	return compileBuiltinTemplate(projectRoot, sourceTemplate)
 }
 
 func compileBuiltinTemplate(projectRoot, template string) ([]byte, error) {
