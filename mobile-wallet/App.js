@@ -3413,30 +3413,48 @@ function App() {
                   Contracts, bridge and dApp approval tools are still available here, but the main wallet stays focused on balance, tokens and browser.
                 </Text>
               </Card>
-            </View>
-          )}
-
-          <Text style={styles.statusText}>{status}</Text>
-        </ScrollView>
-
-        {tab === "browser" && (
-          <View style={{ flex: 1, backgroundColor: '#070a15' }}>
-            <View style={{ height: scale(45), backgroundColor: '#0c0f1d', flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(12), borderBottomWidth: 1, borderColor: '#161b33', zIndex: 10 }}>
-              <View style={{ flex: 1, height: scale(32), backgroundColor: '#161b33', borderRadius: 8, flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(10) }}>
-                <Text style={{ color: '#10b981', fontSize: scale(10), fontWeight: 'bold', marginRight: scale(6) }}>SSL</Text>
-                <Text numberOfLines={1} style={{ color: '#9aa5ca', fontSize: scale(11), flex: 1 }}>{browserUrl || "Search or enter URL"}</Text>
+                    {tab === "browser" && (
+          <View style={{ flex: 1, backgroundColor: '#070a15', paddingTop: Platform.OS === 'ios' ? scale(0) : scale(30) }}>
+            <View style={{ backgroundColor: '#0c0f1d', borderBottomWidth: 1, borderColor: '#161b33', zIndex: 10, paddingVertical: scale(8) }}>
+              {/* URL Bar */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(12), marginBottom: scale(8) }}>
+                <TouchableOpacity 
+                  onPress={() => setBrowserVisible(true)}
+                  style={{ flex: 1, height: scale(38), backgroundColor: '#161b33', borderRadius: 10, flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(12), borderWidth: 1, borderColor: '#273152' }}
+                >
+                  <View style={{ width: scale(8), height: scale(8), borderRadius: 4, backgroundColor: '#10b981', marginRight: scale(8) }} />
+                  <Text numberOfLines={1} style={{ color: '#9aa5ca', fontSize: scale(12), flex: 1 }}>{browserUrl || "Search or enter URL"}</Text>
+                  <Text style={{ color: '#8a78ff', fontSize: scale(16), marginLeft: scale(8) }}>🌐</Text>
+                </TouchableOpacity>
               </View>
-              <View style={{ flexDirection: 'row', gap: scale(8), marginLeft: scale(10) }}>
-                <TouchableOpacity onPress={() => browserRef.current?.goBack()} disabled={!browserCanGoBack} style={{ padding: scale(4), opacity: browserCanGoBack ? 1 : 0.3 }}>
-                  <Text style={{ color: '#fff', fontSize: scale(18) }}>‹</Text>
+
+              {/* Navigation Controls */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: scale(10) }}>
+                <TouchableOpacity onPress={() => browserRef.current?.goBack()} disabled={!browserCanGoBack} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center', opacity: browserCanGoBack ? 1 : 0.3 }}>
+                  <Text style={{ color: '#fff', fontSize: scale(18), fontWeight: 'bold' }}>‹</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => setBrowserVisible(true)} style={{ width: scale(30), height: scale(30), borderRadius: scale(15), backgroundColor: '#161b33', borderWidth: 1, borderColor: '#8a78ff', justifyContent: 'center', alignItems: 'center' }}>
-                  <Text style={{ color: '#8a78ff', fontSize: scale(14) }}>🌐</Text>
+                <TouchableOpacity onPress={() => browserRef.current?.goForward()} disabled={!browserCanGoForward} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center', opacity: browserCanGoForward ? 1 : 0.3 }}>
+                  <Text style={{ color: '#fff', fontSize: scale(18), fontWeight: 'bold' }}>›</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => browserRef.current?.reload()} style={{ padding: scale(4) }}>
+                <TouchableOpacity onPress={() => browserRef.current?.reload()} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center' }}>
                   <Text style={{ color: '#fff', fontSize: scale(16) }}>↻</Text>
                 </TouchableOpacity>
+                <TouchableOpacity onPress={() => { setBrowserUrl(DEFAULT_BROWSER_URL); setBrowserInput(DEFAULT_BROWSER_URL); }} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center' }}>
+                  <Text style={{ color: '#fff', fontSize: scale(14) }}>🏠</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  onPress={async () => {
+                    const url = browserUrl || DEFAULT_BROWSER_URL;
+                    const canOpen = await Linking.canOpenURL(url);
+                    if (canOpen) Linking.openURL(url);
+                    else showToast("Cannot open this URL externally", "error");
+                  }} 
+                  style={{ paddingHorizontal: scale(12), height: scale(34), borderRadius: 8, backgroundColor: '#1e293b', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#273152' }}
+                >
+                  <Text style={{ color: '#9aa5ca', fontSize: scale(11), fontWeight: '700' }}>EXTERNAL</Text>
+                </TouchableOpacity>
               </View>
+            </View>
             </View>
 
             <WebView
