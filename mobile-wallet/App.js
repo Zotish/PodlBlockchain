@@ -632,6 +632,12 @@ function App() {
   const [processingMessage, setProcessingMessage] = useState("");
   const [toast, setToast] = useState({ visible: false, message: "", type: "info" });
 
+  function showToast(message, type = "info") {
+    setToast({ visible: true, message, type });
+    setTimeout(() => setToast((p) => ({ ...p, visible: false })), 4000);
+  }
+
+
   const [backupText, setBackupText] = useState("");
   const [settingsAutoRefresh, setSettingsAutoRefresh] = useState(true);
   const [walletVisible, setWalletVisible] = useState(false);
