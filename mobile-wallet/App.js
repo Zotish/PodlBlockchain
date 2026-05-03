@@ -1481,7 +1481,7 @@ function App() {
       const res = await walletCreate(walletUrl, password);
       const vault = {
         address: res.address,
-        privateKey: res.res.private_key,
+        privateKey: res.private_key,
         mnemonic: res.mnemonic || "",
       };
       await persistWalletVault(vault, password);
@@ -1517,7 +1517,7 @@ function App() {
       const res = await walletImportMnemonic(walletUrl, mnemonic, password);
       const vault = {
         address: res.address,
-        privateKey: res.res.private_key,
+        privateKey: res.private_key,
         mnemonic,
       };
       await persistWalletVault(vault, password);
@@ -3320,7 +3320,7 @@ function App() {
                   <Text style={styles.helperText}>No activity recorded yet.</Text>
                 ) : (
                   activity
-                    .filter((item) => txTouchesAddress(item, wallet.address) || String(item.type || "").length > 0)
+                    .filter((item) => txTouchesAddress(item, wallet.address))
                     .map((item, idx) => <ActivityRow key={`${item.TxHash || item.tx_hash || idx}`} item={item} />)
                 )}
               </Card>
