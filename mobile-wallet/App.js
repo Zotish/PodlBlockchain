@@ -760,6 +760,7 @@ function App() {
 
       emit("lqd#initialized", { isMobileWallet: true });
       return true;
+    })();
     `;
   }, [wallet?.address, currentNetwork?.chainId, trustedOrigins]);
 
