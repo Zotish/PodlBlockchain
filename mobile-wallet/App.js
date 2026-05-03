@@ -686,7 +686,7 @@ function App() {
   const isExternalBridgeFamily = currentBridgeFamily === "cosmos" || currentBridgeFamily === "utxo" || currentBridgeFamily === "cardano" || currentBridgeFamily === "solana" || currentBridgeFamily === "substrate" || currentBridgeFamily === "xrpl" || currentBridgeFamily === "ton" || currentBridgeFamily === "near" || currentBridgeFamily === "aptos";
 
   const unlockInProgress = useRef(false);
-  const scanHandlerRef = useRef(() => {});
+  const scanHandlerRef = useRef(() => { });
   const browserRef = useRef(null);
   const lqdProviderScript = useMemo(() => {
     let currentOrigin = "";
@@ -760,7 +760,6 @@ function App() {
 
       emit("lqd#initialized", { isMobileWallet: true });
       return true;
-    })();
     `;
   }, [wallet?.address, currentNetwork?.chainId, trustedOrigins]);
 
@@ -777,7 +776,7 @@ function App() {
     const sub = Linking.addEventListener("url", handleUrl);
     Linking.getInitialURL().then((url) => {
       if (url) handleUrl({ url });
-    }).catch(() => {});
+    }).catch(() => { });
     return () => {
       sub?.remove?.();
     };
@@ -803,7 +802,7 @@ function App() {
     const cipher = encryptVault(vault, password);
     const record = { address: vault.address, cipher, createdAt: Date.now() };
     await saveJSON(STORAGE_KEYS.vault, record);
-    
+
     // Security Hardening: Try to store raw private key in hardware-backed SecureStore if available
     if (SecureStore && typeof SecureStore.setItemAsync === "function") {
       try {
@@ -831,7 +830,7 @@ function App() {
     const rawAddr = addressOverride || wallet?.address;
     if (!rawAddr) return;
     const activeAddress = rawAddr.trim();
-    
+
     setIsRefreshing(true);
     try {
       const [status, native, factory, recent, requests, tokensResp, poolsResp, feeResp] = await Promise.all([
@@ -1257,43 +1256,43 @@ function App() {
   }, []);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.networks, networks).catch(() => {});
+    saveJSON(STORAGE_KEYS.networks, networks).catch(() => { });
   }, [networks]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.activeNetworkId, activeNetworkId).catch(() => {});
+    saveJSON(STORAGE_KEYS.activeNetworkId, activeNetworkId).catch(() => { });
   }, [activeNetworkId]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.endpoints, endpoints).catch(() => {});
+    saveJSON(STORAGE_KEYS.endpoints, endpoints).catch(() => { });
   }, [endpoints]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.watchlist, watchlist).catch(() => {});
+    saveJSON(STORAGE_KEYS.watchlist, watchlist).catch(() => { });
   }, [watchlist]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.activity, activity).catch(() => {});
+    saveJSON(STORAGE_KEYS.activity, activity).catch(() => { });
   }, [activity]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.factory, factoryAddress).catch(() => {});
+    saveJSON(STORAGE_KEYS.factory, factoryAddress).catch(() => { });
   }, [factoryAddress]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.bridgeChainId, bridgeChainId).catch(() => {});
+    saveJSON(STORAGE_KEYS.bridgeChainId, bridgeChainId).catch(() => { });
   }, [bridgeChainId]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.settings, { autoRefresh: settingsAutoRefresh, biometricEnabled }).catch(() => {});
+    saveJSON(STORAGE_KEYS.settings, { autoRefresh: settingsAutoRefresh, biometricEnabled }).catch(() => { });
   }, [settingsAutoRefresh, biometricEnabled]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.approvals, pendingApprovals).catch(() => {});
+    saveJSON(STORAGE_KEYS.approvals, pendingApprovals).catch(() => { });
   }, [pendingApprovals]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.trustedOrigins, trustedOrigins).catch(() => {});
+    saveJSON(STORAGE_KEYS.trustedOrigins, trustedOrigins).catch(() => { });
   }, [trustedOrigins]);
 
   useEffect(() => {
@@ -1329,7 +1328,7 @@ function App() {
     }
     // If it was a browser request, notify the webview
     if (item.origin) {
-       respondBrowser(item.id, true, [wallet.address], "", item.method);
+      respondBrowser(item.id, true, [wallet.address], "", item.method);
     }
   }
 
@@ -1359,12 +1358,12 @@ function App() {
     return (
       <View style={styles.sectionGapSmall}>
         {fields.map((f) => (
-          <Field 
-            key={f.key} 
-            label={f.label} 
-            value={deployForm[f.key] || ""} 
-            onChangeText={(v) => setDeployForm((p) => ({ ...p, [f.key]: v }))} 
-            placeholder={f.ph} 
+          <Field
+            key={f.key}
+            label={f.label}
+            value={deployForm[f.key] || ""}
+            onChangeText={(v) => setDeployForm((p) => ({ ...p, [f.key]: v }))}
+            placeholder={f.ph}
           />
         ))}
       </View>
@@ -1419,7 +1418,7 @@ function App() {
         try {
           const pk = await SecureStore.getItemAsync(`pk_${vault.address}`);
           if (pk) vault.privateKey = pk;
-        } catch {}
+        } catch { }
       }
       setWallet(vault);
       setWalletVisible(true);
@@ -1458,7 +1457,7 @@ function App() {
         try {
           const pk = await SecureStore.getItemAsync(`pk_${vault.address}`);
           if (pk) vault.privateKey = pk;
-        } catch {}
+        } catch { }
       }
       setWallet(vault);
       setWalletVisible(true);
@@ -2065,12 +2064,12 @@ function App() {
       const normalizedSource = customSource
         .replace(/\r\n/g, "\n")
         .replace(/\r/g, "\n")
-        .replace(/[^\x00-\x7F]/g, ""); 
+        .replace(/[^\x00-\x7F]/g, "");
       let res;
       if (compileType === "goplugin") {
         res = await nodeCompilePlugin(nodeUrl, normalizedSource);
         if (!res?.success) throw new Error(res?.error || "Plugin compilation failed");
-        
+
         const uri = `${FileSystem.cacheDirectory || ""}lqd-mobile-plugin.so`;
         await FileSystem.writeAsStringAsync(uri, res.binary, { encoding: FileSystem.EncodingType.Base64 });
         setCompiledPluginUri(uri);
@@ -2117,7 +2116,7 @@ function App() {
       formData.append("owner", wallet.address);
       formData.append("private_key", wallet.privateKey);
       formData.append("gas", "500000");
-      
+
       if (compileType === "goplugin") {
         formData.append("contract_file", {
           uri: compiledPluginUri,
@@ -2246,7 +2245,7 @@ function App() {
             value: callForm.value || "0"
           });
           if (gasRes?.gas_limit) {
-             estimatedGas = Math.ceil(Number(gasRes.gas_limit) * 1.2);
+            estimatedGas = Math.ceil(Number(gasRes.gas_limit) * 1.2);
           }
         } catch { /* fallback */ }
 
@@ -2379,7 +2378,7 @@ function App() {
     setStatus(`Network switched`);
     if (wallet?.address) {
       setTimeout(() => {
-        refreshWalletSnapshot().catch(() => {});
+        refreshWalletSnapshot().catch(() => { });
       }, 250);
     }
   }
@@ -2478,13 +2477,13 @@ function App() {
 
   useEffect(() => {
     if (!wallet?.address) return;
-    refreshWalletSnapshot().catch(() => {});
+    refreshWalletSnapshot().catch(() => { });
   }, [wallet?.address, activeNetworkId]);
 
   useEffect(() => {
     if (!wallet?.address) return;
-    loadBridgeChains().catch(() => {});
-    loadBridgeFamilies().catch(() => {});
+    loadBridgeChains().catch(() => { });
+    loadBridgeFamilies().catch(() => { });
   }, [wallet?.address, nodeUrl]);
 
   const currentTokens = watchlist || [];
@@ -2570,11 +2569,11 @@ function App() {
               </View>
               <Text style={{ color: '#f4f7ff', fontSize: scale(24), fontWeight: '800', marginBottom: scale(12), textAlign: 'center' }}>{statusModal.title}</Text>
               <Text style={{ color: '#9aa5ca', fontSize: scale(16), textAlign: 'center', marginBottom: scale(30), lineHeight: scale(24) }}>{statusModal.message}</Text>
-              
+
               <View style={{ width: '100%', gap: scale(14) }}>
                 {!!statusModal.hash && (
-                  <Button 
-                    label={statusModal.hash.startsWith("0x") ? "Copy Hash" : "Copy Result"} 
+                  <Button
+                    label={statusModal.hash.startsWith("0x") ? "Copy Hash" : "Copy Result"}
                     onPress={() => {
                       Clipboard.setStringAsync(statusModal.hash);
                       setStatus("Copied to clipboard");
@@ -2700,8 +2699,8 @@ function App() {
                     <Text style={{ color: '#94a3b8', fontSize: scale(10) }}>{isNodeOnline ? 'Node Online' : 'Node Offline'}</Text>
                   </View>
                 </View>
-                <Pressable 
-                  onPress={() => refreshWalletSnapshot()} 
+                <Pressable
+                  onPress={() => refreshWalletSnapshot()}
                   style={({ pressed }) => [
                     { opacity: pressed ? 0.6 : 1, padding: 8, backgroundColor: '#1e293b', borderRadius: 20 }
                   ]}
@@ -2745,7 +2744,7 @@ function App() {
                 <Field label="Amount" value={sendForm.amount} onChangeText={(v) => setSendForm((p) => ({ ...p, amount: v }))} keyboardType="decimal-pad" placeholder="0.0" />
                 <View style={styles.inlineButtons}>
                   <Button label="Scan Recipient" onPress={() => scanWithCamera("native")} compact secondary disabled={!isNodeOnline} />
-                  <Button label="Paste" onPress={() => pasteClipboardTo((value) => setSendForm((p) => ({ ...p, to: value } )))} compact />
+                  <Button label="Paste" onPress={() => pasteClipboardTo((value) => setSendForm((p) => ({ ...p, to: value })))} compact />
                 </View>
                 <Button label={busyAction === "sendNative" ? "Sending…" : "Send LQD"} onPress={sendNativeAction} disabled={busy} />
               </Card>
@@ -2800,7 +2799,7 @@ function App() {
                   <Field label="Amount" value={tokenSendForm.amount} onChangeText={(v) => setTokenSendForm((p) => ({ ...p, amount: v }))} keyboardType="decimal-pad" placeholder="0.0" />
                   <View style={styles.inlineButtons}>
                     <Button label="Scan Recipient" onPress={() => scanWithCamera("token")} compact secondary />
-                    <Button label="Paste" onPress={() => pasteClipboardTo((value) => setTokenSendForm((p) => ({ ...p, to: value } )))} compact />
+                    <Button label="Paste" onPress={() => pasteClipboardTo((value) => setTokenSendForm((p) => ({ ...p, to: value })))} compact />
                   </View>
                   <Button label={busyAction === "sendToken" ? "Sending…" : "Send Token"} onPress={() => sendTokenAction(selectedTokenForSend)} disabled={busy} />
                   <Button label="Close" onPress={() => setSelectedTokenForSend(null)} secondary />
@@ -2831,18 +2830,18 @@ function App() {
                     <Chip key={t} label={t.toUpperCase()} active={compileType === t} onPress={() => setCompileType(t)} />
                   ))}
                 </View>
-                
+
                 <Field label="Source code" value={customSource} onChangeText={setCustomSource} multiline numberOfLines={10} placeholder="Enter source code here..." />
-                
+
                 <View style={styles.inlineButtons}>
                   <Button label={busyAction === "compile" ? "Compiling…" : "Compile Source"} onPress={compileAction} disabled={busy} />
                   <Button label={busyAction === "deployCompiled" ? "Deploying…" : "Deploy Compiled"} onPress={deployCompiledAction} secondary disabled={busy || !compiledBinary} />
                 </View>
-                
+
                 {compiledBinary && (
                   <Text style={styles.helperText}>✓ Ready: {compiledPluginSize} bytes compiled.</Text>
                 )}
-                
+
                 {compileType === "goplugin" && (
                   <Text style={styles.helperText}>💡 Tip: Go plugins must use 'package main' and are highly efficient.</Text>
                 )}
@@ -2851,24 +2850,24 @@ function App() {
               <Card title="Call contract" subtitle="Read or write via wallet signed calls.">
                 <Field label="Contract address" value={callForm.contract} onChangeText={(v) => { setCallForm((p) => ({ ...p, contract: v })); setCallAbi([]); }} placeholder="0x..." />
                 <Button label={busyAction === "loadAbi" ? "Loading ABI…" : "Load ABI"} onPress={loadAbiAction} disabled={busy} secondary />
-                
+
                 {callAbi.length > 0 ? (
                   <View style={styles.sectionGapSmall}>
                     <Text style={styles.inspectTitle}>Select Function</Text>
                     <View style={styles.templateWrap}>
                       {callAbi.map((fn, idx) => (
-                        <Chip 
-                          key={`${fn.name}-${idx}`} 
-                          label={`${fn.name}(${(fn.inputs || []).length})`} 
-                          active={callSelectedFnIdx === idx} 
+                        <Chip
+                          key={`${fn.name}-${idx}`}
+                          label={`${fn.name}(${(fn.inputs || []).length})`}
+                          active={callSelectedFnIdx === idx}
                           onPress={() => {
                             setCallSelectedFnIdx(idx);
                             setCallArgs({});
-                          }} 
+                          }}
                         />
                       ))}
                     </View>
-                    
+
                     {callSelectedFnIdx != null && callAbi[callSelectedFnIdx] && (
                       <View style={styles.sectionGapSmall}>
                         {(callAbi[callSelectedFnIdx].inputs || []).map((inp, i) => {
@@ -2876,20 +2875,20 @@ function App() {
                           const fnName = callAbi[callSelectedFnIdx].name.toLowerCase();
                           const lower = label.toLowerCase();
                           let ph = inp.type || "value";
-                          
+
                           // Smart guessing if name is arg0/arg1
                           if (lower.startsWith("arg")) {
                             if (fnName.includes("transfer") || fnName.includes("balanceof") || fnName.includes("allowance")) {
-                               if (i === 0) label = "Address (0x...)";
-                               if (i === 1 && (fnName.includes("transfer") || fnName.includes("allowance"))) label = "Amount / Value";
+                              if (i === 0) label = "Address (0x...)";
+                              if (i === 1 && (fnName.includes("transfer") || fnName.includes("allowance"))) label = "Amount / Value";
                             }
                           }
 
                           if (lower.includes("addr") || lower.includes("to") || lower.includes("from")) ph = "0x... Address";
                           else if (lower.includes("val") || lower.includes("amount")) ph = "Number or Amount";
-                          
+
                           return (
-                            <Field 
+                            <Field
                               key={`arg-${i}`}
                               label={`${label} (${inp.type || 'string'})`}
                               value={callArgs[`arg${i}`] || ""}
@@ -2910,19 +2909,19 @@ function App() {
 
                 <Field label="Value" value={callForm.value} onChangeText={(v) => setCallForm((p) => ({ ...p, value: v }))} keyboardType="decimal-pad" placeholder="0" />
                 <Field label="Gas" value={callForm.gas} onChangeText={(v) => setCallForm((p) => ({ ...p, gas: v }))} keyboardType="numeric" placeholder="200000" />
-                
+
                 <View style={styles.inlineButtons}>
-                  <Button 
-                    label={busyAction === "callContractRead" ? "Reading…" : "Read Call"} 
-                    onPress={() => executeCallAction(false)} 
-                    disabled={busy} 
-                    compact 
+                  <Button
+                    label={busyAction === "callContractRead" ? "Reading…" : "Read Call"}
+                    onPress={() => executeCallAction(false)}
+                    disabled={busy}
+                    compact
                   />
-                  <Button 
-                    label={busyAction === "callContractWrite" ? "Writing…" : "Write Call"} 
-                    onPress={() => executeCallAction(true)} 
-                    disabled={busy} 
-                    compact 
+                  <Button
+                    label={busyAction === "callContractWrite" ? "Writing…" : "Write Call"}
+                    onPress={() => executeCallAction(true)}
+                    disabled={busy}
+                    compact
                     secondary={busyAction !== "callContractWrite"}
                   />
                 </View>
@@ -2931,7 +2930,7 @@ function App() {
               <Card title="Contract Explorer" subtitle="Inspect contract metadata, storage and events.">
                 <Field label="Contract address" value={inspectForm.address} onChangeText={(v) => setInspectForm({ address: v })} placeholder="0x..." />
                 <Button label={busyAction === "inspectContract" ? "Loading Explorer…" : "Explore Contract"} onPress={inspectContractAction} disabled={busy} />
-                
+
                 <View style={styles.subtabHeader}>
                   {['overview', 'storage', 'abi', 'events'].map(t => (
                     <Pressable key={t} onPress={() => setExplorerTab(t)} style={[styles.subtabItem, explorerTab === t && styles.subtabItemActive]}>
@@ -2961,14 +2960,14 @@ function App() {
                       <Text style={[styles.inspectBox, { color: "#8a78ff" }]}>{inspectData.abi ? JSON.stringify(inspectData.abi, null, 2) : "No ABI loaded."}</Text>
                     </ScrollView>
                     {inspectData.abi && (
-                      <Button 
-                        label="Copy ABI JSON" 
-                        secondary 
-                        compact 
+                      <Button
+                        label="Copy ABI JSON"
+                        secondary
+                        compact
                         onPress={() => {
                           Clipboard.setStringAsync(JSON.stringify(inspectData.abi));
                           setStatus("ABI Copied");
-                        }} 
+                        }}
                       />
                     )}
                   </View>
@@ -3079,7 +3078,7 @@ function App() {
                 <Text style={styles.helperText}>Network Base Fee: {bridgeBaseFee} LQD</Text>
                 <View style={styles.inlineButtons}>
                   <Button label="Scan Recipient" onPress={() => scanWithCamera("bridge")} compact secondary />
-                  <Button label="Paste" onPress={() => pasteClipboardTo((value) => setBridgeForm((p) => (isExternalBridgeFamily ? { ...p, toLqd: value } : { ...p, toBsc: value } )))} compact />
+                  <Button label="Paste" onPress={() => pasteClipboardTo((value) => setBridgeForm((p) => (isExternalBridgeFamily ? { ...p, toLqd: value } : { ...p, toBsc: value })))} compact />
                 </View>
                 <Button
                   label={busy ? "Locking…" : (isExternalBridgeFamily ? "Register Lock" : "Lock on LQD")}
@@ -3109,7 +3108,7 @@ function App() {
                           setStatus("Solana/Substrate/XRPL/TON/NEAR/Aptos bridge needs a recent blockhash / sequence");
                           return;
                         }
-                        
+
                         // Pillar 3: Double-Spend Protection
                         const isDup = bridgeRequests.some(r => r.source_tx_hash === sourceTxHash || r.tx_hash === sourceTxHash);
                         if (isDup) {
@@ -3171,7 +3170,7 @@ function App() {
                 ) : null}
                 <View style={styles.inlineButtons}>
                   <Button label="Scan Recipient" onPress={() => scanWithCamera("bridge")} compact secondary />
-                  <Button label="Paste Token" onPress={() => pasteClipboardTo((value) => setBridgeForm((p) => ({ ...p, token: value } )))} compact />
+                  <Button label="Paste Token" onPress={() => pasteClipboardTo((value) => setBridgeForm((p) => ({ ...p, token: value })))} compact />
                 </View>
                 <Button
                   label={busy ? "Locking…" : "Lock BSC Token"}
@@ -3190,14 +3189,14 @@ function App() {
                           mode: bridgeMode,
                         })
                         : await walletBridgeLockBscToken(walletUrl, {
-                        private_key: wallet.privateKey,
-                        token: bridgeForm.token.trim(),
-                        amount: parseUnits(bridgeForm.amount, 18),
-                        to_lqd: bridgeForm.toLqd.trim(),
-                        chain_id: bridgeChainId,
-                        family: currentBridgeChain?.family || "evm",
-                        mode: bridgeMode,
-                      });
+                          private_key: wallet.privateKey,
+                          token: bridgeForm.token.trim(),
+                          amount: parseUnits(bridgeForm.amount, 18),
+                          to_lqd: bridgeForm.toLqd.trim(),
+                          chain_id: bridgeChainId,
+                          family: currentBridgeChain?.family || "evm",
+                          mode: bridgeMode,
+                        });
                       setStatus(`BSC lock tx: ${shortAddress(res?.tx_hash || "", 8, 6)}`);
                     } catch (e) {
                       setStatus(e.message || "BSC token lock failed");
@@ -3215,7 +3214,7 @@ function App() {
                 <Field label="BSC recipient" value={bridgeForm.toBsc} onChangeText={(v) => setBridgeForm((p) => ({ ...p, toBsc: v }))} placeholder="0x..." />
                 <View style={styles.inlineButtons}>
                   <Button label="Scan Recipient" onPress={() => scanWithCamera("bridge")} compact secondary />
-                  <Button label="Paste Token" onPress={() => pasteClipboardTo((value) => setBridgeForm((p) => ({ ...p, token: value } )))} compact />
+                  <Button label="Paste Token" onPress={() => pasteClipboardTo((value) => setBridgeForm((p) => ({ ...p, token: value })))} compact />
                 </View>
                 <Button
                   label={busy ? "Burning…" : "Burn LQD"}
@@ -3242,15 +3241,15 @@ function App() {
                           ...burnMeta,
                         })
                         : await walletBridgeBurnLqdToken(walletUrl, {
-                        private_key: wallet.privateKey,
-                        token: bridgeForm.token.trim(),
-                        amount: parseUnits(bridgeForm.amount, 18),
-                        to_bsc: bridgeForm.toBsc.trim(),
-                        chain_id: bridgeChainId,
-                        family: currentBridgeChain?.family || "evm",
-                        mode: bridgeMode,
-                        ...burnMeta,
-                      });
+                          private_key: wallet.privateKey,
+                          token: bridgeForm.token.trim(),
+                          amount: parseUnits(bridgeForm.amount, 18),
+                          to_bsc: bridgeForm.toBsc.trim(),
+                          chain_id: bridgeChainId,
+                          family: currentBridgeChain?.family || "evm",
+                          mode: bridgeMode,
+                          ...burnMeta,
+                        });
                       setStatus(`Burn tx: ${shortAddress(res?.tx_hash || "", 8, 6)}`);
                     } catch (e) {
                       setStatus(e.message || "Burn failed");
@@ -3427,7 +3426,7 @@ function App() {
                 <Text numberOfLines={1} style={{ color: '#9aa5ca', fontSize: scale(11), flex: 1 }}>{browserUrl || "Search or enter URL"}</Text>
               </View>
               <View style={{ flexDirection: 'row', gap: scale(8), marginLeft: scale(10) }}>
-                 <TouchableOpacity onPress={() => browserRef.current?.goBack()} disabled={!browserCanGoBack} style={{ padding: scale(4), opacity: browserCanGoBack ? 1 : 0.3 }}>
+                <TouchableOpacity onPress={() => browserRef.current?.goBack()} disabled={!browserCanGoBack} style={{ padding: scale(4), opacity: browserCanGoBack ? 1 : 0.3 }}>
                   <Text style={{ color: '#fff', fontSize: scale(18) }}>‹</Text>
                 </TouchableOpacity>
                 <TouchableOpacity onPress={() => setBrowserVisible(true)} style={{ width: scale(30), height: scale(30), borderRadius: scale(15), backgroundColor: '#161b33', borderWidth: 1, borderColor: '#8a78ff', justifyContent: 'center', alignItems: 'center' }}>
