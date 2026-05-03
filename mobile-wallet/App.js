@@ -646,6 +646,7 @@ function App() {
   const [scannerVisible, setScannerVisible] = useState(false);
   const [scannerTarget, setScannerTarget] = useState("");
   const [receiveVisible, setReceiveVisible] = useState(false);
+  const [statusModal, setStatusModal] = useState({ visible: false, title: "", message: "", type: "success", hash: "" });
   const [deepLinkHint, setDeepLinkHint] = useState("");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [biometricEnabled, setBiometricEnabled] = useState(true);
@@ -1676,8 +1677,13 @@ function App() {
       if (!hash) throw new Error(res?.error || "Transaction failed");
 
       setProcessingMessage("");
-      Alert.alert("Success", `LQD Sent!\nHash: ${shortAddress(hash)}`);
-      showToast("LQD Sent Successfully", "success");
+      setStatusModal({
+        visible: true,
+        title: "Success",
+        message: "LQD Sent Successfully!",
+        type: "success",
+        hash: hash
+      });
       rememberActivity({
         type: "send",
         From: wallet.address,
@@ -1692,8 +1698,13 @@ function App() {
       setTimeout(() => refreshWalletSnapshot(), 5000);
     } catch (e) {
       setProcessingMessage("");
-      Alert.alert("Failed", e.message || "Transaction failed");
-      showToast(e.message || "Send failed", "error");
+      setStatusModal({
+        visible: true,
+        title: "Failed",
+        message: e.message || "Transaction failed",
+        type: "error",
+        hash: ""
+      });
     } finally {
       setBusy(false);
       setBusyAction("");
@@ -1823,8 +1834,13 @@ function App() {
       setTimeout(() => refreshWalletSnapshot(), 5000);
     } catch (e) {
       setProcessingMessage("");
-      Alert.alert("Failed", e.message || "Token transfer failed");
-      showToast(e.message || "Token transfer failed", "error");
+      setStatusModal({
+        visible: true,
+        title: "Failed",
+        message: e.message || "Token transfer failed",
+        type: "error",
+        hash: ""
+      });
     } finally {
       setBusy(false);
       setBusyAction("");
@@ -2008,15 +2024,13 @@ function App() {
             : [];
         await importDetectedTokens(candidates, wallet.address, "deploy");
         setProcessingMessage("");
-        Alert.alert(
-          "Deployment Success",
-          `Contract deployed at:\n${contractAddr}`,
-          [
-            { text: "Copy Address", onPress: () => Clipboard.setStringAsync(contractAddr) },
-            { text: "OK" }
-          ]
-        );
-        showToast("Contract Deployed!", "success");
+        setStatusModal({
+          visible: true,
+          title: "Deployment Success",
+          message: `Contract deployed at:\n${contractAddr}`,
+          type: "success",
+          hash: contractAddr
+        });
       }
       rememberActivity({
         type: "deploy",
@@ -2029,7 +2043,13 @@ function App() {
       setStatus(`Deployed ${deployForm.template}: ${shortAddress(contractAddr)}`);
     } catch (e) {
       setProcessingMessage("");
-      Alert.alert("Deployment Failed", e.message || "Template deployment failed");
+      setStatusModal({
+        visible: true,
+        title: "Deployment Failed",
+        message: e.message || "Template deployment failed",
+        type: "error",
+        hash: ""
+      });
       setStatus(e.message || "Builtin deploy failed");
     } finally {
       setBusy(false);
@@ -2125,15 +2145,13 @@ function App() {
       if (contractAddr) {
         setCallForm((prev) => ({ ...prev, contract: contractAddr }));
         setInspectForm({ address: contractAddr });
-        Alert.alert(
-          "Deployment Success",
-          `Contract deployed at:\n${contractAddr}`,
-          [
-            { text: "Copy Address", onPress: () => Clipboard.setStringAsync(contractAddr) },
-            { text: "OK" }
-          ]
-        );
-        showToast("Contract Deployed!", "success");
+        setStatusModal({
+          visible: true,
+          title: "Deployment Success",
+          message: `Contract deployed at:\n${contractAddr}`,
+          type: "success",
+          hash: contractAddr
+        });
       }
       rememberActivity({
         type: "deploy",
@@ -2147,7 +2165,13 @@ function App() {
       setCompiledBinary(null);
     } catch (e) {
       setProcessingMessage("");
-      Alert.alert("Deployment Failed", e.message || "Custom deployment failed");
+      setStatusModal({
+        visible: true,
+        title: "Deployment Failed",
+        message: e.message || "Custom deployment failed",
+        type: "error",
+        hash: ""
+      });
       setStatus(e.message || "Deploy failed");
     } finally {
       setBusy(false);
@@ -2243,7 +2267,13 @@ function App() {
         const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
         if (!hash) throw new Error(res?.error || "Transaction failed");
 
-        showToast(`${fnName} Submitted Successfully`, "success");
+        setStatusModal({
+          visible: true,
+          title: "Success",
+          message: `${fnName} Submitted Successfully!`,
+          type: "success",
+          hash: hash
+        });
         rememberActivity({
           type: "contract",
           From: wallet.address,
@@ -2258,14 +2288,22 @@ function App() {
       } else {
         res = await nodeCallContract(nodeUrl, { address: addr, fn: fnName, args, caller: wallet.address });
         const output = res?.result ?? res?.output ?? res?.data ?? res?.val ?? JSON.stringify(res);
-        if (output === undefined || output === null || output === "{}") {
-           showToast("Read completed with no result", "info");
-        } else {
-           Alert.alert(`Read: ${fnName}`, String(output));
-        }
+        setStatusModal({
+          visible: true,
+          title: "Call Result",
+          message: `Result:\n${output}`,
+          type: "success",
+          hash: ""
+        });
       }
     } catch (e) {
-      showToast(e.message || "Action failed", "error");
+      setStatusModal({
+        visible: true,
+        title: "Call Failed",
+        message: e.message || "Contract call failed",
+        type: "error",
+        hash: ""
+      });
     } finally {
       setBusy(false);
       setBusyAction("");
@@ -2308,15 +2346,14 @@ function App() {
       const clean = data.trim();
       if (isLikelyAddress(clean)) {
         // If it looks like a contract/token address, auto-import it
-        showToast("Address detected, importing...", "info");
+        setStatusModal({ visible: true, title: "Scan", message: "Address detected, importing...", type: "info", hash: clean });
         await importDetectedTokens([{ address: clean }], wallet.address, "scan");
         setTab("tokens");
         return;
       }
       setStatus(`Scanned: ${clean}`);
-      showToast("Scanned: " + shortAddress(clean), "info");
     } catch (e) {
-      showToast("Scan handle failed", "error");
+      setStatus("Scan handle failed");
     }
   }
 
@@ -2524,11 +2561,38 @@ function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" />
-      {toast.visible && (
-        <View style={[styles.toast, { backgroundColor: toast.type === 'error' ? '#ef4444' : '#38bdf8' }]}>
-          <Text style={styles.toastText}>{toast.message}</Text>
-        </View>
+      {statusModal.visible && (
+        <Modal transparent animationType="fade" visible={statusModal.visible} onRequestClose={() => setStatusModal({ ...statusModal, visible: false })}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.95)', justifyContent: 'center', alignItems: 'center', padding: scale(20) }}>
+            <View style={{ width: '100%', backgroundColor: '#161b33', borderRadius: scale(28), padding: scale(30), alignItems: 'center', borderWidth: 1, borderColor: statusModal.type === 'success' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)', shadowColor: "#000", shadowOffset: { width: 0, height: 20 }, shadowOpacity: 0.5, shadowRadius: 30, elevation: 20 }}>
+              <View style={{ width: scale(80), height: scale(80), borderRadius: scale(40), backgroundColor: statusModal.type === 'success' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)', justifyContent: 'center', alignItems: 'center', marginBottom: scale(24) }}>
+                {statusModal.type === 'success' ? (
+                  <View style={{ width: scale(36), height: scale(18), borderLeftWidth: 5, borderBottomWidth: 5, borderColor: '#10b981', transform: [{ rotate: '-45deg' }], marginTop: -8 }} />
+                ) : (
+                  <Text style={{ color: '#ef4444', fontSize: scale(48), fontWeight: '300' }}>×</Text>
+                )}
+              </View>
+              <Text style={{ color: '#f4f7ff', fontSize: scale(24), fontWeight: '800', marginBottom: scale(12), textAlign: 'center' }}>{statusModal.title}</Text>
+              <Text style={{ color: '#9aa5ca', fontSize: scale(16), textAlign: 'center', marginBottom: scale(30), lineHeight: scale(24) }}>{statusModal.message}</Text>
+              
+              <View style={{ width: '100%', gap: scale(14) }}>
+                {!!statusModal.hash && (
+                  <Button 
+                    label={statusModal.hash.startsWith("0x") ? "Copy Hash" : "Copy Result"} 
+                    onPress={() => {
+                      Clipboard.setStringAsync(statusModal.hash);
+                      setStatus("Copied to clipboard");
+                    }}
+                    primary
+                  />
+                )}
+                <Button label="Close" onPress={() => setStatusModal({ ...statusModal, visible: false })} secondary />
+              </View>
+            </View>
+          </View>
+        </Modal>
       )}
+
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <Modal visible={receiveVisible} transparent animationType="fade" onRequestClose={() => setReceiveVisible(false)}>
           <View style={styles.modalBackdrop}>
@@ -2905,7 +2969,7 @@ function App() {
                         compact 
                         onPress={() => {
                           Clipboard.setStringAsync(JSON.stringify(inspectData.abi));
-                          showToast("ABI Copied", "success");
+                          setStatus("ABI Copied");
                         }} 
                       />
                     )}
@@ -3106,7 +3170,7 @@ function App() {
                         // Pillar 3: Double-Spend Protection
                         const isDup = bridgeRequests.some(r => r.source_tx_hash === sourceTxHash || r.tx_hash === sourceTxHash);
                         if (isDup) {
-                          Alert.alert("Duplicate Request", "This transaction has already been registered in the bridge.");
+                          setStatusModal({ visible: true, title: "Duplicate", message: "This transaction has already been registered in the bridge.", type: "error", hash: "" });
                           return;
                         }
 
@@ -3423,12 +3487,6 @@ function App() {
           <ActivityIndicator size="large" color="#8a78ff" />
           <Text style={{ color: '#f4f7ff', marginTop: scale(20), fontSize: scale(18), fontWeight: '800', textAlign: 'center' }}>{processingMessage}</Text>
           <Text style={{ color: '#9aa5ca', marginTop: scale(10), fontSize: scale(13), textAlign: 'center' }}>Broadcasting to the LQD network. Please wait...</Text>
-        </View>
-      )}
-
-      {toast.visible && (
-        <View style={{ position: 'absolute', bottom: scale(100), left: scale(20), right: scale(20), backgroundColor: toast.type === "success" ? "#10b981" : toast.type === "error" ? "#ef4444" : "#4f46e5", borderRadius: scale(14), padding: scale(18), zIndex: 100000, flexDirection: 'row', alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.44, shadowRadius: 10.32, elevation: 16 }}>
-          <Text style={{ color: '#fff', fontSize: scale(14), fontWeight: '800', flex: 1, textAlign: 'center' }}>{toast.message}</Text>
         </View>
       )}
     </SafeAreaView>
