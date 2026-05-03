@@ -656,6 +656,7 @@ function App() {
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserCanGoBack, setBrowserCanGoBack] = useState(false);
   const [browserCanGoForward, setBrowserCanGoForward] = useState(false);
+  const [browserVisible, setBrowserVisible] = useState(false);
 
   const nodeUrl = useMemo(() => {
     const current = networks.find((item) => item.id === activeNetworkId) || networks[0] || DEFAULT_NETWORKS[0];
@@ -688,21 +689,19 @@ function App() {
   const scanHandlerRef = useRef(() => {});
   const browserRef = useRef(null);
   const lqdProviderScript = useMemo(() => `
-    (function () {
-      if (window.lqd && window.lqd.isLQDWallet) return true;
+    (function() {
+      var requestId = 0;
       var pending = {};
-      var requestId = 1;
+      var eventListeners = {};
 
-      function emit(name, detail) {
-        try {
-          window.dispatchEvent(new CustomEvent(name, { detail: detail }));
-        } catch (_) {}
+      function emit(event, data) {
+        (eventListeners[event] || []).forEach(cb => cb(data));
       }
 
       window.lqd = {
         isLQDWallet: true,
         isMobileWallet: true,
-        selectedAddress: ${JSON.stringify(wallet?.address || "")},
+        selectedAddress: ${trustedOrigins.includes(browserUrl ? new URL(browserUrl).origin : "") ? JSON.stringify(wallet?.address || "") : "null"},
         chainId: ${JSON.stringify(currentNetwork?.chainId || "0x8b")},
         request: function (payload) {
           var body = payload || {};
@@ -719,15 +718,26 @@ function App() {
             }));
           });
         },
-        on: function () {},
-        removeListener: function () {}
+        on: function (event, cb) {
+          eventListeners[event] = eventListeners[event] || [];
+          eventListeners[event].push(cb);
+        },
+        removeListener: function (event, cb) {
+          if (!eventListeners[event]) return;
+          eventListeners[event] = eventListeners[event].filter(i => i !== cb);
+        }
       };
 
       window.__LQD_MOBILE_PROVIDER_RESPONSE__ = function (message) {
         var req = pending[String(message.id)];
         if (!req) return;
         delete pending[String(message.id)];
-        if (message.ok) req.resolve(message.result);
+        if (message.ok) {
+          if (message.method === "lqd_requestAccounts" || message.method === "eth_requestAccounts") {
+             window.lqd.selectedAddress = message.result[0];
+          }
+          req.resolve(message.result);
+        }
         else req.reject(new Error(message.error || "Wallet request rejected"));
       };
 
@@ -741,113 +751,7 @@ function App() {
       emit("lqd#initialized", { isMobileWallet: true });
       return true;
     })();
-  `, [wallet?.address, currentNetwork?.chainId]);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const [vault, savedNetworks, savedNetworkId, savedEndpoints, savedWatchlist, savedActivity, savedFactory, savedBridgeChainId, savedSettings, savedApprovals, savedTrustedOrigins] = await Promise.all([
-          loadJSON(STORAGE_KEYS.vault, null),
-          loadJSON(STORAGE_KEYS.networks, null),
-          loadJSON(STORAGE_KEYS.activeNetworkId, null),
-          loadJSON(STORAGE_KEYS.endpoints, null),
-          loadJSON(STORAGE_KEYS.watchlist, []),
-          loadJSON(STORAGE_KEYS.activity, []),
-          loadJSON(STORAGE_KEYS.factory, ""),
-          loadJSON(STORAGE_KEYS.bridgeChainId, "bsc-testnet"),
-          loadJSON(STORAGE_KEYS.settings, {}),
-          loadJSON(STORAGE_KEYS.approvals, []),
-          loadJSON(STORAGE_KEYS.trustedOrigins, []),
-        ]);
-
-        if (!alive) return;
-        if (savedNetworks?.length) setNetworks(savedNetworks);
-        if (savedNetworkId) setActiveNetworkId(savedNetworkId);
-        if (savedEndpoints) {
-          setEndpoints((prev) => ({
-            ...prev,
-            nodeUrl: migrateLocalEndpoint(savedEndpoints.nodeUrl, prev.nodeUrl),
-            walletUrl: migrateLocalEndpoint(savedEndpoints.walletUrl, prev.walletUrl),
-            aggregatorUrl: migrateLocalEndpoint(savedEndpoints.aggregatorUrl, prev.aggregatorUrl),
-            explorerUrl: migrateLocalEndpoint(savedEndpoints.explorerUrl, prev.explorerUrl),
-          }));
-        }
-        if (savedWatchlist) setWatchlist(savedWatchlist);
-        if (savedActivity) setActivity(savedActivity);
-        if (savedFactory) setFactoryAddress(savedFactory);
-        if (savedBridgeChainId) setBridgeChainId(String(savedBridgeChainId));
-        if (savedSettings && typeof savedSettings === "object") {
-          setSettingsAutoRefresh(savedSettings.autoRefresh !== false);
-          setBiometricEnabled(savedSettings.biometricEnabled !== false);
-        }
-        if (Array.isArray(savedApprovals)) setPendingApprovals(savedApprovals);
-        if (Array.isArray(savedTrustedOrigins)) setTrustedOrigins(savedTrustedOrigins);
-        setVaultRecord(vault || null);
-      } catch (e) {
-        setStatus(e.message || "Failed to load wallet state");
-      } finally {
-        if (alive) setBooting(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.networks, networks).catch(() => {});
-  }, [networks]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.activeNetworkId, activeNetworkId).catch(() => {});
-  }, [activeNetworkId]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.endpoints, endpoints).catch(() => {});
-  }, [endpoints]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.watchlist, watchlist).catch(() => {});
-  }, [watchlist]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.activity, activity).catch(() => {});
-  }, [activity]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.factory, factoryAddress).catch(() => {});
-  }, [factoryAddress]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.bridgeChainId, bridgeChainId).catch(() => {});
-  }, [bridgeChainId]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.settings, { autoRefresh: settingsAutoRefresh, biometricEnabled }).catch(() => {});
-  }, [settingsAutoRefresh, biometricEnabled]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.approvals, pendingApprovals).catch(() => {});
-  }, [pendingApprovals]);
-
-  useEffect(() => {
-    saveJSON(STORAGE_KEYS.trustedOrigins, trustedOrigins).catch(() => {});
-  }, [trustedOrigins]);
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const hasHardware = await LocalAuthentication.hasHardwareAsync();
-        const enrolled = hasHardware ? await LocalAuthentication.isEnrolledAsync() : false;
-        if (mounted) setBiometricAvailable(Boolean(hasHardware && enrolled));
-      } catch {
-        if (mounted) setBiometricAvailable(false);
-      }
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, []);
+  `, [wallet?.address, currentNetwork?.chainId, trustedOrigins]);
 
   useEffect(() => {
     scanHandlerRef.current = openFromScan;
@@ -1170,6 +1074,8 @@ function App() {
       method: request.method || "wallet_connect",
       status: "pending",
       createdAt: Date.now(),
+      type: request.type,
+      data: request.data
     };
     setPendingApprovals((prev) => {
       if (prev.some((x) => x.id === item.id)) return prev;
@@ -1234,6 +1140,167 @@ function App() {
     setStatus("QR scanned but format was not recognized");
   }
 
+  async function respondBrowser(id, ok, result, error = "", method = "") {
+    const payload = JSON.stringify({ id, ok, result, error, method }).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    browserRef.current?.injectJavaScript(`
+      if (window.__LQD_MOBILE_PROVIDER_RESPONSE__) {
+        window.__LQD_MOBILE_PROVIDER_RESPONSE__(JSON.parse('${payload}'));
+      }
+      true;
+    `);
+  }
+
+  async function handleBrowserRequest(req) {
+    if (!wallet) return respondBrowser(req.id, false, "Wallet locked");
+    const { method, params, origin, name } = req;
+
+    if (method === "lqd_requestAccounts" || method === "eth_requestAccounts") {
+      if (trustedOrigins.includes(origin)) {
+        return respondBrowser(req.id, true, [wallet.address]);
+      }
+      queueApprovalRequest({
+        id: req.id,
+        type: "connect",
+        origin,
+        name,
+        data: { message: "This dApp wants to see your wallet address and activity." }
+      });
+      setTab("approvals");
+      return;
+    }
+
+    if (method === "lqd_sendTransaction" || method === "eth_sendTransaction" || method === "lqd_contractTx") {
+      const tx = params[0] || {};
+      queueApprovalRequest({
+        id: req.id,
+        type: "transaction",
+        origin,
+        name,
+        data: tx
+      });
+      setTab("approvals");
+      return;
+    }
+
+    if (method === "lqd_sign" || method === "personal_sign") {
+      queueApprovalRequest({
+        id: req.id,
+        type: "sign",
+        origin,
+        name,
+        data: { message: params[0] || params[1] || "" }
+      });
+      setTab("approvals");
+      return;
+    }
+  }
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [vault, savedNetworks, savedNetworkId, savedEndpoints, savedWatchlist, savedActivity, savedFactory, savedBridgeChainId, savedSettings, savedApprovals, savedTrustedOrigins] = await Promise.all([
+          loadJSON(STORAGE_KEYS.vault, null),
+          loadJSON(STORAGE_KEYS.networks, null),
+          loadJSON(STORAGE_KEYS.activeNetworkId, null),
+          loadJSON(STORAGE_KEYS.endpoints, null),
+          loadJSON(STORAGE_KEYS.watchlist, []),
+          loadJSON(STORAGE_KEYS.activity, []),
+          loadJSON(STORAGE_KEYS.factory, ""),
+          loadJSON(STORAGE_KEYS.bridgeChainId, "bsc-testnet"),
+          loadJSON(STORAGE_KEYS.settings, {}),
+          loadJSON(STORAGE_KEYS.approvals, []),
+          loadJSON(STORAGE_KEYS.trustedOrigins, []),
+        ]);
+
+        if (!alive) return;
+        if (savedNetworks?.length) setNetworks(savedNetworks);
+        if (savedNetworkId) setActiveNetworkId(savedNetworkId);
+        if (savedEndpoints) {
+          setEndpoints((prev) => ({
+            ...prev,
+            nodeUrl: migrateLocalEndpoint(savedEndpoints.nodeUrl, prev.nodeUrl),
+            walletUrl: migrateLocalEndpoint(savedEndpoints.walletUrl, prev.walletUrl),
+            aggregatorUrl: migrateLocalEndpoint(savedEndpoints.aggregatorUrl, prev.aggregatorUrl),
+            explorerUrl: migrateLocalEndpoint(savedEndpoints.explorerUrl, prev.explorerUrl),
+          }));
+        }
+        if (savedWatchlist) setWatchlist(savedWatchlist);
+        if (savedActivity) setActivity(savedActivity);
+        if (savedFactory) setFactoryAddress(savedFactory);
+        if (savedBridgeChainId) setBridgeChainId(String(savedBridgeChainId));
+        if (savedSettings && typeof savedSettings === "object") {
+          setSettingsAutoRefresh(savedSettings.autoRefresh !== false);
+          setBiometricEnabled(savedSettings.biometricEnabled !== false);
+        }
+        if (Array.isArray(savedApprovals)) setPendingApprovals(savedApprovals);
+        if (Array.isArray(savedTrustedOrigins)) setTrustedOrigins(savedTrustedOrigins);
+        setVaultRecord(vault || null);
+      } catch (e) {
+        setStatus(e.message || "Failed to load wallet state");
+      } finally {
+        if (alive) setBooting(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.networks, networks).catch(() => {});
+  }, [networks]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.activeNetworkId, activeNetworkId).catch(() => {});
+  }, [activeNetworkId]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.endpoints, endpoints).catch(() => {});
+  }, [endpoints]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.watchlist, watchlist).catch(() => {});
+  }, [watchlist]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.activity, activity).catch(() => {});
+  }, [activity]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.factory, factoryAddress).catch(() => {});
+  }, [factoryAddress]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.bridgeChainId, bridgeChainId).catch(() => {});
+  }, [bridgeChainId]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.settings, { autoRefresh: settingsAutoRefresh, biometricEnabled }).catch(() => {});
+  }, [settingsAutoRefresh, biometricEnabled]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.approvals, pendingApprovals).catch(() => {});
+  }, [pendingApprovals]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.trustedOrigins, trustedOrigins).catch(() => {});
+  }, [trustedOrigins]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const enrolled = hasHardware ? await LocalAuthentication.isEnrolledAsync() : false;
+        if (mounted) setBiometricAvailable(Boolean(hasHardware && enrolled));
+      } catch {
+        if (mounted) setBiometricAvailable(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   async function approveRequest(item) {
     setPendingApprovals((prev) => prev.map((x) => (x.id === item.id ? { ...x, status: "approved", approvedAt: Date.now() } : x)));
     setTrustedOrigins((prev) => (prev.includes(item.origin) ? prev : [...prev, item.origin]));
@@ -1249,13 +1316,10 @@ function App() {
         }
       }
     }
-  }
-
-  function openBrowserTarget(value) {
-    const next = coerceBrowserUrl(value);
-    setBrowserInput(next);
-    setBrowserUrl(next);
-    setTab("browser");
+    // If it was a browser request, notify the webview
+    if (item.origin) {
+       respondBrowser(item.id, true, [wallet.address], "", item.method);
+    }
   }
 
   function builtinInitArgs() {
@@ -1296,46 +1360,6 @@ function App() {
     );
   }
 
-  function sendBrowserProviderResponse(id, ok, result, error = "") {
-    const payload = JSON.stringify({ id, ok, result, error }).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    browserRef.current?.injectJavaScript(`
-      if (window.__LQD_MOBILE_PROVIDER_RESPONSE__) {
-        window.__LQD_MOBILE_PROVIDER_RESPONSE__(JSON.parse('${payload}'));
-      }
-      true;
-    `);
-  }
-
-  function syncBrowserAccount() {
-    const address = JSON.stringify(wallet?.address || "");
-    const chainId = JSON.stringify(currentNetwork?.chainId || "0x8b");
-    browserRef.current?.injectJavaScript(`
-      if (window.__LQD_MOBILE_SET_ACCOUNT__) {
-        window.__LQD_MOBILE_SET_ACCOUNT__(${address}, ${chainId});
-      }
-      true;
-    `);
-  }
-
-  async function approveBrowserConnect(request) {
-    return new Promise((resolve, reject) => {
-      if (!wallet?.address) {
-        reject(new Error("Unlock or create a wallet first"));
-        return;
-      }
-      const origin = request.origin || request.name || "this dApp";
-      Alert.alert(
-        "Connect dApp?",
-        `${request.name || "DApp"} wants to connect to ${shortAddress(wallet.address)}\n\nOrigin: ${origin}`,
-        [
-          { text: "Reject", style: "cancel", onPress: () => reject(new Error("Connection rejected")) },
-          { text: "Connect", onPress: () => resolve([wallet.address]) },
-        ],
-        { cancelable: true, onDismiss: () => reject(new Error("Connection rejected")) }
-      );
-    });
-  }
-
   async function handleBrowserProviderMessage(event) {
     let request = null;
     try {
@@ -1344,46 +1368,7 @@ function App() {
       return;
     }
     if (request?.source !== "lqd-mobile-provider" || !request.id) return;
-
-    try {
-      let result = null;
-      switch (request.method) {
-        case "lqd_connect":
-        case "lqd_requestAccounts":
-          result = await approveBrowserConnect(request);
-          setTrustedOrigins((prev) => (prev.includes(request.origin) ? prev : [...prev, request.origin]));
-          setStatus(`Connected ${request.name || request.origin || "dApp"}`);
-          setTimeout(syncBrowserAccount, 50);
-          break;
-        case "lqd_accounts":
-          result = wallet?.address ? [wallet.address] : [];
-          break;
-        case "lqd_chainId":
-        case "eth_chainId":
-          result = currentNetwork?.chainId || "0x8b";
-          break;
-        case "lqd_getPrivateKey":
-          if (!wallet?.privateKey) throw new Error("Unlock wallet first");
-          result = { privateKey: wallet.privateKey };
-          break;
-        case "lqd_deployBuiltin": {
-          if (!wallet?.address || !wallet?.privateKey) throw new Error("Unlock wallet first");
-          const payload = Array.isArray(request.params) ? (request.params[0] || {}) : (request.params || {});
-          result = await nodeDeployBuiltin(nodeUrl, {
-            ...payload,
-            owner: payload.owner || wallet.address,
-            private_key: wallet.privateKey,
-          });
-          break;
-        }
-        default:
-          throw new Error(`Method not supported: ${request.method || "unknown"}`);
-      }
-      sendBrowserProviderResponse(request.id, true, result);
-    } catch (e) {
-      sendBrowserProviderResponse(request.id, false, null, e?.message || "Wallet request failed");
-      setStatus(e?.message || "Wallet request failed");
-    }
+    handleBrowserRequest(request);
   }
 
   function rejectRequest(item) {
@@ -2680,47 +2665,49 @@ function App() {
           </View>
         </Modal>
 
-        <View style={[styles.topBar, tab === "browser" && styles.topBarBrowser]}>
-          {tab === "home" && (
-            <View style={styles.topActions}>
-              <Pressable style={styles.walletPill} onPress={() => setReceiveVisible(true)}>
-                <Text style={styles.walletPillText}>Receive</Text>
-              </Pressable>
-              <Pressable style={styles.walletPill} onPress={() => scanWithCamera("native")}>
-                <Text style={styles.walletPillText}>Scan</Text>
-              </Pressable>
-              <View style={[styles.walletPill, styles.walletPillState]}>
-                <Text style={styles.walletPillText}>{walletVisible ? "Unlocked" : "Locked"}</Text>
-              </View>
-            </View>
-          )}
-          <View style={styles.topIdentity}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-              <View>
-                <Text style={styles.walletAddress}>{shortAddress(wallet.address, 10, 8)}</Text>
-                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isNodeOnline ? '#4ade80' : '#f87171', marginRight: 6 }} />
-                  <Text style={{ color: '#94a3b8', fontSize: scale(10) }}>{isNodeOnline ? 'Node Online' : 'Node Offline'}</Text>
+        {tab !== "browser" && (
+          <View style={[styles.topBar]}>
+            {tab === "home" && (
+              <View style={styles.topActions}>
+                <Pressable style={styles.walletPill} onPress={() => setReceiveVisible(true)}>
+                  <Text style={styles.walletPillText}>Receive</Text>
+                </Pressable>
+                <Pressable style={styles.walletPill} onPress={() => scanWithCamera("native")}>
+                  <Text style={styles.walletPillText}>Scan</Text>
+                </Pressable>
+                <View style={[styles.walletPill, styles.walletPillState]}>
+                  <Text style={styles.walletPillText}>{walletVisible ? "Unlocked" : "Locked"}</Text>
                 </View>
               </View>
-              <Pressable 
-                onPress={() => refreshWalletSnapshot()} 
-                style={({ pressed }) => [
-                  { opacity: pressed ? 0.6 : 1, padding: 8, backgroundColor: '#1e293b', borderRadius: 20 }
-                ]}
-              >
-                <Text style={{ color: '#38bdf8', fontSize: scale(12), fontWeight: '600' }}>Refresh</Text>
-              </Pressable>
+            )}
+            <View style={styles.topIdentity}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                <View>
+                  <Text style={styles.walletAddress}>{shortAddress(wallet.address, 10, 8)}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isNodeOnline ? '#4ade80' : '#f87171', marginRight: 6 }} />
+                    <Text style={{ color: '#94a3b8', fontSize: scale(10) }}>{isNodeOnline ? 'Node Online' : 'Node Offline'}</Text>
+                  </View>
+                </View>
+                <Pressable 
+                  onPress={() => refreshWalletSnapshot()} 
+                  style={({ pressed }) => [
+                    { opacity: pressed ? 0.6 : 1, padding: 8, backgroundColor: '#1e293b', borderRadius: 20 }
+                  ]}
+                >
+                  <Text style={{ color: '#38bdf8', fontSize: scale(12), fontWeight: '600' }}>Refresh</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.topNetwork}>{currentNetwork.name}</Text>
             </View>
-            <Text style={styles.topNetwork}>{currentNetwork.name}</Text>
           </View>
-        </View>
+        )}
 
         <ScrollView
-          style={{ flex: 1 }}
+          style={{ flex: tab === "browser" ? 0 : 1, display: tab === "browser" ? "none" : "flex" }}
           scrollEnabled={tab !== "browser"}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={[styles.mainScroll, tab === "browser" && styles.mainScrollBrowser]}
+          contentContainerStyle={[styles.mainScroll]}
         >
           {tab !== "browser" && (
             <View style={styles.summaryGrid}>
@@ -2995,34 +2982,6 @@ function App() {
           )}
 
           {tab === "browser" && (
-            <View style={[styles.sectionGap, styles.browserSection]}>
-              <Card style={styles.browserCard}>
-                <Field
-                  label="Website URL"
-                  value={browserInput}
-                  onChangeText={setBrowserInput}
-                  placeholder="https://example-dapp.com"
-                  autoCapitalize="none"
-                />
-                <View style={styles.inlineButtons}>
-                  <Button label="Go" onPress={() => openBrowserTarget(browserInput)} compact />
-                  <Button label="Paste Link" onPress={() => pasteClipboardTo((value) => setBrowserInput(coerceBrowserUrl(value)))} compact secondary />
-                  <Button label="Home" onPress={() => openBrowserTarget(DEFAULT_BROWSER_URL)} compact secondary />
-                </View>
-                <View style={styles.browserSurface}>
-                  <View style={styles.browserToolbar}>
-                    <Button label="←" onPress={() => browserRef.current?.goBack()} compact secondary disabled={!browserCanGoBack} />
-                    <Button label="→" onPress={() => browserRef.current?.goForward()} compact secondary disabled={!browserCanGoForward} />
-                    <Button label="Reload" onPress={() => browserRef.current?.reload()} compact secondary />
-                    <Button label="Open External" onPress={() => Linking.openURL(browserUrl)} compact secondary />
-                  </View>
-                  {browserLoading ? <Text style={styles.browserHint}>Loading…</Text> : null}
-                  <WebView
-                    ref={browserRef}
-                    source={{ uri: browserUrl }}
-                    style={styles.browserFrame}
-                    injectedJavaScriptBeforeContentLoaded={lqdProviderScript}
-                    injectedJavaScript={lqdProviderScript}
                     onMessage={handleBrowserProviderMessage}
                     onLoadStart={() => setBrowserLoading(true)}
                     onLoadEnd={() => {
@@ -3475,6 +3434,57 @@ function App() {
 
           <Text style={styles.statusText}>{status}</Text>
         </ScrollView>
+
+        {tab === "browser" && (
+          <View style={{ flex: 1, backgroundColor: '#070a15' }}>
+            <View style={{ height: scale(45), backgroundColor: '#0c0f1d', flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(12), borderBottomWidth: 1, borderColor: '#161b33', zIndex: 10 }}>
+              <View style={{ flex: 1, height: scale(32), backgroundColor: '#161b33', borderRadius: 8, flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(10) }}>
+                <Text style={{ color: '#10b981', fontSize: scale(10), fontWeight: 'bold', marginRight: scale(6) }}>SSL</Text>
+                <Text numberOfLines={1} style={{ color: '#9aa5ca', fontSize: scale(11), flex: 1 }}>{browserUrl || "Search or enter URL"}</Text>
+              </View>
+              <View style={{ flexDirection: 'row', gap: scale(8), marginLeft: scale(10) }}>
+                 <TouchableOpacity onPress={() => browserRef.current?.goBack()} disabled={!browserCanGoBack} style={{ padding: scale(4), opacity: browserCanGoBack ? 1 : 0.3 }}>
+                  <Text style={{ color: '#fff', fontSize: scale(18) }}>‹</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setBrowserVisible(true)} style={{ width: scale(30), height: scale(30), borderRadius: scale(15), backgroundColor: '#161b33', borderWidth: 1, borderColor: '#8a78ff', justifyContent: 'center', alignItems: 'center' }}>
+                  <Text style={{ color: '#8a78ff', fontSize: scale(14) }}>🌐</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => browserRef.current?.reload()} style={{ padding: scale(4) }}>
+                  <Text style={{ color: '#fff', fontSize: scale(16) }}>↻</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <WebView
+              ref={browserRef}
+              source={{ uri: browserUrl || DEFAULT_BROWSER_URL }}
+              injectedJavaScript={lqdProviderScript}
+              onMessage={handleBrowserProviderMessage}
+              onNavigationStateChange={(navState) => {
+                setBrowserUrl(navState.url);
+                setBrowserCanGoBack(navState.canGoBack);
+                setBrowserCanGoForward(navState.canGoForward);
+                setBrowserLoading(navState.loading);
+              }}
+              style={{ flex: 1 }}
+              backgroundColor="#070a15"
+            />
+
+            <Modal visible={browserVisible} transparent animationType="slide" onRequestClose={() => setBrowserVisible(false)}>
+              <View style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.95)', justifyContent: 'center', padding: scale(20) }}>
+                <Card title="Browser" subtitle="Enter a dApp or Website URL.">
+                  <Field value={browserInput} onChangeText={setBrowserInput} placeholder="https://..." autoCapitalize="none" autoFocus />
+                  <View style={styles.inlineButtons}>
+                    <Button label="Go" onPress={() => { setBrowserUrl(coerceBrowserUrl(browserInput)); setBrowserVisible(false); }} primary />
+                    <Button label="Paste" onPress={async () => { const text = await Clipboard.getStringAsync(); setBrowserInput(text); }} secondary />
+                    <Button label="Home" onPress={() => { setBrowserUrl(DEFAULT_BROWSER_URL); setBrowserVisible(false); }} secondary />
+                    <Button label="Cancel" onPress={() => setBrowserVisible(false)} secondary />
+                  </View>
+                </Card>
+              </View>
+            </Modal>
+          </View>
+        )}
         <View style={styles.bottomNav}>
           {TABS.map((item) => (
             <NavItem key={item.id} icon={item.icon} label={item.label} active={tab === item.id} onPress={() => setTab(item.id)} />
