@@ -3413,6 +3413,9 @@ function App() {
                   Contracts, bridge and dApp approval tools are still available here, but the main wallet stays focused on balance, tokens and browser.
                 </Text>
               </Card>
+            </View>
+          )}
+        </ScrollView>
                     {tab === "browser" && (
           <View style={{ flex: 1, backgroundColor: '#070a15', paddingTop: Platform.OS === 'ios' ? scale(0) : scale(30) }}>
             <View style={{ backgroundColor: '#0c0f1d', borderBottomWidth: 1, borderColor: '#161b33', zIndex: 10, paddingVertical: scale(8) }}>
@@ -3454,7 +3457,6 @@ function App() {
                   <Text style={{ color: '#9aa5ca', fontSize: scale(11), fontWeight: '700' }}>EXTERNAL</Text>
                 </TouchableOpacity>
               </View>
-            </View>
             </View>
 
             <WebView
