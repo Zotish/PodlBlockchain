@@ -139,8 +139,7 @@ function migrateLocalEndpoint(value, fallback) {
 const BUILTIN_TEMPLATES = [
   { value: "lqd20", label: "LQD20 Token" },
   { value: "dex_swap", label: "DEX Pair" },
-  { value: "dex_factory", label: "DEX Factory" },
-  { value: "dex_router", label: "DEX Router" },
+  { value: "dex_factory", label: "DEX (Factory + Router)" },
   { value: "bridge_token", label: "Bridge Token" },
   { value: "lending_pool", label: "Lending Pool" },
   { value: "nft_collection", label: "NFT Collection" },
@@ -174,7 +173,6 @@ const QUICK_ARGS = {
     { key: "lendingToken", label: "Lending Asset", ph: "LQD or token address" }
   ],
   dex_factory: [],
-  dex_router: []
 };
 
 const TABS = [
@@ -295,6 +293,14 @@ function Card({ title, subtitle, children, style }) {
 }
 
 function Field({ label, value, onChangeText, placeholder, secureTextEntry, multiline, autoCapitalize = "none", keyboardType, right, editable = true, numberOfLines = 1 }) {
+  let finalPlaceholder = placeholder;
+  if (!finalPlaceholder && label) {
+    if (label.toLowerCase().includes("address")) finalPlaceholder = "0x...";
+    else if (label.toLowerCase().includes("amount")) finalPlaceholder = "0.0";
+    else if (label.toLowerCase().includes("password")) finalPlaceholder = "••••••••";
+    else if (label.toLowerCase().includes("token")) finalPlaceholder = "0x...";
+  }
+
   return (
     <View style={styles.fieldWrap}>
       <View style={styles.fieldLabelRow}>
@@ -304,7 +310,7 @@ function Field({ label, value, onChangeText, placeholder, secureTextEntry, multi
       <TextInput
         value={value}
         onChangeText={onChangeText}
-        placeholder={placeholder}
+        placeholder={finalPlaceholder}
         placeholderTextColor="#7680a8"
         secureTextEntry={secureTextEntry}
         multiline={multiline}
@@ -418,27 +424,37 @@ const BridgeRow = ({ item }) => {
   );
 };
 
+function txTouchesAddress(tx, address) {
+  if (!tx || !address) return false;
+  const active = normalizeAddress(address);
+  const from = normalizeAddress(tx.From || tx.from || tx.sender || "");
+  const to = normalizeAddress(tx.To || tx.to || tx.recipient || "");
+  const contract = normalizeAddress(tx.Contract || tx.contract || "");
+  return from === active || to === active || contract === active;
+}
+
 function ActivityRow({ item }) {
   const hash = item.TxHash || item.tx_hash || item.hash || "";
   const type = item.Type || item.type || "tx";
-  const status = item.Status || item.status || "";
+  const status = item.Status || item.status || "success";
+  const from = item.From || item.from || "";
+  const to = item.To || item.to || "";
+  const val = item.Value || item.amount || "";
+  const sym = item.Symbol || (type === "send" ? "LQD" : "");
+
   return (
     <View style={styles.rowCard}>
       <View style={{ flex: 1 }}>
-        <Text style={styles.rowTitle}>{type.toUpperCase()} · {status || "unknown"}</Text>
+        <Text style={styles.rowTitle}>{type.toUpperCase()} · {status}</Text>
         <Text style={styles.rowSub}>{shortAddress(hash, 8, 6)}</Text>
         <Text style={styles.rowSub}>
-          {shortAddress(item.From || item.from)} → {shortAddress(item.To || item.to)}
+          {shortAddress(from)} → {shortAddress(to)}
         </Text>
+        {!!val && <Text style={styles.rowSub}>Value: {val} {sym}</Text>}
         <Text style={styles.rowSub}>Time: {formatDate(item.Timestamp || item.timestamp)}</Text>
       </View>
       <View style={styles.rowActions}>
-        <Button
-          label="Copy"
-          onPress={() => Clipboard.setStringAsync(hash)}
-          compact
-          secondary
-        />
+        <Button label="Copy" onPress={() => Clipboard.setStringAsync(hash)} compact secondary />
       </View>
     </View>
   );
@@ -928,6 +944,8 @@ function App() {
         setRecentTxs(recent);
         const local = [...activity];
         const merged = mergeUniqueByKey(local, recent, "TxHash");
+        // Sort by timestamp desc
+        merged.sort((a, b) => Number(b.Timestamp || b.timestamp || 0) - Number(a.Timestamp || a.timestamp || 0));
         setActivity(merged.slice(0, 100));
       }
       if (Array.isArray(requests)) {
@@ -1045,71 +1063,6 @@ function App() {
     }));
   }
 
-  async function autoDiscoverTokens(data, addressOverride = "") {
-    const activeAddress = addressOverride || wallet?.address;
-    if (!activeAddress) return;
-
-    const candidates = new Set();
-    
-    // 1. Discover from recent transactions (Transfers and Deploys)
-    if (Array.isArray(data?.recent)) {
-      data.recent.forEach(tx => {
-        const addr = tx.Contract || tx.To;
-        if (addr && isLikelyAddress(addr) && addr.toLowerCase() !== activeAddress.toLowerCase()) {
-          candidates.add(addr);
-        }
-        // Also check if user is the sender to a contract
-        if (tx.From?.toLowerCase() === activeAddress.toLowerCase() && isLikelyAddress(tx.To)) {
-           candidates.add(tx.To);
-        }
-      });
-    }
-
-    // 2. Discover from bridge tokens
-    if (Array.isArray(data?.bridgeTokens)) {
-      data.bridgeTokens.forEach(t => {
-        if (t.address) candidates.add(t.address);
-      });
-    }
-
-    if (candidates.size > 0) {
-      await importDetectedTokens(Array.from(candidates).map(a => ({ address: a })), activeAddress, "auto");
-    }
-  }
-
-  async function refreshTokenBalances(nextWatchlist = watchlist, addressOverride = "") {
-    const activeAddress = addressOverride || wallet?.address;
-    if (!activeAddress) return;
-    
-    try {
-      const updated = await Promise.all(nextWatchlist.map(async (token) => {
-        try {
-          const contract = token.address || token.contract;
-          if (!contract) return token;
-          
-          const [meta, balance] = await Promise.all([
-            token.name && token.symbol ? Promise.resolve(token) : resolveTokenMeta(nodeUrl, contract, activeAddress).catch(() => ({})),
-            resolveTokenBalance(nodeUrl, walletUrl, contract, activeAddress).catch(() => "0"),
-          ]);
-          
-          return {
-            ...token,
-            address: contract,
-            name: meta?.name || token.name || "Token",
-            symbol: meta?.symbol || token.symbol || "TOKEN",
-            decimals: Number(meta?.decimals || token.decimals || 8),
-            balance: String(balance || "0"),
-          };
-        } catch (e) {
-          return { ...token, balance: token.balance || "0" };
-        }
-      }));
-      setWatchlist(updated);
-    } catch (e) {
-      console.warn("Batch token refresh failed:", e.message);
-    }
-  }
-
   async function importDetectedTokens(candidates, addressOverride = "", source = "activity") {
     const activeAddress = addressOverride || wallet?.address;
     if (!activeAddress) return 0;
@@ -1145,22 +1098,32 @@ function App() {
     const poolTokenCandidates = await discoverPoolTokenCandidates(snapshot.pools);
 
     const relatedTxs = (recent || []).filter((tx) => {
-      const from = normalizeAddress(tx.From || tx.from);
-      const to = normalizeAddress(tx.To || tx.to);
-      const args = tokenCandidateFromValue(tx.args || tx.Args);
-      return from === currentAddress || to === currentAddress || args.includes(currentAddress);
+      const from = normalizeAddress(tx.From || tx.from || tx.sender || "");
+      const to = normalizeAddress(tx.To || tx.to || tx.recipient || "");
+      const contract = normalizeAddress(tx.Contract || tx.contract || "");
+      return from === currentAddress || to === currentAddress || contract === currentAddress;
     });
 
-    const candidates = [
-      ...tokenCandidateFromValue(relatedTxs),
+    const candidates = new Set();
+    relatedTxs.forEach((tx) => {
+      const to = normalizeAddress(tx.To || tx.to || "");
+      const from = normalizeAddress(tx.From || tx.from || "");
+      const contract = normalizeAddress(tx.Contract || tx.contract || "");
+      if (to && to !== currentAddress) candidates.add(to);
+      if (from && from !== currentAddress) candidates.add(from);
+      if (contract && contract !== currentAddress) candidates.add(contract);
+    });
+
+    const extra = [
       ...tokenCandidateFromValue(bridgeTokenList),
       ...tokenCandidateFromValue(factory),
       ...poolTokenCandidates,
       ...tokenCandidateFromValue(deployForm.tokenA),
       ...tokenCandidateFromValue(deployForm.tokenB),
     ].filter((address) => address !== currentAddress);
+    extra.forEach(c => candidates.add(c));
 
-    return importDetectedTokens(candidates, activeAddress, "auto");
+    return importDetectedTokens(Array.from(candidates), activeAddress, "auto");
   }
 
   async function discoverPoolTokenCandidates(poolsSnapshot) {
@@ -1525,7 +1488,7 @@ function App() {
       const res = await walletCreate(walletUrl, password);
       const vault = {
         address: res.address,
-        privateKey: res.private_key,
+        privateKey: res.res.private_key,
         mnemonic: res.mnemonic || "",
       };
       await persistWalletVault(vault, password);
@@ -1561,7 +1524,7 @@ function App() {
       const res = await walletImportMnemonic(walletUrl, mnemonic, password);
       const vault = {
         address: res.address,
-        privateKey: res.private_key,
+        privateKey: res.res.private_key,
         mnemonic,
       };
       await persistWalletVault(vault, password);
@@ -1707,10 +1670,12 @@ function App() {
         gas_price: Number(baseFee || bridgeBaseFee || 10),
         private_key: wallet.privateKey,
       });
-      const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
+      const hash = res?.tx_hash || res?.hash || "";
       if (!hash) throw new Error(res?.error || "Transaction failed");
 
-      showToast("Transaction Sent Successfully", "success");
+      setProcessingMessage("");
+      Alert.alert("Success", `LQD Sent!\nHash: ${shortAddress(hash)}`);
+      showToast("LQD Sent Successfully", "success");
       rememberActivity({
         type: "send",
         From: wallet.address,
@@ -1718,11 +1683,14 @@ function App() {
         TxHash: hash,
         Timestamp: Math.floor(Date.now() / 1000),
         Status: "success",
+        Value: sendForm.amount
       });
       setSendForm(initialSendForm);
       setTimeout(() => refreshWalletSnapshot(), 1000);
-      setTimeout(() => refreshWalletSnapshot(), 5000); // Second refresh to catch block inclusion
+      setTimeout(() => refreshWalletSnapshot(), 5000);
     } catch (e) {
+      setProcessingMessage("");
+      Alert.alert("Failed", e.message || "Transaction failed");
       showToast(e.message || "Send failed", "error");
     } finally {
       setBusy(false);
@@ -1832,22 +1800,29 @@ function App() {
         gas_price: baseFee || 10,
         private_key: wallet.privateKey,
       });
-      const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
-      setStatus(hash ? `Token sent: ${shortAddress(hash, 8, 6)}` : "Token sent");
+      const hash = res?.tx_hash || res?.hash || "";
+      setProcessingMessage("");
+      Alert.alert("Success", `${token.symbol} Sent!\nHash: ${shortAddress(hash)}`);
+      showToast(`${token.symbol} Sent Successfully`, "success");
       rememberActivity({
-        type: "token",
+        type: "token_send",
         From: wallet.address,
         To: tokenSendForm.to.trim(),
         Contract: token.address,
         TxHash: hash,
         Timestamp: Math.floor(Date.now() / 1000),
         Status: "success",
+        Value: tokenSendForm.amount,
+        Symbol: token.symbol
       });
       setTokenSendForm(initialTokenSendForm);
-      await refreshSingleToken(token.address);
-      await refreshNativeOnly();
+      setSelectedTokenForSend(null);
+      setTimeout(() => refreshWalletSnapshot(), 1000);
+      setTimeout(() => refreshWalletSnapshot(), 5000);
     } catch (e) {
-      setStatus(e.message || "Token send failed");
+      setProcessingMessage("");
+      Alert.alert("Failed", e.message || "Token transfer failed");
+      showToast(e.message || "Token transfer failed", "error");
     } finally {
       setBusy(false);
       setBusyAction("");
@@ -2030,6 +2005,7 @@ function App() {
             ? [deployForm.tokenA, deployForm.tokenB]
             : [];
         await importDetectedTokens(candidates, wallet.address, "deploy");
+        setProcessingMessage("");
         Alert.alert(
           "Deployment Success",
           `Contract deployed at:\n${contractAddr}`,
@@ -2038,17 +2014,20 @@ function App() {
             { text: "OK" }
           ]
         );
+        showToast("Contract Deployed!", "success");
       }
       rememberActivity({
         type: "deploy",
         From: wallet.address,
         To: contractAddr || "New Contract",
-        TxHash: res?.tx_hash,
+        TxHash: res?.tx_hash || "",
         Timestamp: Math.floor(Date.now() / 1000),
         Status: "success",
       });
       setStatus(`Deployed ${deployForm.template}: ${shortAddress(contractAddr)}`);
     } catch (e) {
+      setProcessingMessage("");
+      Alert.alert("Deployment Failed", e.message || "Template deployment failed");
       setStatus(e.message || "Builtin deploy failed");
     } finally {
       setBusy(false);
@@ -2140,6 +2119,7 @@ function App() {
 
       const res = await nodeDeployContract(nodeUrl, formData);
       const contractAddr = res?.contract_address || res?.ContractAddress || res?.address || "";
+      setProcessingMessage("");
       if (contractAddr) {
         setCallForm((prev) => ({ ...prev, contract: contractAddr }));
         setInspectForm({ address: contractAddr });
@@ -2157,13 +2137,15 @@ function App() {
         type: "deploy",
         From: wallet.address,
         To: contractAddr || "New Contract",
-        TxHash: res?.tx_hash,
+        TxHash: res?.tx_hash || "",
         Timestamp: Math.floor(Date.now() / 1000),
         Status: "success",
       });
       setStatus(`Contract deployed: ${shortAddress(contractAddr || "")}`);
       setCompiledBinary(null);
     } catch (e) {
+      setProcessingMessage("");
+      Alert.alert("Deployment Failed", e.message || "Custom deployment failed");
       setStatus(e.message || "Deploy failed");
     } finally {
       setBusy(false);
@@ -2826,11 +2808,22 @@ function App() {
                     {callSelectedFnIdx != null && callAbi[callSelectedFnIdx] && (
                       <View style={styles.sectionGapSmall}>
                         {(callAbi[callSelectedFnIdx].inputs || []).map((inp, i) => {
-                          const label = inp.name || `arg${i}`;
+                          let label = inp.name || `arg${i}`;
+                          const fnName = callAbi[callSelectedFnIdx].name.toLowerCase();
                           const lower = label.toLowerCase();
                           let ph = inp.type || "value";
+                          
+                          // Smart guessing if name is arg0/arg1
+                          if (lower.startsWith("arg")) {
+                            if (fnName.includes("transfer") || fnName.includes("balanceof") || fnName.includes("allowance")) {
+                               if (i === 0) label = "Address (0x...)";
+                               if (i === 1 && (fnName.includes("transfer") || fnName.includes("allowance"))) label = "Amount / Value";
+                            }
+                          }
+
                           if (lower.includes("addr") || lower.includes("to") || lower.includes("from")) ph = "0x... Address";
                           else if (lower.includes("val") || lower.includes("amount")) ph = "Number or Amount";
+                          
                           return (
                             <Field 
                               key={`arg-${i}`}
