@@ -688,7 +688,17 @@ function App() {
   const unlockInProgress = useRef(false);
   const scanHandlerRef = useRef(() => {});
   const browserRef = useRef(null);
-  const lqdProviderScript = useMemo(() => `
+  const lqdProviderScript = useMemo(() => {
+    let currentOrigin = "";
+    try {
+      currentOrigin = browserUrl ? new URL(browserUrl).origin : "";
+    } catch {
+      currentOrigin = "";
+    }
+    const isTrusted = trustedOrigins.includes(currentOrigin);
+    const selectedAddress = isTrusted ? JSON.stringify(wallet?.address || "") : "null";
+
+    return `
     (function() {
       var requestId = 0;
       var pending = {};
@@ -701,7 +711,7 @@ function App() {
       window.lqd = {
         isLQDWallet: true,
         isMobileWallet: true,
-        selectedAddress: ${trustedOrigins.includes(browserUrl ? new URL(browserUrl).origin : "") ? JSON.stringify(wallet?.address || "") : "null"},
+        selectedAddress: ${selectedAddress},
         chainId: ${JSON.stringify(currentNetwork?.chainId || "0x8b")},
         request: function (payload) {
           var body = payload || {};
