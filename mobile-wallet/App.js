@@ -2981,34 +2981,7 @@ function App() {
             </View>
           )}
 
-          {tab === "browser" && (
-                    onMessage={handleBrowserProviderMessage}
-                    onLoadStart={() => setBrowserLoading(true)}
-                    onLoadEnd={() => {
-                      setBrowserLoading(false);
-                      syncBrowserAccount();
-                    }}
-                    onNavigationStateChange={(navState) => {
-                      setBrowserCanGoBack(navState.canGoBack);
-                      setBrowserCanGoForward(navState.canGoForward);
-                      if (navState.url) {
-                        setBrowserUrl(navState.url);
-                        setBrowserInput(navState.url);
-                      }
-                    }}
-                    setSupportMultipleWindows={false}
-                    javaScriptEnabled
-                    domStorageEnabled
-                    nestedScrollEnabled
-                    scrollEnabled
-                    bounces
-                    overScrollMode="always"
-                    startInLoadingState
-                  />
-                </View>
-              </Card>
-            </View>
-          )}
+
 
           {tab === "bridge" && (
             <View style={styles.sectionGap}>
