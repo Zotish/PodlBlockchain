@@ -943,11 +943,12 @@ function App() {
       }
       if (Array.isArray(recent)) {
         setRecentTxs(recent);
-        const local = [...activity];
-        const merged = mergeUniqueByKey(local, recent, "TxHash");
-        // Sort by timestamp desc
-        merged.sort((a, b) => Number(b.Timestamp || b.timestamp || 0) - Number(a.Timestamp || a.timestamp || 0));
-        setActivity(merged.slice(0, 100));
+        setActivity((prev) => {
+          const merged = mergeUniqueByKey(prev, recent, "TxHash");
+          // Sort by timestamp desc
+          merged.sort((a, b) => Number(b.Timestamp || b.timestamp || 0) - Number(a.Timestamp || a.timestamp || 0));
+          return merged.slice(0, 100);
+        });
       }
       if (Array.isArray(requests)) {
         setBridgeRequests(requests);
