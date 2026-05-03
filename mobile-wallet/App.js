@@ -760,8 +760,8 @@ function App() {
 
       emit("lqd#initialized", { isMobileWallet: true });
       return true;
-    })();
-  `, [wallet?.address, currentNetwork?.chainId, trustedOrigins]);
+    `;
+  }, [wallet?.address, currentNetwork?.chainId, trustedOrigins]);
 
   useEffect(() => {
     scanHandlerRef.current = openFromScan;
