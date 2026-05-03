@@ -1854,6 +1854,7 @@ function App() {
     }
     setBusy(true);
     setBusyAction("sendToken");
+    setProcessingMessage(`Broadcasting ${token.symbol} transfer...`);
     try {
       const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
       const res = await walletContractTx(walletUrl, {
@@ -1868,7 +1869,15 @@ function App() {
       });
       const hash = res?.tx_hash || res?.hash || "";
       setProcessingMessage("");
-      Alert.alert("Success", `${token.symbol} Sent!\nHash: ${shortAddress(hash)}`);
+      
+      setStatusModal({
+        visible: true,
+        title: "Success",
+        message: `${token.symbol} Sent Successfully!`,
+        type: "success",
+        hash: hash
+      });
+
       showToast(`${token.symbol} Sent Successfully`, "success");
       rememberActivity({
         type: "token_send",
@@ -2778,43 +2787,56 @@ function App() {
           contentContainerStyle={[styles.mainScroll]}
         >
           {tab !== "browser" && (
-            <View style={styles.summaryGrid}>
-              <Stat label="Native Balance" value={formatUnits(nativeBalance, 8, 6)} subvalue="LQD" />
-              <Stat label="Network" value={currentNetwork.symbol || "LQD"} subvalue={currentNetwork.name} />
-              <Stat label="Token Count" value={String(currentTokens.length)} subvalue="Watchlist" />
+            <View style={styles.dashboardHeader}>
+               <View style={styles.summaryGrid}>
+                <Stat label="Total Balance" value={formatUnits(nativeBalance, 8, 4)} subvalue="LQD" />
+                <Stat label="Network Status" value={isNodeOnline ? "Online" : "Offline"} subvalue={currentNetwork.name} />
+              </View>
             </View>
           )}
 
           {tab === "home" && (
             <View style={styles.sectionGap}>
-              <Card title="Quick actions" subtitle="Core wallet actions only. DEX sites can be opened from the Browser tab.">
+              <Card title="Quick actions" subtitle="Core wallet management tools.">
                 <View style={styles.actionGrid}>
-                  <Button label="Send" onPress={() => setTab("home")} />
-                  <Button label="Receive" onPress={() => setReceiveVisible(true)} secondary />
-                  <Button label={busyAction === "faucet" ? "Claiming…" : "Faucet"} onPress={claimFaucetAction} secondary disabled={busy} />
-                  <Button label="Open Browser" onPress={() => setTab("browser")} secondary />
-                  <Button label="Activity" onPress={() => setTab("activity")} secondary />
+                  <Pressable style={styles.actionBtn} onPress={() => setTab("tokens")}>
+                    <Text style={styles.actionIcon}>🪙</Text>
+                    <Text style={styles.actionLabel}>Tokens</Text>
+                  </Pressable>
+                  <Pressable style={styles.actionBtn} onPress={() => setReceiveVisible(true)}>
+                    <Text style={styles.actionIcon}>📥</Text>
+                    <Text style={styles.actionLabel}>Receive</Text>
+                  </Pressable>
+                  <Pressable style={styles.actionBtn} onPress={() => setTab("browser")}>
+                    <Text style={styles.actionIcon}>🌐</Text>
+                    <Text style={styles.actionLabel}>Browser</Text>
+                  </Pressable>
+                  <Pressable style={styles.actionBtn} onPress={claimFaucetAction} disabled={busy}>
+                    <Text style={styles.actionIcon}>💧</Text>
+                    <Text style={styles.actionLabel}>Faucet</Text>
+                  </Pressable>
                 </View>
               </Card>
 
-              <Card title="Send LQD" subtitle="Native coin transfer from your wallet.">
-                <Field label="To" value={sendForm.to} onChangeText={(v) => setSendForm((p) => ({ ...p, to: v }))} placeholder="0x..." />
-                <Field label="Amount" value={sendForm.amount} onChangeText={(v) => setSendForm((p) => ({ ...p, amount: v }))} keyboardType="decimal-pad" placeholder="0.0" />
+              <Card title="Transfer LQD" subtitle="Send native coins securely.">
+                <Field label="Recipient Address" value={sendForm.to} onChangeText={(v) => setSendForm((p) => ({ ...p, to: v }))} placeholder="0x..." />
+                <Field label="Amount to Send" value={sendForm.amount} onChangeText={(v) => setSendForm((p) => ({ ...p, amount: v }))} keyboardType="decimal-pad" placeholder="0.0" />
                 <View style={styles.inlineButtons}>
-                  <Button label="Scan Recipient" onPress={() => scanWithCamera("native")} compact secondary disabled={!isNodeOnline} />
-                  <Button label="Paste" onPress={() => pasteClipboardTo((value) => setSendForm((p) => ({ ...p, to: value })))} compact />
+                  <Button label="Scan QR" onPress={() => scanWithCamera("native")} compact secondary />
+                  <Button label="Paste Address" onPress={() => pasteClipboardTo((value) => setSendForm((p) => ({ ...p, to: value })))} compact secondary />
                 </View>
-                <Button label={busyAction === "sendNative" ? "Sending…" : "Send LQD"} onPress={sendNativeAction} disabled={busy} />
+                <Button label={busyAction === "sendNative" ? "Processing..." : "Send LQD Now"} onPress={sendNativeAction} disabled={busy} primary />
               </Card>
 
-              <Card title="Receive" subtitle="Your current address.">
-                <Text style={styles.largeCode}>{wallet.address}</Text>
-                <View style={styles.inlineButtons}>
-                  <Button label="Copy Address" onPress={copyAddress} compact />
-                  <Button label="Show QR" onPress={() => setReceiveVisible(true)} compact secondary />
-                  <Button label="Refresh" onPress={refreshNativeOnly} compact secondary />
-                  <Button label="Lock" onPress={lockWalletAction} compact danger />
-                </View>
+              <Card title="Your Identity" subtitle="Share your address to receive funds.">
+                 <View style={styles.qrContainer}>
+                    <Text numberOfLines={1} style={styles.addressText}>{wallet.address}</Text>
+                    <View style={styles.inlineButtons}>
+                      <Button label="Copy" onPress={copyAddress} compact />
+                      <Button label="QR Code" onPress={() => setReceiveVisible(true)} compact secondary />
+                      <Button label="Lock Wallet" onPress={lockWalletAction} compact danger />
+                    </View>
+                 </View>
               </Card>
             </View>
           )}
@@ -3384,13 +3406,18 @@ function App() {
 
           {tab === "activity" && (
             <View style={styles.sectionGap}>
-              <Card title="Activity" subtitle="Recent on-chain and local wallet actions.">
-                <View style={styles.inlineButtons}>
-                  <Button label="Refresh" onPress={refreshWalletSnapshot} compact secondary />
-                  <Button label="Open Explorer" onPress={() => Share.share({ message: explorerUrl || "Explorer URL not configured" })} compact />
+              <Card title="Activity Log" subtitle="History of your on-chain interactions.">
+                <View style={styles.activityHeader}>
+                  <Text style={styles.activityStats}>{activity.length} Records</Text>
+                  <TouchableOpacity onPress={refreshWalletSnapshot}>
+                    <Text style={{ color: '#8a78ff', fontWeight: '700' }}>Refresh ↻</Text>
+                  </TouchableOpacity>
                 </View>
                 {!activity.length ? (
-                  <Text style={styles.helperText}>No activity recorded yet.</Text>
+                  <View style={styles.emptyState}>
+                    <Text style={styles.emptyIcon}>📂</Text>
+                    <Text style={styles.emptyText}>No transactions found yet.</Text>
+                  </View>
                 ) : (
                   activity
                     .filter((item) => txTouchesAddress(item, wallet.address))
@@ -3438,38 +3465,49 @@ function App() {
 
           {tab === "settings" && (
             <View style={styles.sectionGap}>
-              <Card title="Endpoints" subtitle="Adjust the live services used by the app.">
-                <Field label="Node URL" value={endpoints.nodeUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, nodeUrl: v }))} placeholder={PROD_CHAIN_URL} />
-                <Field label="Wallet URL" value={endpoints.walletUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, walletUrl: v }))} placeholder={PROD_WALLET_URL} />
-                <Field label="Aggregator URL" value={endpoints.aggregatorUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, aggregatorUrl: v }))} placeholder={PROD_AGGREGATOR_URL} />
-                <Field label="Explorer URL" value={endpoints.explorerUrl} onChangeText={(v) => setEndpoints((p) => ({ ...p, explorerUrl: v }))} placeholder={PROD_EXPLORER_URL} />
+              <Card title="Wallet Settings" subtitle="Configure your experience and endpoints.">
+                <View style={styles.settingsGroup}>
+                  <Text style={styles.settingsLabel}>Network Configuration</Text>
+                  <Field label="Node RPC" value={endpoints.nodeUrl} onChangeText={(v) => setEndpoints(p => ({...p, nodeUrl: v}))} placeholder="https://..." />
+                  <Field label="Explorer" value={endpoints.explorerUrl} onChangeText={(v) => setEndpoints(p => ({...p, explorerUrl: v}))} placeholder="https://..." />
+                </View>
+
+                <View style={styles.settingsDivider} />
+
+                <View style={styles.settingsGroup}>
+                  <Text style={styles.settingsLabel}>Security & Privacy</Text>
+                  <View style={styles.settingRow}>
+                    <Text style={styles.settingName}>Auto Refresh Balance</Text>
+                    <Switch value={settingsAutoRefresh} onValueChange={setSettingsAutoRefresh} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
+                  </View>
+                  <View style={styles.settingRow}>
+                    <Text style={styles.settingName}>Biometric Unlock</Text>
+                    <Switch value={biometricEnabled} onValueChange={setBiometricEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
+                  </View>
+                </View>
+
+                <View style={styles.settingsDivider} />
+
+                <View style={styles.settingsGroup}>
+                  <Text style={styles.settingsLabel}>Account Operations</Text>
+                  <View style={styles.inlineButtons}>
+                    <Button label="Backup" onPress={saveBackupToClipboard} compact secondary />
+                    <Button label="Restore" onPress={restoreBackupFromText} compact secondary />
+                    <Button label="Show Mnemonic" onPress={() => setShowMnemonic(true)} compact secondary />
+                  </View>
+                  <Button label="Lock Wallet Now" onPress={lockWalletAction} danger />
+                </View>
               </Card>
 
-              <Card title="Wallet actions" subtitle="Security and backup.">
-                <View style={styles.inlineButtons}>
-                  <Button label={settingsAutoRefresh ? "Auto-refresh: On" : "Auto-refresh: Off"} onPress={() => setSettingsAutoRefresh((p) => !p)} compact secondary />
-                  <Button label={biometricEnabled ? "Biometric: On" : "Biometric: Off"} onPress={() => setBiometricEnabled((p) => !p)} compact secondary />
-                  <Button label="Copy Backup" onPress={saveBackupToClipboard} compact />
-                  <Button label="Restore Backup" onPress={restoreBackupFromText} compact secondary />
-                </View>
-                <Field label="Backup JSON" value={backupText} onChangeText={setBackupText} multiline numberOfLines={6} placeholder="Paste a previously exported backup JSON here…" />
-                <View style={styles.inlineButtons}>
-                  <Button label="Lock Wallet" onPress={lockWalletAction} compact danger />
-                  <Button label="Clear Local Vault" onPress={clearLocalWallet} compact danger />
-                </View>
-                <Text style={styles.helperText}>The vault itself is encrypted with your password. Backup exports include the encrypted vault, networks, watchlist and settings only.</Text>
-              </Card>
-
-              <Card title="Advanced tools" subtitle="Keep heavy developer tools out of the main wallet navigation.">
+              <Card title="Advanced tools" subtitle="Developer utilities and debug.">
                 <View style={styles.templateWrap}>
                   {ADVANCED_TABS.map((item) => (
                     <Chip key={item.id} label={item.label} active={tab === item.id} onPress={() => setTab(item.id)} />
                   ))}
                 </View>
-                <Text style={styles.helperText}>
-                  Contracts, bridge and dApp approval tools are still available here, but the main wallet stays focused on balance, tokens and browser.
-                </Text>
               </Card>
+              
+              <Text style={styles.versionText}>LQD Mobile Wallet v1.2.0 • Stable</Text>
             </View>
           )}
         </ScrollView>
@@ -4104,6 +4142,91 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     flex: 1,
   },
+  dashboardHeader: {
+    marginBottom: scale(15),
+  },
+  actionBtn: {
+    flex: 1,
+    minWidth: scale(75),
+    backgroundColor: '#1b2342',
+    borderRadius: scale(18),
+    padding: scale(12),
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#303a5e',
+    gap: scale(4),
+  },
+  actionIcon: {
+    fontSize: scale(20),
+  },
+  actionLabel: {
+    color: '#c6cee8',
+    fontSize: scale(11),
+    fontWeight: '700',
+  },
+  qrContainer: {
+    alignItems: 'center',
+    gap: scale(12),
+  },
+  addressText: {
+    color: '#91f7bf',
+    fontSize: scale(12),
+    backgroundColor: '#0f152a',
+    padding: scale(10),
+    borderRadius: scale(10),
+    width: '100%',
+    textAlign: 'center',
+    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace' }),
+  },
+  activityHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: scale(10),
+  },
+  activityStats: {
+    color: '#9aa5ca',
+    fontSize: scale(12),
+    fontWeight: '600',
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: scale(40),
+    gap: scale(10),
+  },
+  emptyIcon: {
+    fontSize: scale(40),
+    opacity: 0.4,
+  },
+  emptyText: {
+    color: '#717da4',
+    fontSize: scale(14),
+    fontWeight: '600',
+  },
+  settingsGroup: {
+    gap: scale(12),
+  },
+  settingsLabel: {
+    color: '#8a78ff',
+    fontSize: scale(12),
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginBottom: scale(4),
+  },
+  settingsDivider: {
+    height: 1,
+    backgroundColor: '#273152',
+    marginVertical: scale(8),
+  },
+  versionText: {
+    color: '#5b648e',
+    fontSize: scale(11),
+    textAlign: 'center',
+    marginTop: scale(10),
+    fontWeight: '600',
+  }
 });
 
 export default App;
