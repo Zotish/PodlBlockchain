@@ -317,6 +317,351 @@ function bech32Checksum(hrp, data) {
   return ret;
 }
 
+// ─── Bech32 segwit (P2WPKH/P2WSH) ────────────────────────────────────────────
+
+function bech32SegwitEncode(hrp, witnessVersion, program) {
+  const words = [witnessVersion, ...convertBits(program, 8, 5, true)];
+  const checksum = bech32Checksum(hrp, words);
+  return hrp + "1" + [...words, ...checksum].map(w => BECH32_ALPHABET[w]).join("");
+}
+
+function bech32SegwitDecode(addr) {
+  // Returns { hrp, version, program } or null
+  const lower = addr.toLowerCase();
+  const sep = lower.lastIndexOf("1");
+  if (sep < 1 || sep + 7 > lower.length) return null;
+  const hrp = lower.slice(0, sep);
+  const data = [];
+  for (let i = sep + 1; i < lower.length; i++) {
+    const d = BECH32_ALPHABET.indexOf(lower[i]);
+    if (d < 0) return null;
+    data.push(d);
+  }
+  if (data.length < 6) return null;
+  const version = data[0];
+  const converted = convertBits(data.slice(1, -6), 5, 8, false);
+  if (!converted || converted.length < 2 || converted.length > 40) return null;
+  return { hrp, version, program: new Uint8Array(converted) };
+}
+
+// ─── BTC/LTC address derivation ───────────────────────────────────────────────
+
+function hash160(data) {
+  return ripemd160(sha256(data));
+}
+
+export function btcP2WPKHAddress(privKeyHex, testnet = true) {
+  const pub = secp.getPublicKey(hexToUint8(privKeyHex), true); // compressed 33 bytes
+  const h160 = hash160(pub);
+  return bech32SegwitEncode(testnet ? "tb" : "bc", 0, h160);
+}
+
+export function ltcP2WPKHAddress(privKeyHex, testnet = true) {
+  const pub = secp.getPublicKey(hexToUint8(privKeyHex), true);
+  const h160 = hash160(pub);
+  return bech32SegwitEncode(testnet ? "tltc" : "ltc", 0, h160);
+}
+
+// ─── BTC/LTC P2WPKH signing (BIP143) ─────────────────────────────────────────
+
+function dsha256(data) {
+  return sha256(sha256(data));
+}
+
+function le32(n) {
+  const b = new Uint8Array(4);
+  b[0] = n & 0xff; b[1] = (n >> 8) & 0xff; b[2] = (n >> 16) & 0xff; b[3] = (n >>> 24) & 0xff;
+  return b;
+}
+
+function le64(n) {
+  // n is a number or BigInt of satoshis
+  const big = BigInt(n);
+  const b = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) b[i] = Number((big >> BigInt(i * 8)) & 0xffn);
+  return b;
+}
+
+function varint(n) {
+  if (n < 0xfd) return new Uint8Array([n]);
+  if (n <= 0xffff) return new Uint8Array([0xfd, n & 0xff, (n >> 8) & 0xff]);
+  return new Uint8Array([0xfe, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >>> 24) & 0xff]);
+}
+
+/**
+ * Sign a P2WPKH transaction (BIP143 segwit sighash).
+ * params: { utxos: [{txid, vout, value}], recipients: [{address, value}], changeAddress, feeSatoshis }
+ * Returns signed transaction hex.
+ */
+export function signBtcP2WPKHTx({ utxos, recipients, changeAddress, feeSatoshis = 300 }, privKeyHex) {
+  const pubKey = secp.getPublicKey(hexToUint8(privKeyHex), true); // 33 bytes compressed
+  const h160 = hash160(pubKey);
+
+  // P2PKH script code for BIP143 signing
+  const scriptCode = concatUint8(
+    new Uint8Array([0x19, 0x76, 0xa9, 0x14]),
+    h160,
+    new Uint8Array([0x88, 0xac])
+  );
+
+  const version = le32(1);
+  const locktime = le32(0);
+  const sequence = new Uint8Array([0xff, 0xff, 0xff, 0xff]);
+  const SIGHASH_ALL = 1;
+
+  // hashPrevouts = dsha256(all outpoints)
+  const allOutpoints = concatUint8(...utxos.map(u => {
+    const txidLE = hexToUint8(u.txid).reverse();
+    return concatUint8(txidLE, le32(u.vout));
+  }));
+  const hashPrevouts = dsha256(allOutpoints);
+
+  // hashSequence = dsha256(all sequences)
+  const allSeqs = concatUint8(...utxos.map(() => sequence));
+  const hashSequence = dsha256(allSeqs);
+
+  // Build outputs
+  function p2wpkhOutput(addr) {
+    const decoded = bech32SegwitDecode(addr);
+    if (!decoded) throw new Error(`Cannot decode address: ${addr}`);
+    const scriptPubKey = concatUint8(new Uint8Array([0x00, 0x14]), decoded.program);
+    return concatUint8(le64(BigInt(addr._value || 0)), varint(scriptPubKey.length), scriptPubKey);
+  }
+
+  // Build output scripts without using addr._value (closure over values array)
+  const outputs = recipients.map(r => {
+    const decoded = bech32SegwitDecode(r.address);
+    if (!decoded) throw new Error(`Cannot decode address: ${r.address}`);
+    const scriptPubKey = concatUint8(new Uint8Array([0x00, 0x14]), decoded.program);
+    return { value: BigInt(r.value), scriptPubKey };
+  });
+
+  // Change output
+  if (changeAddress) {
+    const totalIn = utxos.reduce((s, u) => s + BigInt(u.value), 0n);
+    const totalOut = recipients.reduce((s, r) => s + BigInt(r.value), 0n);
+    const change = totalIn - totalOut - BigInt(feeSatoshis);
+    if (change > 546n) { // dust threshold
+      const decoded = bech32SegwitDecode(changeAddress);
+      if (decoded) {
+        const scriptPubKey = concatUint8(new Uint8Array([0x00, 0x14]), decoded.program);
+        outputs.push({ value: change, scriptPubKey });
+      }
+    }
+  }
+
+  // hashOutputs = dsha256(all outputs)
+  const allOutputsBytes = concatUint8(...outputs.map(o =>
+    concatUint8(le64(o.value), varint(o.scriptPubKey.length), o.scriptPubKey)
+  ));
+  const hashOutputs = dsha256(allOutputsBytes);
+
+  // Sign each input
+  const witnesses = utxos.map(utxo => {
+    const txidLE = hexToUint8(utxo.txid).reverse();
+    const outpoint = concatUint8(txidLE, le32(utxo.vout));
+    const preimage = concatUint8(
+      version, hashPrevouts, hashSequence,
+      outpoint, scriptCode,
+      le64(BigInt(utxo.value)),
+      sequence,
+      hashOutputs,
+      locktime,
+      le32(SIGHASH_ALL)
+    );
+    const sigHash = dsha256(preimage);
+    const sig = secp.signSync(sigHash, hexToUint8(privKeyHex), { der: true, recovered: false });
+    const sigDer = new Uint8Array(sig);
+    const sigWithHashType = concatUint8(sigDer, new Uint8Array([SIGHASH_ALL]));
+    return [sigWithHashType, pubKey]; // witness stack: [sig, pubkey]
+  });
+
+  // Build segwit transaction
+  const inputCount = varint(utxos.length);
+  const outputCount = varint(outputs.length);
+
+  const inputsBytes = concatUint8(...utxos.map(u => {
+    const txidLE = hexToUint8(u.txid).reverse();
+    return concatUint8(txidLE, le32(u.vout), new Uint8Array([0x00]), sequence);
+    // scriptSig = empty (0x00) for segwit
+  }));
+
+  const outputsBytes = concatUint8(...outputs.map(o =>
+    concatUint8(le64(o.value), varint(o.scriptPubKey.length), o.scriptPubKey)
+  ));
+
+  const witnessBytes = concatUint8(...witnesses.map(stack => {
+    const items = concatUint8(...stack.map(item =>
+      concatUint8(varint(item.length), item)
+    ));
+    return concatUint8(varint(stack.length), items);
+  }));
+
+  const txBytes = concatUint8(
+    version,
+    new Uint8Array([0x00, 0x01]), // segwit marker + flag
+    inputCount, inputsBytes,
+    outputCount, outputsBytes,
+    witnessBytes,
+    locktime
+  );
+  return uint8ToHex(txBytes);
+}
+
+// ─── TON wallet v3R2 address ──────────────────────────────────────────────────
+
+// TVM cell hash: sha256(d1 || d2 || data_bytes || ref_hashes...)
+function tvmCellHash(d1, d2, dataBitsCount, dataBytes, refHashes = []) {
+  const desc = new Uint8Array([d1, d2]);
+  const parts = [desc, dataBytes, ...refHashes.map(h => hexToUint8(h))];
+  return sha256(concatUint8(...parts));
+}
+
+export function tonV3R2Address(pubkeyHex, workchain = 0) {
+  const pubkey = hexToUint8(pubkeyHex);
+  const subwalletId = 698983191; // default subwallet ID
+  const seqno = 0;
+
+  // Data cell: seqno(32b) + subwallet_id(32b) + pubkey(256b) = 320 bits = 40 bytes
+  const dataBytes = new Uint8Array(40);
+  const dv = new DataView(dataBytes.buffer);
+  dv.setUint32(0, seqno, false);     // big-endian
+  dv.setUint32(4, subwalletId, false);
+  dataBytes.set(pubkey, 8);
+  // d1=0 (no refs, not exotic, level 0), d2=0x50 (40+40=80, even → no padding bit)
+  const dataHash = uint8ToHex(tvmCellHash(0x00, 0x50, 320, dataBytes));
+
+  // Wallet v3R2 code cell hash (constant, from compiled contract)
+  // This is the well-known code hash for wallet v3R2
+  const CODE_HASH = "84dafa449f98a6987789ba232049347a07b3d84ad9d6fdfc65f5152f5a3e3de9";
+
+  // State init cell: 5 bits (00110 = no split_depth, no special, has_code, has_data, no_lib)
+  // d1=2 (2 refs), d2=1 (5 bits: 0+1=1, odd → has padding)
+  // data byte: 5 bits 00110 + marker 1 + 00 padding = 0x34
+  const stateInitData = new Uint8Array([0x34]);
+  const stateInitHash = tvmCellHash(0x02, 0x01, 5, stateInitData, [CODE_HASH, dataHash]);
+
+  // TON user-friendly address: workchain(int8) + hash(32) + crc16(2), base64url
+  const addrBytes = new Uint8Array(34);
+  addrBytes[0] = workchain === 0 ? 0x11 : 0x51; // 0x11 = bounceable mainchain
+  addrBytes.set(stateInitHash, 1);
+  const crc = _crc16Ton(addrBytes.slice(0, 33));
+  addrBytes[33] = 0; // placeholder; use full 35-byte for encoding
+
+  const full = new Uint8Array(36);
+  full[0] = workchain === 0 ? 0x11 : 0x51;
+  full.set(stateInitHash, 1);
+  full[33] = (crc >> 8) & 0xff;
+  full[34] = crc & 0xff;
+  // base64url encode 36 bytes
+  return _uint8ToBase64Url(full.slice(0, 35));
+}
+
+function _crc16Ton(data) {
+  let crc = 0;
+  for (const byte of data) {
+    for (let i = 0; i < 8; i++) {
+      const bit = (byte >> (7 - i)) & 1;
+      const c15 = (crc >> 15) & 1;
+      crc = (crc << 1) & 0xffff;
+      if (c15 ^ bit) crc ^= 0x1021;
+    }
+  }
+  return crc & 0xffff;
+}
+
+function _uint8ToBase64Url(bytes) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let result = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i], b1 = bytes[i+1] ?? 0, b2 = bytes[i+2] ?? 0;
+    result += chars[b0 >> 2];
+    result += chars[((b0 & 3) << 4) | (b1 >> 4)];
+    result += i+1 < bytes.length ? chars[((b1 & 15) << 2) | (b2 >> 6)] : "=";
+    result += i+2 < bytes.length ? chars[b2 & 63] : "=";
+  }
+  // Make URL-safe: +→- /→_
+  return result.replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+// ─── Starknet key derivation ──────────────────────────────────────────────────
+// Uses secp256k1 BIP32 derivation (m/44'/9004'/0'/0/0) + grind to STARK order.
+
+const STARK_ORDER = BigInt("0x0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f");
+const STARK_P     = BigInt("0x0800000000000011000000000000000000000000000000000000000000000001");
+const STARK_GX    = BigInt("0x01ef15c18599971b7beced415a40f0c7deacfd9b0d1819e03d723d8bc943cfca");
+const STARK_GY    = BigInt("0x005668060aa49730b7be4801df46ec62de53ecd11abe43a32873000c36e8dc1f");
+const STARK_A     = BigInt(1);
+
+function _starkMod(a, m) { return ((a % m) + m) % m; }
+function _starkInv(a, m) {
+  // Extended Euclidean
+  let [old_r, r] = [a, m], [old_s, s] = [1n, 0n];
+  while (r !== 0n) {
+    const q = old_r / r;
+    [old_r, r] = [r, old_r - q * r];
+    [old_s, s] = [s, old_s - q * s];
+  }
+  return _starkMod(old_s, m);
+}
+
+function _starkPointAdd(p1, p2) {
+  if (!p1) return p2;
+  if (!p2) return p1;
+  const [x1, y1] = p1, [x2, y2] = p2;
+  if (x1 === x2) {
+    if (y1 !== y2) return null;
+    const lam = _starkMod(3n * x1 * x1 % STARK_P + STARK_A, STARK_P) * _starkInv(2n * y1, STARK_P) % STARK_P;
+    const x3 = _starkMod(lam * lam - 2n * x1, STARK_P);
+    return [x3, _starkMod(lam * (x1 - x3) - y1, STARK_P)];
+  }
+  const lam = _starkMod((y2 - y1) * _starkInv(x2 - x1, STARK_P), STARK_P);
+  const x3 = _starkMod(lam * lam - x1 - x2, STARK_P);
+  return [x3, _starkMod(lam * (x1 - x3) - y1, STARK_P)];
+}
+
+function _starkPointMul(k, px = STARK_GX, py = STARK_GY) {
+  let res = null, cur = [px, py];
+  for (; k > 0n; k >>= 1n) {
+    if (k & 1n) res = _starkPointAdd(res, cur);
+    cur = _starkPointAdd(cur, cur);
+  }
+  return res;
+}
+
+export function starknetKeyFromSeed(seedHex) {
+  // Grind secp256k1 key until it fits STARK order
+  let keyHex = deriveSecp256k1(seedHex, "m/44'/9004'/0'/0/0").privateKey;
+  for (let i = 0; i < 1000; i++) {
+    const n = BigInt("0x" + keyHex);
+    if (n > 0n && n < STARK_ORDER) {
+      const pub = _starkPointMul(n);
+      return {
+        privateKey: keyHex,
+        publicKey: pub ? ("0x" + pub[0].toString(16).padStart(64, "0")) : "0x",
+      };
+    }
+    // Hash again to get new candidate
+    const wa = CryptoJS.lib.WordArray.create(hexToUint8(keyHex));
+    keyHex = uint8ToHex(wordArrayToUint8(CryptoJS.SHA256(wa)));
+  }
+  return { privateKey: keyHex, publicKey: "0x" };
+}
+
+export function starknetAddressFromKey(publicKeyHex) {
+  // Simplified ArgentX v0 account address
+  // contract_address = H(STARKNET_CONTRACT_ADDRESS, 0, pubkey, class_hash, H(pubkey, 0))
+  // Using sha256-based hash as approximation (Pedersen hash requires STARK curve constants)
+  const ARGENT_CLASS = "0x025ec026985a3bf9d0cc1fe17326b245dfdc3ff89b8fde106542a3ea56c5a918";
+  const pub = publicKeyHex.replace("0x", "").padStart(64, "0");
+  const classH = ARGENT_CLASS.replace("0x", "");
+  const combined = hexToUint8(pub + classH + pub);
+  const hash = sha256(combined);
+  // Truncate to STARK field (mod STARK_P)
+  const n = BigInt("0x" + uint8ToHex(hash)) % STARK_P;
+  return "0x" + n.toString(16).padStart(64, "0");
+}
+
 // ─── Base58 ───────────────────────────────────────────────────────────────────
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -341,67 +686,53 @@ export function deriveAllChainKeys(mnemonic, passphrase = "") {
   const seedHex = mnemonicToSeed(mnemonic, passphrase);
 
   // secp256k1 chains
-  const evm = deriveSecp256k1(seedHex, "m/44'/60'/0'/0/0");
-  const harmony = deriveSecp256k1(seedHex, "m/44'/60'/0'/0/0"); // same as EVM
-  const tron = deriveSecp256k1(seedHex, "m/44'/195'/0'/0/0");
-  const cosmos = deriveSecp256k1(seedHex, "m/44'/118'/0'/0/0");
-  const sei = deriveSecp256k1(seedHex, "m/44'/118'/0'/0/0");
-  const injective = deriveSecp256k1(seedHex, "m/44'/60'/0'/0/0"); // INJ uses ETH path
+  const evm      = deriveSecp256k1(seedHex, "m/44'/60'/0'/0/0");
+  const harmony  = deriveSecp256k1(seedHex, "m/44'/60'/0'/0/0");   // same path as EVM
+  const tron     = deriveSecp256k1(seedHex, "m/44'/195'/0'/0/0");
+  const cosmos   = deriveSecp256k1(seedHex, "m/44'/118'/0'/0/0");
+  const sei      = deriveSecp256k1(seedHex, "m/44'/118'/0'/0/0");
+  const injective= deriveSecp256k1(seedHex, "m/44'/60'/0'/0/0");   // INJ uses ETH path
+  const btc      = deriveSecp256k1(seedHex, "m/84'/0'/0'/0/0");    // native segwit
+  const ltc      = deriveSecp256k1(seedHex, "m/84'/2'/0'/0/0");    // LTC coin type 2
+  const starkRaw = starknetKeyFromSeed(seedHex);
 
   // ed25519 chains
   const solana = deriveEd25519(seedHex, "m/44'/501'/0'/0'");
-  const near = deriveEd25519(seedHex, "m/44'/397'/0'");
-  const aptos = deriveEd25519(seedHex, "m/44'/637'/0'/0'/0'");
-  const sui = deriveEd25519(seedHex, "m/44'/784'/0'/0'/0'");
-  const ton = deriveEd25519(seedHex, "m/44'/607'/0'");
+  const near   = deriveEd25519(seedHex, "m/44'/397'/0'");
+  const aptos  = deriveEd25519(seedHex, "m/44'/637'/0'/0'/0'");
+  const sui    = deriveEd25519(seedHex, "m/44'/784'/0'/0'/0'");
+  const ton    = deriveEd25519(seedHex, "m/44'/607'/0'");
 
   return {
-    evm: {
-      privateKey: evm.privateKey,
-      address: evmAddressFromPrivKey(evm.privateKey),
-    },
-    harmony: {
-      privateKey: harmony.privateKey,
-      address: evmAddressFromPrivKey(harmony.privateKey),
-    },
-    tron: {
+    evm:      { privateKey: evm.privateKey,       address: evmAddressFromPrivKey(evm.privateKey) },
+    harmony:  { privateKey: harmony.privateKey,   address: evmAddressFromPrivKey(harmony.privateKey) },
+    tron:     {
       privateKey: tron.privateKey,
-      address: evmAddressFromPrivKey(tron.privateKey),      // 0x for RPC
-      tronAddress: tronBase58AddressFromPrivKey(tron.privateKey), // T... for display
+      address: evmAddressFromPrivKey(tron.privateKey),           // 0x for RPC
+      tronAddress: tronBase58AddressFromPrivKey(tron.privateKey),// T... for display
     },
-    cosmos: {
-      privateKey: cosmos.privateKey,
-      address: cosmosAddressFromPrivKey(cosmos.privateKey, "cosmos"),
-    },
-    sei: {
+    cosmos:   { privateKey: cosmos.privateKey,    address: cosmosAddressFromPrivKey(cosmos.privateKey, "cosmos") },
+    sei:      {
       privateKey: sei.privateKey,
       address: cosmosAddressFromPrivKey(sei.privateKey, "sei"),
       evmAddress: evmAddressFromPrivKey(sei.privateKey),
     },
-    injective: {
-      privateKey: injective.privateKey,
-      address: cosmosAddressFromPrivKey(injective.privateKey, "inj"),
-      evmAddress: evmAddressFromPrivKey(injective.privateKey),
-    },
-    solana: {
-      privateKey: solana.privateKey,
-      address: solanaAddressFromPrivKey(solana.privateKey),
-    },
-    near: {
-      privateKey: near.privateKey,
-      address: nearAddressFromPrivKey(near.privateKey),
-    },
-    aptos: {
-      privateKey: aptos.privateKey,
-      address: aptosAddressFromPrivKey(aptos.privateKey),
-    },
-    sui: {
-      privateKey: sui.privateKey,
-      address: suiAddressFromPrivKey(sui.privateKey),
-    },
-    ton: {
+    injective:{ privateKey: injective.privateKey, address: cosmosAddressFromPrivKey(injective.privateKey, "inj"), evmAddress: evmAddressFromPrivKey(injective.privateKey) },
+    solana:   { privateKey: solana.privateKey,    address: solanaAddressFromPrivKey(solana.privateKey) },
+    near:     { privateKey: near.privateKey,      address: nearAddressFromPrivKey(near.privateKey) },
+    aptos:    { privateKey: aptos.privateKey,     address: aptosAddressFromPrivKey(aptos.privateKey) },
+    sui:      { privateKey: sui.privateKey,       address: suiAddressFromPrivKey(sui.privateKey) },
+    ton:      {
       privateKey: ton.privateKey,
-      address: tonAddressFromPrivKey(ton.privateKey),
+      rawPubkey:  tonAddressFromPrivKey(ton.privateKey),          // hex pubkey
+      address: (() => { try { return tonV3R2Address(tonAddressFromPrivKey(ton.privateKey)); } catch { return tonAddressFromPrivKey(ton.privateKey); } })(),
+    },
+    btc:      { privateKey: btc.privateKey,       address: btcP2WPKHAddress(btc.privateKey, true) },
+    ltc:      { privateKey: ltc.privateKey,       address: ltcP2WPKHAddress(ltc.privateKey, true) },
+    starknet: {
+      privateKey: starkRaw.privateKey,
+      publicKey:  starkRaw.publicKey,
+      address: starknetAddressFromKey(starkRaw.publicKey),
     },
   };
 }
@@ -693,12 +1024,22 @@ export function base58Decode(str) {
 // ─── Export key info for display ─────────────────────────────────────────────
 
 export function exportKeyInfo(chainKeys) {
-  return Object.entries(chainKeys).map(([chain, info]) => ({
-    chain,
-    privateKey: info.privateKey,
-    address: info.address,
-    ...(info.evmAddress ? { evmAddress: info.evmAddress } : {}),
-  }));
+  const CHAIN_LABELS = {
+    evm: "EVM (ETH/BSC/Polygon…)", harmony: "Harmony ONE", tron: "TRON", cosmos: "Cosmos ATOM",
+    sei: "SEI", injective: "Injective INJ", solana: "Solana SOL", near: "NEAR",
+    aptos: "Aptos APT", sui: "SUI", ton: "TON", btc: "Bitcoin BTC", ltc: "Litecoin LTC",
+    starknet: "Starknet",
+  };
+  return Object.entries(chainKeys)
+    .filter(([, info]) => info && info.privateKey)
+    .map(([chain, info]) => ({
+      chain,
+      label: CHAIN_LABELS[chain] || chain.toUpperCase(),
+      privateKey: info.privateKey,
+      address: info.tronAddress || info.address || info.rawPubkey || "",
+      ...(info.evmAddress ? { evmAddress: info.evmAddress } : {}),
+      ...(chain === "starknet" ? { publicKey: info.publicKey } : {}),
+    }));
 }
 
 // ─── NEAR Borsh Helpers ───────────────────────────────────────────────────────

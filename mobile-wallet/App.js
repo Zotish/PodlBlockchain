@@ -121,6 +121,7 @@ import {
   signNearFunctionCall,
   signAptosEntry,
   signSuiTx,
+  signBtcP2WPKHTx,
   exportKeyInfo,
   base58Encode as cryptoBase58Encode,
 } from "./src/crypto";
@@ -722,8 +723,8 @@ const NETWORKS = [
   { id: 'scroll-sepolia', name: 'Scroll Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 534351, nodeUrl: 'https://sepolia-rpc.scroll.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.scrollscan.com', icon: '📜', color: '#FFDEC1' },
   { id: 'berachain-artio', name: 'Berachain Artio', symbol: 'BERA', family: 'evm', decimals: 18, chainId: 80085, nodeUrl: 'https://artio.rpc.berachain.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://artio.beratrail.io', icon: '🐻', color: '#FFB237' },
   { id: 'fantom-testnet', name: 'Fantom Testnet', symbol: 'FTM', family: 'evm', decimals: 18, chainId: 4002, nodeUrl: 'https://rpc.testnet.fantom.network', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.ftmscan.com', icon: '👻', color: '#1969FF' },
-  { id: 'bitcoin-testnet', name: 'Bitcoin Testnet', symbol: 'BTC', family: 'utxo', decimals: 8, nodeUrl: 'https://blockstream.info/testnet/api', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://blockstream.info/testnet', icon: '₿', color: '#F7931A' },
-  { id: 'litecoin-testnet', name: 'Litecoin Testnet', symbol: 'LTC', family: 'litecoin', decimals: 8, nodeUrl: 'https://litecoin-testnet.public-rpc.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://blockchair.com/litecoin', icon: 'Ł', color: '#345D9D' },
+  { id: 'bitcoin-testnet', name: 'Bitcoin Testnet', symbol: 'tBTC', family: 'utxo', decimals: 8, nodeUrl: 'https://blockstream.info/testnet/api', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://blockstream.info/testnet', icon: '₿', color: '#F7931A' },
+  { id: 'litecoin-testnet', name: 'Litecoin Testnet', symbol: 'tLTC', family: 'litecoin', decimals: 8, nodeUrl: 'https://api.blockcypher.com/v1/ltc/test3', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://live.blockcypher.com/ltc-testnet', icon: 'Ł', color: '#345D9D' },
   { id: 'cosmos-testnet', name: 'Cosmos Hub Testnet', symbol: 'ATOM', family: 'cosmos', decimals: 6, cosmosChainId: 'theta-testnet-001', nodeUrl: 'https://rest.sentry-01.theta-testnet.polypore.xyz', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.theta-testnet.polypore.xyz', icon: '⚛️', color: '#2E3148' },
   { id: 'blast-sepolia', name: 'Blast Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 168587773, nodeUrl: 'https://sepolia.blast.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.blastscan.io', icon: '💥', color: '#FCFC03' },
   { id: 'zksync-sepolia', name: 'zkSync Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 300, nodeUrl: 'https://sepolia.era.zksync.dev', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.explorer.zksync.io', icon: '🔗', color: '#3333FF' },
@@ -911,15 +912,18 @@ function App() {
     if (chainKeys) {
       if (family === "evm") return chainKeys.evm.address;
       if (family === "harmony") return chainKeys.harmony.address;
-      if (family === "tron") return chainKeys.tron.tronAddress || chainKeys.tron.address; // T... display format
+      if (family === "tron") return chainKeys.tron.tronAddress || chainKeys.tron.address;
       if (family === "cosmos" || family === "cosmos-testnet") return chainKeys.cosmos.address;
-      if (family === "sei") return chainKeys.sei.address;        // sei1... bech32 for display
-      if (family === "injective") return chainKeys.injective.address; // inj1... for display
+      if (family === "sei") return chainKeys.sei.address;
+      if (family === "injective") return chainKeys.injective.address;
       if (family === "solana") return chainKeys.solana.address;
       if (family === "near") return chainKeys.near.address;
       if (family === "aptos") return chainKeys.aptos.address;
       if (family === "sui") return chainKeys.sui.address;
-      if (family === "ton") return chainKeys.ton.address;
+      if (family === "ton") return chainKeys.ton?.address || chainKeys.ton?.rawPubkey || "";
+      if (family === "utxo") return chainKeys.btc?.address || "";
+      if (family === "litecoin") return chainKeys.ltc?.address || "";
+      if (family === "starknet") return chainKeys.starknet?.address || "";
     }
     // Fallback: legacy derivation (EVM key only)
     if (family === "evm") return wallet.address;
@@ -1115,17 +1119,20 @@ function App() {
       setChainKeys(keys);
       // Also update multiWallets for backwards-compat display
       setMultiWallets({
-        evm: { address: keys.evm.address, pk: keys.evm.privateKey },
-        harmony: { address: keys.harmony.address, pk: keys.harmony.privateKey },
-        cosmos: { address: keys.cosmos.address, pk: keys.cosmos.privateKey },
-        sei: { address: keys.sei.address, pk: keys.sei.privateKey },
-        injective: { address: keys.injective.address, pk: keys.injective.privateKey },
-        tron: { address: keys.tron.tronAddress || keys.tron.address, pk: keys.tron.privateKey },
-        solana: { address: keys.solana.address, pk: keys.solana.privateKey },
-        near: { address: keys.near.address, pk: keys.near.privateKey },
-        aptos: { address: keys.aptos.address, pk: keys.aptos.privateKey },
-        sui: { address: keys.sui.address, pk: keys.sui.privateKey },
-        ton: { address: keys.ton.address, pk: keys.ton.privateKey },
+        evm:      { address: keys.evm.address,                            pk: keys.evm.privateKey },
+        harmony:  { address: keys.harmony.address,                        pk: keys.harmony.privateKey },
+        cosmos:   { address: keys.cosmos.address,                         pk: keys.cosmos.privateKey },
+        sei:      { address: keys.sei.address,                            pk: keys.sei.privateKey },
+        injective:{ address: keys.injective.address,                      pk: keys.injective.privateKey },
+        tron:     { address: keys.tron.tronAddress || keys.tron.address,  pk: keys.tron.privateKey },
+        solana:   { address: keys.solana.address,                         pk: keys.solana.privateKey },
+        near:     { address: keys.near.address,                           pk: keys.near.privateKey },
+        aptos:    { address: keys.aptos.address,                          pk: keys.aptos.privateKey },
+        sui:      { address: keys.sui.address,                            pk: keys.sui.privateKey },
+        ton:      { address: keys.ton.address || keys.ton.rawPubkey,      pk: keys.ton.privateKey },
+        btc:      { address: keys.btc?.address,                           pk: keys.btc?.privateKey },
+        ltc:      { address: keys.ltc?.address,                           pk: keys.ltc?.privateKey },
+        starknet: { address: keys.starknet?.address,                      pk: keys.starknet?.privateKey },
       });
     } catch (e) {
       console.warn("deriveAllChainKeys failed:", e.message);
@@ -1214,10 +1221,16 @@ function App() {
             const bal = res?.balances?.find(b => b.denom === 'uatom' || b.denom === 'stake' || b.denom === 'atom');
             return bal ? { balance: bal.amount } : { balance: 0 };
           }
-          if (family === 'utxo' || family === 'litecoin') {
+          if (family === 'utxo') {
+            // Blockstream API
             const res = await getJson(`${nodeUrl}/address/${targetAddr}`).catch(() => null);
             const balance = (res?.chain_stats?.funded_txo_sum || 0) - (res?.chain_stats?.spent_txo_sum || 0);
             return { balance };
+          }
+          if (family === 'litecoin') {
+            // BlockCypher API: /addrs/{addr}/balance
+            const res = await getJson(`${nodeUrl}/addrs/${targetAddr}/balance`).catch(() => null);
+            return { balance: res?.balance ?? 0 };
           }
           // Bug fix #2: TRON JSON-RPC endpoint uses eth_getBalance, not a REST body
           if (family === 'tron') {
@@ -1228,10 +1241,12 @@ function App() {
             if (res?.result) return { balance: BigInt(res.result).toString() };
             return { balance: 0 };
           }
-          // Bug fix #6a: TON — activeAddress is "" for ed25519; use targetAddr param
           if (family === 'ton') {
             if (!targetAddr) return { balance: 0 };
-            const res = await getJson(`${nodeUrl}/getAddressInformation?address=${encodeURIComponent(targetAddr)}`).catch(() => null);
+            // targetAddr is now EQ.../UQ... (v3R2 wallet address from tonV3R2Address)
+            // TonCenter jsonRPC: getAddressBalance or getAddressInformation
+            const tonBase = nodeUrl.includes('jsonRPC') ? nodeUrl.replace(/\/jsonRPC$/, '') : nodeUrl;
+            const res = await getJson(`${tonBase}/getAddressInformation?address=${encodeURIComponent(targetAddr)}`).catch(() => null);
             return { balance: res?.result?.balance || 0 };
           }
           // Bug fix #6b: NEAR — activeAddress is "" for ed25519; use targetAddr param
@@ -1287,6 +1302,22 @@ function App() {
             return { balance: 0 };
           }
           if (family === 'starknet') {
+            if (!targetAddr) return { balance: 0 };
+            // ETH balance on Starknet via starknet_call to ETH token contract
+            const ETH_CONTRACT = "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
+            const BALANCE_OF_SELECTOR = "0x2e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e";
+            try {
+              const res = await postJson(nodeUrl, {
+                jsonrpc: "2.0", id: 1, method: "starknet_call",
+                params: [{ contract_address: ETH_CONTRACT, entry_point_selector: BALANCE_OF_SELECTOR, calldata: [targetAddr] }, "latest"],
+              }).catch(() => null);
+              // Returns [low, high] uint256
+              if (res?.result?.length >= 2) {
+                const low = BigInt(res.result[0] || "0x0");
+                const high = BigInt(res.result[1] || "0x0");
+                return { balance: (high * (1n << 128n) + low).toString() };
+              }
+            } catch { /* fall through */ }
             return { balance: 0 };
           }
           return null;
@@ -2431,9 +2462,78 @@ function App() {
         hash = execRes?.result?.digest || "";
         if (!hash) throw new Error(execRes?.error?.message || "SUI execution failed");
 
-      // ── TON: complex cell-based format, show clear guidance ───────────────
+      // ── BTC (P2WPKH, SegWit, BIP143) ─────────────────────────────────────
+      } else if (family === "utxo") {
+        if (!chainKeys?.btc) throw new Error("Unlock wallet with mnemonic to sign BTC transactions");
+        const privKey = chainKeys.btc.privateKey;
+        const fromAddr = chainKeys.btc.address; // tb1...
+
+        // Fetch UTXOs from Blockstream
+        const utxoRes = await getJson(`${nodeUrl}/address/${fromAddr}/utxo`).catch(() => []);
+        const utxos = (Array.isArray(utxoRes) ? utxoRes : []).map(u => ({
+          txid: u.txid, vout: u.vout, value: u.value,
+        }));
+        if (!utxos.length) throw new Error("No UTXOs found. Fund your testnet address first.");
+
+        const amountSats = Number(amount); // amount is already in satoshis (smallest unit)
+        const feeSats = 300;
+        const totalIn = utxos.reduce((s, u) => s + u.value, 0);
+        if (totalIn < amountSats + feeSats) throw new Error(`Insufficient BTC balance. Need ${amountSats + feeSats} sats, have ${totalIn} sats.`);
+
+        const signedHex = signBtcP2WPKHTx({
+          utxos,
+          recipients: [{ address: recipient, value: amountSats }],
+          changeAddress: fromAddr,
+          feeSatoshis: feeSats,
+        }, privKey);
+
+        // Broadcast via Blockstream
+        const broadcastRes = await fetch(`${nodeUrl}/tx`, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: signedHex,
+        });
+        const txid = await broadcastRes.text();
+        if (!broadcastRes.ok) throw new Error(`BTC broadcast failed: ${txid}`);
+        hash = txid.trim();
+
+      // ── LTC (P2WPKH, BlockCypher API) ─────────────────────────────────────
+      } else if (family === "litecoin") {
+        if (!chainKeys?.ltc) throw new Error("Unlock wallet with mnemonic to sign LTC transactions");
+        const privKey = chainKeys.ltc.privateKey;
+        const fromAddr = chainKeys.ltc.address; // tltc1...
+
+        // Fetch UTXOs via BlockCypher
+        const utxoRes = await getJson(`${nodeUrl}/addrs/${fromAddr}?unspentOnly=true`).catch(() => null);
+        const utxos = (utxoRes?.txrefs || []).map(u => ({
+          txid: u.tx_hash, vout: u.tx_output_n, value: u.value,
+        }));
+        if (!utxos.length) throw new Error("No UTXOs found. Fund your LTC testnet address first.");
+
+        const amountSats = Number(amount);
+        const feeSats = 500;
+        const totalIn = utxos.reduce((s, u) => s + u.value, 0);
+        if (totalIn < amountSats + feeSats) throw new Error(`Insufficient LTC. Need ${amountSats + feeSats} sats, have ${totalIn} sats.`);
+
+        const signedHex = signBtcP2WPKHTx({
+          utxos,
+          recipients: [{ address: recipient, value: amountSats }],
+          changeAddress: fromAddr,
+          feeSatoshis: feeSats,
+        }, privKey);
+
+        // Broadcast via BlockCypher
+        const broadRes = await postJson(`${nodeUrl}/txs/push`, { tx: signedHex });
+        hash = broadRes?.tx?.hash || "";
+        if (!hash) throw new Error(broadRes?.error || "LTC broadcast failed");
+
+      // ── TON: requires wallet contract cells — export key to Tonkeeper ──────
       } else if (family === "ton") {
-        throw new Error("TON send requires the official TON SDK (TonWeb). Import your key into Tonkeeper or MyTonWallet using your derived private key from Settings → Export All Chain Keys.");
+        throw new Error("TON transactions require cell serialization. Export your TON key in Settings → Export All Chain Keys and import into Tonkeeper or MyTonWallet.");
+
+      // ── Starknet: requires Starknet.js for invoke transactions ────────────
+      } else if (family === "starknet") {
+        throw new Error("Starknet transactions require the starknet.js SDK. Your address and key are available in Settings → Export All Chain Keys.");
 
       } else {
         throw new Error(`Send not yet supported for ${currentNetwork.name} (${family})`);
