@@ -1,0 +1,11 @@
+{$CHAIN_DOMAIN} {
+	reverse_proxy chain:6500
+}
+
+{$WALLET_DOMAIN} {
+	reverse_proxy wallet:8080
+}
+
+{$AGG_DOMAIN} {
+	reverse_proxy aggregator:9000
+}

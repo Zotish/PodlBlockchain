@@ -1,0 +1,76 @@
+services:
+  chain:
+    image: ${LQD_IMAGE:-podl-blockchain:local}
+    restart: unless-stopped
+    working_dir: /app
+    command: sh scripts/railway/start-chain.sh
+    env_file:
+      - .env
+    environment:
+      PORT: "6500"
+      P2P_PORT: "${P2P_PORT:-6100}"
+      LQD_DATA_DIR: /app/data
+      LQD_BRIDGE_DATA_DIR: /app/data
+      CHAIN_DB_PATH: /app/data/chain/evodb
+      BRIDGE_STATE_FILE: /app/data/bridge_relayer_state.json
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "${CHAIN_HTTP_BIND:-127.0.0.1:6500}:6500"
+      - "${P2P_BIND:-0.0.0.0:6100}:6100"
+
+  wallet:
+    image: ${LQD_IMAGE:-podl-blockchain:local}
+    restart: unless-stopped
+    working_dir: /app
+    command: sh scripts/railway/start-wallet.sh
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      CHAIN_URL: http://chain:6500
+    depends_on:
+      - chain
+    ports:
+      - "${WALLET_HTTP_BIND:-127.0.0.1:8080}:8080"
+
+  aggregator:
+    image: ${LQD_IMAGE:-podl-blockchain:local}
+    restart: unless-stopped
+    working_dir: /app
+    command: sh scripts/railway/start-aggregator.sh
+    env_file:
+      - .env
+    environment:
+      PORT: "9000"
+      CHAIN_URL: http://chain:6500
+      WALLET_URL: http://wallet:8080
+      AGGREGATOR_NODES: "${AGGREGATOR_NODES:-auto}"
+    depends_on:
+      - chain
+      - wallet
+    ports:
+      - "${AGG_HTTP_BIND:-127.0.0.1:9000}:9000"
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    profiles:
+      - proxy
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - chain
+      - wallet
+      - aggregator
+
+volumes:
+  caddy_data:
+  caddy_config:
