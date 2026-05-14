@@ -1,8 +1,8 @@
 const ext = typeof chrome !== "undefined" ? chrome : browser;
 
-const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
-const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
-const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
+const PROD_CHAIN_URL = "http://178.105.133.94:6500";
+const PROD_WALLET_URL = "http://178.105.133.94:8080";
+const PROD_AGGREGATOR_URL = "http://178.105.133.94:9000";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
 const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
 // ── Default networks ──────────────────────────────────────────────────────────

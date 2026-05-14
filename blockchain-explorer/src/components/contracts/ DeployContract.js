@@ -1,7 +1,7 @@
 // src/components/contract/ContractDeploy.jsx
 import React, { useState } from "react";
 
-const NODE = "http://127.0.0.1:9000";
+const NODE = "http://178.105.133.94:9000";
 
 const ContractDeploy = ({ walletAddress, privateKey }) => {
   const [contractType, setContractType] = useState("plugin");

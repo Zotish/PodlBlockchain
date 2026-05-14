@@ -15,7 +15,7 @@ for (const file of filesToCopy) {
   await fs.copyFile(from, to);
 }
 
-const defaultNodeUrl = (process.env.BRIDGE_ADMIN_NODE_URL || "http://127.0.0.1:6500").trim();
+const defaultNodeUrl = (process.env.BRIDGE_ADMIN_NODE_URL || "http://178.105.133.94:6500").trim();
 const runtimeConfig = `window.__BRIDGE_ADMIN_CONFIG__ = ${JSON.stringify(
   { defaultNodeUrl },
   null,
