@@ -5,17 +5,17 @@ function normalizeBaseUrl(value, fallback) {
 
 export const API_BASE = normalizeBaseUrl(
   process.env.REACT_APP_API_BASE,
-  "http://127.0.0.1:9000"
+  "http://178.105.133.94:9000"
 );
 
 export const CHAIN_BASE = normalizeBaseUrl(
   process.env.REACT_APP_CHAIN_BASE,
-  "http://127.0.0.1:6500"
+  "http://178.105.133.94:6500"
 );
 
 export const WALLET_BASE = normalizeBaseUrl(
   process.env.REACT_APP_WALLET_BASE,
-  "http://127.0.0.1:8080"
+  "http://178.105.133.94:8080"
 );
 
 export const WEB_WALLET_BASE = normalizeBaseUrl(

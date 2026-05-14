@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { parseLQD, isAmountParam } from "../../utils/lqdUnits";
 
-const API = "http://127.0.0.1:9000";
+const API = "http://178.105.133.94:9000";
 
 export default function ContractWrite({ address, walletAddress, abi, privateKey }) {
   const writes = abi.filter((fn) => fn.type === "function" && fn.stateMutability !== "view");

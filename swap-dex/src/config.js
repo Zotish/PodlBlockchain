@@ -4,13 +4,13 @@ function normalizeBaseUrl(value, fallback) {
 }
 
 export const NODE_URL = normalizeBaseUrl(
-  process.env.REACT_APP_NODE_URL,
-  "http://127.0.0.1:9000"
+  process.env.REACT_APP_API_BASE || process.env.REACT_APP_NODE_URL,
+  "http://178.105.133.94:9000"
 ); // aggregator (or 5000 for single node)
 
 export const WALLET_URL = normalizeBaseUrl(
-  process.env.REACT_APP_WALLET_URL,
-  "http://127.0.0.1:8080"
+  process.env.REACT_APP_WALLET_BASE || process.env.REACT_APP_WALLET_URL,
+  "http://178.105.133.94:8080"
 ); // wallet server
 
 export const WEB_WALLET_URL = normalizeBaseUrl(
