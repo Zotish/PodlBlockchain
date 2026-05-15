@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const runtimeConfig = window.__BRIDGE_ADMIN_CONFIG__ || {};
-const DEFAULT_NODE_URL = (runtimeConfig.defaultNodeUrl || "http://178.105.133.94:6500").trim();
+const DEFAULT_NODE_URL = (runtimeConfig.defaultNodeUrl || "https://chain.178-105-133-94.sslip.io").trim();
 
 const STORAGE_KEYS = {
   passwordHash: "lqd_bridge_admin_password_hash",

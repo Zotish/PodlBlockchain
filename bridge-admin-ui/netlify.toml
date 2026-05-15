@@ -3,4 +3,4 @@
   publish = "dist"
 
 [build.environment]
-  BRIDGE_ADMIN_NODE_URL = "http://178.105.133.94:6500"
+  BRIDGE_ADMIN_NODE_URL = "https://chain.178-105-133-94.sslip.io"

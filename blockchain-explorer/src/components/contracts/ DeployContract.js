@@ -1,7 +1,7 @@
 // src/components/contract/ContractDeploy.jsx
 import React, { useState } from "react";
 
-const NODE = "http://178.105.133.94:9000";
+const NODE = "https://api.178-105-133-94.sslip.io";
 
 const ContractDeploy = ({ walletAddress, privateKey }) => {
   const [contractType, setContractType] = useState("plugin");
