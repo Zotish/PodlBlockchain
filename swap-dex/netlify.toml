@@ -3,10 +3,10 @@
   publish = "build"
 
 [build.environment]
-  REACT_APP_API_BASE = "http://178.105.133.94:9000"
-  REACT_APP_NODE_URL = "http://178.105.133.94:9000"
-  REACT_APP_WALLET_BASE = "http://178.105.133.94:8080"
-  REACT_APP_WALLET_URL = "http://178.105.133.94:8080"
+  REACT_APP_API_BASE = "https://api.178-105-133-94.sslip.io"
+  REACT_APP_NODE_URL = "https://api.178-105-133-94.sslip.io"
+  REACT_APP_WALLET_BASE = "https://wallet.178-105-133-94.sslip.io"
+  REACT_APP_WALLET_URL = "https://wallet.178-105-133-94.sslip.io"
 
 [[redirects]]
   from = "/*"

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { parseLQD, isAmountParam } from "../../utils/lqdUnits";
 
-const API = "http://178.105.133.94:9000";
+const API = "https://api.178-105-133-94.sslip.io";
 
 export default function ContractWrite({ address, walletAddress, abi, privateKey }) {
   const writes = abi.filter((fn) => fn.type === "function" && fn.stateMutability !== "view");

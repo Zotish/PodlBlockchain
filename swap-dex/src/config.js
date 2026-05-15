@@ -5,12 +5,12 @@ function normalizeBaseUrl(value, fallback) {
 
 export const NODE_URL = normalizeBaseUrl(
   process.env.REACT_APP_API_BASE || process.env.REACT_APP_NODE_URL,
-  "http://178.105.133.94:9000"
+  "https://api.178-105-133-94.sslip.io"
 ); // aggregator (or 5000 for single node)
 
 export const WALLET_URL = normalizeBaseUrl(
   process.env.REACT_APP_WALLET_BASE || process.env.REACT_APP_WALLET_URL,
-  "http://178.105.133.94:8080"
+  "https://wallet.178-105-133-94.sslip.io"
 ); // wallet server
 
 export const WEB_WALLET_URL = normalizeBaseUrl(

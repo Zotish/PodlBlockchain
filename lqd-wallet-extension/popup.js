@@ -1,7 +1,7 @@
 const ext = typeof chrome !== "undefined" ? chrome : browser;
-const PROD_CHAIN_URL = "http://178.105.133.94:6500";
-const PROD_WALLET_URL = "http://178.105.133.94:8080";
-const PROD_AGGREGATOR_URL = "http://178.105.133.94:9000";
+const PROD_CHAIN_URL = "https://chain.178-105-133-94.sslip.io";
+const PROD_WALLET_URL = "https://wallet.178-105-133-94.sslip.io";
+const PROD_AGGREGATOR_URL = "https://api.178-105-133-94.sslip.io";
 const PROD_BRIDGE_ADMIN_URL = "https://delightful-churros-767ded.netlify.app";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
 const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";

@@ -3,9 +3,9 @@
   publish = "build"
 
 [build.environment]
-  REACT_APP_CHAIN_BASE = "http://178.105.133.94:6500"
-  REACT_APP_API_BASE = "http://178.105.133.94:9000"
-  REACT_APP_WALLET_BASE = "http://178.105.133.94:8080"
+  REACT_APP_CHAIN_BASE = "https://chain.178-105-133-94.sslip.io"
+  REACT_APP_API_BASE = "https://api.178-105-133-94.sslip.io"
+  REACT_APP_WALLET_BASE = "https://wallet.178-105-133-94.sslip.io"
 
 [[redirects]]
   from = "/*"
