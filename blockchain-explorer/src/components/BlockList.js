@@ -103,7 +103,9 @@ const BlockList = ({ blocks: propBlocks, showTxHash = true }) => {
 
                 <td>{txs.length}</td>
 
-                <td style={{ whiteSpace: 'nowrap' }}>{formatTimeAgo(block.timestamp)}</td>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  {formatTimeAgo(block.timestamp ?? block.TimeStamp)}
+                </td>
 
                 <td style={{ whiteSpace: 'nowrap' }}>{formatLQD(totalReward)} LQD</td>
                 <td style={{ whiteSpace: 'nowrap' }}>{formatLQD(validatorReward)} LQD</td>

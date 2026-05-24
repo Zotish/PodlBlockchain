@@ -17,7 +17,7 @@ const BlockPage = () => {
   useEffect(() => {
     const fetchBlock = async () => {
       try {
-        const data = await fetchJSON(`/block/${id}`);
+        const data = await fetchJSON(`/block/${id}`, { cacheTtlMs: 2000, timeoutMs: 8000 });
         const result = firstNodeResult(data);
         if (!result) {
           throw new Error('Block not found');
@@ -43,6 +43,7 @@ const BlockPage = () => {
   const timeStamp = block.TimeStamp ?? block.timestamp;
   const gasUsed = block.GasUsed ?? block.gas_used ?? 0;
   const gasLimit = block.GasLimit ?? block.gas_limit ?? 0;
+  const baseFee = block.BaseFee ?? block.base_fee ?? 0;
   const rb = block.RewardBreakdown ?? block.reward_breakdown ?? {};
   const validator = rb.Validator ?? rb.validator ?? '';
   const txs = Array.isArray(block.Transactions) ? block.Transactions : block.transactions || [];
@@ -88,7 +89,7 @@ const BlockPage = () => {
 
         <div className="detail-row">
           <span className="detail-label">Base Fee:</span>
-          <span className="detail-value">{formatLQD(block.BaseFee)} LQD</span>
+          <span className="detail-value">{formatLQD(baseFee)} LQD</span>
         </div>
       </div>
 

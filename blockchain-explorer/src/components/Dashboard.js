@@ -8,7 +8,13 @@ import BlockList from "./BlockList";
 import ValidatorList from "./ValidatorList";
 import { useNavigate } from "react-router-dom";
 import { formatLQD } from "../utils/lqdUnits";
-import { fetchJSON, mergeArrayResults, firstNodeResult } from "../utils/api";
+import {
+  fetchJSON,
+  mergeArrayResults,
+  firstNodeResult,
+  fetchRecentBlocks,
+  transactionsFromBlocks,
+} from "../utils/api";
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -49,39 +55,38 @@ const Dashboard = () => {
     try {
       setError(null);
 
-      const stats = await fetchJSON("/network");
-      setNetworkStats(firstNodeResult(stats));
+      const [statsRes, blocksRes, blockTimeRes, validatorsRes] = await Promise.allSettled([
+        fetchJSON("/network", { cacheTtlMs: 3000, timeoutMs: 8000 }),
+        fetchRecentBlocks(14, { timeoutMs: 8000 }),
+        fetchJSON("/blocktime/latest", { cacheTtlMs: 3000, timeoutMs: 6000 }),
+        fetchJSON("/validators", { cacheTtlMs: 5000, timeoutMs: 8000 }),
+      ]);
 
-      const blocks = await fetchJSON("/fetch_last_n_block?n=14");
-      const mergedBlocks = mergeArrayResults(blocks, "block_number");
-      const sortedBlocks = mergedBlocks.sort(
-        (a, b) => (b.block_number ?? 0) - (a.block_number ?? 0)
-      );
-      setRecentBlocks(sortedBlocks.slice(0, 14));
+      if (statsRes.status === "fulfilled") {
+        setNetworkStats(firstNodeResult(statsRes.value));
+      }
 
-      try {
-        const bt = await fetchJSON(`/blocktime/latest`);
-        const btResult = firstNodeResult(bt);
-        if (btResult && !btResult.error) {
-          setBlockTime(btResult);
-        } else {
-          setBlockTime(null);
-        }
-      } catch (e) {
+      const sortedBlocks = blocksRes.status === "fulfilled" ? blocksRes.value : [];
+      if (sortedBlocks.length > 0) {
+        setRecentBlocks(sortedBlocks);
+      }
+
+      if (blockTimeRes.status === "fulfilled") {
+        const btResult = firstNodeResult(blockTimeRes.value);
+        setBlockTime(btResult && !btResult.error ? btResult : null);
+      } else {
         setBlockTime(null);
       }
 
-      // Validators
       let val = [];
-      try {
-        const v = await fetchJSON(`/validators`);
-        val = mergeArrayResults(v, "address");
-      } catch {}
+      if (validatorsRes.status === "fulfilled") {
+        val = mergeArrayResults(validatorsRes.value, "address");
+      }
       setValidators(val);
 
-      // Recent TXs
-      const txRes = await fetchJSON(`/transactions/recent`);
-      const arr = mergeArrayResults(txRes, "tx_hash");
+      // Avoid the heavy /transactions/recent payload; recent blocks already
+      // include reward/user transactions and render instantly.
+      const arr = transactionsFromBlocks(sortedBlocks, 12);
 
       // Attach type tags
       const withType = arr.map((t) => ({
@@ -99,7 +104,7 @@ const Dashboard = () => {
 
   useEffect(() => {
     fetchData();
-    const id = setInterval(fetchData, 1000);
+    const id = setInterval(fetchData, 5000);
     return () => clearInterval(id);
     // fetchData intentionally re-created with latest dashboard state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
