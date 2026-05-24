@@ -1,7 +1,7 @@
 // TransactionsPage.js
 import React, { useState, useEffect } from 'react';
 import TransactionList from '../components/TransactionList';
-import { fetchRecentTransactions } from '../utils/api';
+import { fetchAllHistoricalTransactions } from '../utils/api';
 
 const PAGE_SIZE = 10;
 
@@ -14,7 +14,7 @@ const TransactionsPage = () => {
   const fetchTransactions = async () => {
     try {
       setError('');
-      const txs = await fetchRecentTransactions(50, { timeoutMs: 8000 });
+      const txs = await fetchAllHistoricalTransactions({ timeoutMs: 15000 });
       setTransactions(txs);
     } catch (err) {
       console.error('Error fetching transactions:', err);
@@ -27,7 +27,7 @@ const TransactionsPage = () => {
 
   useEffect(() => {
     fetchTransactions();
-    const id = setInterval(fetchTransactions, 5000);
+    const id = setInterval(fetchTransactions, 15000);
     return () => clearInterval(id);
   }, []);
 

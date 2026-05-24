@@ -144,6 +144,53 @@ export async function fetchRecentTransactions(limit = 20, options = {}) {
   return transactionsFromBlocks(blocks, limit);
 }
 
+export async function fetchAllHistoricalTransactions(options = {}) {
+  const pageSize = options.pageSize || 200;
+  const firstPage = await fetchJSON(`/fetch_last_n_block?page=1&size=${pageSize}`, {
+    cacheTtlMs: 3000,
+    timeoutMs: 15000,
+    ...options,
+  });
+  const primary = firstNodeResult(firstPage);
+  const firstBlocks = extractBlocks(primary || firstPage);
+  const totalPages = Math.max(
+    1,
+    Number(primary?.total_pages || firstPage?.total_pages || 1)
+  );
+
+  if (totalPages === 1) {
+    return transactionsFromBlocks(firstBlocks, Number.POSITIVE_INFINITY);
+  }
+
+  const pages = [];
+  for (let page = 2; page <= totalPages; page += 1) pages.push(page);
+
+  const remainingBlocks = [];
+  const concurrency = 4;
+  for (let i = 0; i < pages.length; i += concurrency) {
+    const chunk = pages.slice(i, i + concurrency);
+    const results = await Promise.all(
+      chunk.map((page) =>
+        fetchJSON(`/fetch_last_n_block?page=${page}&size=${pageSize}`, {
+          cacheTtlMs: 3000,
+          timeoutMs: 15000,
+          ...options,
+        }).catch(() => null)
+      )
+    );
+    results.forEach((data) => {
+      if (!data) return;
+      const result = firstNodeResult(data);
+      remainingBlocks.push(...extractBlocks(result || data));
+    });
+  }
+
+  return transactionsFromBlocks(
+    [...firstBlocks, ...remainingBlocks],
+    Number.POSITIVE_INFINITY
+  );
+}
+
 /*
 export async function fetchJSON(path, options) {
   const res = await fetch(apiUrl(API_BASE, path), options);
