@@ -15,7 +15,10 @@ const BlocksPage = () => {
   const fetchBlocks = useCallback(async () => {
     try {
       setError('');
-      const data = await fetchJSON(`/fetch_last_n_block?page=${page}&size=${PAGE_SIZE}`);
+      const data = await fetchJSON(`/fetch_last_n_block?page=${page}&size=${PAGE_SIZE}`, {
+        cacheTtlMs: 1500,
+        timeoutMs: 8000,
+      });
       const primary = firstNodeResult(data);
 
       // direct/paginated response: { blocks: [...], total: N, total_pages: M }
@@ -48,7 +51,7 @@ const BlocksPage = () => {
   useEffect(() => {
     setLoading(true);
     fetchBlocks();
-    const id = setInterval(fetchBlocks, 3000);   // slower poll — page changes trigger re-fetch
+    const id = setInterval(fetchBlocks, 5000);   // page changes trigger re-fetch
     return () => clearInterval(id);
   }, [fetchBlocks]);
 

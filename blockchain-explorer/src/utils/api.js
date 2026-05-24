@@ -28,6 +28,123 @@ export function apiUrl(base, path) {
   return `${base}${normalizedPath}`;
 }
 
+const requestCache = new Map();
+const inFlightRequests = new Map();
+
+function requestKey(base, path, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  const body = options.body ? String(options.body) : "";
+  return `${method}:${apiUrl(base, path)}:${body}`;
+}
+
+export async function fetchJSON(path, options = {}) {
+  const {
+    base = API_BASE,
+    cacheTtlMs = 0,
+    timeoutMs = 12000,
+    ...fetchOptions
+  } = options || {};
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  const key = requestKey(base, path, fetchOptions);
+  const now = Date.now();
+
+  if (method === "GET" && cacheTtlMs > 0) {
+    const cached = requestCache.get(key);
+    if (cached && cached.expiresAt > now) return cached.data;
+  }
+
+  if (method === "GET" && inFlightRequests.has(key)) {
+    return inFlightRequests.get(key);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const promise = fetch(apiUrl(base, path), {
+    ...fetchOptions,
+    signal: fetchOptions.signal || controller.signal,
+  }).then(async (res) => {
+    clearTimeout(timer);
+    if (!res.ok) {
+      // Try to read the JSON error body for a friendly message
+      try {
+        const data = await res.json();
+        if (data && data.error) throw new Error(data.error);
+      } catch (inner) {
+        if (inner.message && inner.message !== 'Failed to fetch') throw inner;
+      }
+      throw new Error(`Request failed (${res.status})`);
+    }
+    const data = await res.json();
+    if (method === "GET" && cacheTtlMs > 0) {
+      requestCache.set(key, { data, expiresAt: Date.now() + cacheTtlMs });
+    }
+    return data;
+  }).finally(() => {
+    clearTimeout(timer);
+    inFlightRequests.delete(key);
+  });
+
+  if (method === "GET") inFlightRequests.set(key, promise);
+  return promise;
+}
+
+export async function fetchChainJSON(path, options = {}) {
+  return fetchJSON(path, { ...options, base: CHAIN_BASE });
+}
+
+export async function fetchWalletJSON(path, options = {}) {
+  return fetchJSON(path, { ...options, base: WALLET_BASE });
+}
+
+export function extractBlocks(data) {
+  const primary = firstNodeResult(data);
+  if (Array.isArray(primary)) return primary;
+  if (primary && Array.isArray(primary.blocks)) return primary.blocks;
+  if (data && Array.isArray(data.blocks)) return data.blocks;
+  if (Array.isArray(data)) return data;
+  return mergeArrayResults(data, "block_number");
+}
+
+export function transactionsFromBlocks(blocks, limit = 20) {
+  const seen = new Map();
+  (blocks || []).forEach((block) => {
+    const blockNumber = block.block_number ?? block.BlockNumber;
+    const blockHash = block.current_hash ?? block.CurrentHash;
+    const txs = block.transactions ?? block.Transactions ?? [];
+    if (!Array.isArray(txs)) return;
+    txs.forEach((tx, index) => {
+      const hash = tx.tx_hash || tx.txHash || tx.TxHash || tx.hash;
+      if (!hash) return;
+      seen.set(hash, {
+        ...tx,
+        block_number: tx.block_number ?? blockNumber,
+        block_hash: tx.block_hash ?? blockHash,
+        tx_index: tx.tx_index ?? index,
+        timestamp: tx.timestamp ?? block.timestamp ?? block.TimeStamp,
+      });
+    });
+  });
+  return Array.from(seen.values())
+    .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+    .slice(0, limit);
+}
+
+export async function fetchRecentBlocks(count = 14, options = {}) {
+  const data = await fetchJSON(`/fetch_last_n_block?n=${count}`, {
+    cacheTtlMs: 1500,
+    ...options,
+  });
+  return extractBlocks(data)
+    .sort((a, b) => (b.block_number ?? b.BlockNumber ?? 0) - (a.block_number ?? a.BlockNumber ?? 0))
+    .slice(0, count);
+}
+
+export async function fetchRecentTransactions(limit = 20, options = {}) {
+  const blocks = await fetchRecentBlocks(Math.max(limit, 20), options);
+  return transactionsFromBlocks(blocks, limit);
+}
+
+/*
 export async function fetchJSON(path, options) {
   const res = await fetch(apiUrl(API_BASE, path), options);
   if (!res.ok) {
@@ -42,6 +159,7 @@ export async function fetchJSON(path, options) {
   }
   return res.json();
 }
+*/
 
 export function nodeResults(data) {
   if (Array.isArray(data)) {

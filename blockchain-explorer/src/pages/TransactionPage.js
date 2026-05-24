@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { formatLQD, toBigIntSafe } from '../utils/lqdUnits';
-import { fetchJSON, firstNodeResult } from '../utils/api';
+import { fetchJSON, firstNodeResult, fetchRecentTransactions } from '../utils/api';
 
 const TransactionPage = () => {
   const { hash } = useParams();
@@ -19,7 +19,7 @@ const TransactionPage = () => {
   const fetchTx = async (stopPolling) => {
     try {
       setError('');
-      const data = await fetchJSON(`/tx/${hash}`);
+      const data = await fetchJSON(`/tx/${hash}`, { cacheTtlMs: 2000, timeoutMs: 10000 });
       const result = firstNodeResult(data);
       if (!result || !result.transaction) throw new Error(result?.error || 'Transaction not found');
 
@@ -35,6 +35,24 @@ const TransactionPage = () => {
         stopPolling && stopPolling();
       }
     } catch (e) {
+      try {
+        const recent = await fetchRecentTransactions(80, { timeoutMs: 8000 });
+        const found = recent.find((item) => {
+          const h = item.tx_hash || item.txHash || item.TxHash || item.hash;
+          return String(h || '').toLowerCase() === String(hash || '').toLowerCase();
+        });
+        if (found) {
+          setTx(found);
+          setMeta({
+            source: 'recent-blocks',
+            blockHash: found.block_hash,
+            blockNumber: found.block_number,
+            txIndex: found.tx_index,
+          });
+          stopPolling && stopPolling();
+          return;
+        }
+      } catch {}
       setError(e.message);
       setTx(null);
       setMeta(null);
