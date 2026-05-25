@@ -191,6 +191,21 @@ export async function fetchAllHistoricalTransactions(options = {}) {
   );
 }
 
+export async function fetchHistoricalTransactionPage(page = 1, pageSize = 10, options = {}) {
+  const data = await fetchJSON(`/fetch_last_n_block?page=${page}&size=${pageSize}`, {
+    cacheTtlMs: 1500,
+    timeoutMs: 10000,
+    ...options,
+  });
+  const primary = firstNodeResult(data);
+  const blocks = extractBlocks(primary || data);
+  return {
+    transactions: transactionsFromBlocks(blocks, Number.POSITIVE_INFINITY),
+    total: Number(primary?.total || data?.total || 0),
+    totalPages: Math.max(1, Number(primary?.total_pages || data?.total_pages || 1)),
+  };
+}
+
 /*
 export async function fetchJSON(path, options) {
   const res = await fetch(apiUrl(API_BASE, path), options);
