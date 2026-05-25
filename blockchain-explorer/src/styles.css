@@ -325,18 +325,92 @@ code, pre, .monospace {
 }
 
 /* ─── Navbar ─────────────────────────────────────────────────────────── */
-.navbar {
-  background: var(--bg-surface);
+.explorer-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(17, 24, 39, 0.96);
   border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+}
+
+.explorer-topbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 560px) auto;
+  align-items: center;
+  gap: 18px;
+  min-height: 44px;
+  padding: 0 28px;
+  border-bottom: 1px solid rgba(37, 53, 88, 0.5);
+}
+
+.explorer-topbar-stats,
+.explorer-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.explorer-topbar-stats strong {
+  color: var(--primary-light);
+  font-weight: 600;
+}
+
+.navbar-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+}
+
+.navbar-search input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  box-shadow: none;
+}
+
+.navbar-search input:focus {
+  box-shadow: none;
+}
+
+.explorer-topbar-actions {
+  justify-content: flex-end;
+}
+
+.explorer-topbar-actions span {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(13, 18, 32, 0.72);
+  color: var(--text-secondary);
+  font-weight: 700;
+}
+
+.navbar {
+  background: transparent;
   padding: 0 28px;
   display: flex;
   align-items: center;
   gap: 8px;
   height: 60px;
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  backdrop-filter: blur(8px);
+  position: relative;
 }
 
 .navbar-brand {
@@ -397,6 +471,82 @@ code, pre, .monospace {
 }
 
 .navbar-links a.active {
+  color: var(--primary-light);
+  background: var(--primary-subtle);
+}
+
+.navbar-mega-groups {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 10px;
+}
+
+.navbar-dropdown {
+  position: relative;
+}
+
+.navbar-dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 34px;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 0.855rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.navbar-dropdown:hover .navbar-dropdown-trigger,
+.navbar-dropdown-trigger:hover {
+  color: var(--text-primary);
+  background: var(--bg-badge);
+}
+
+.navbar-dropdown-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 9px);
+  left: 0;
+  min-width: 220px;
+  padding: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: 130;
+}
+
+.navbar-dropdown-menu::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -10px;
+  height: 10px;
+}
+
+.navbar-dropdown:hover .navbar-dropdown-menu,
+.navbar-dropdown:focus-within .navbar-dropdown-menu {
+  display: grid;
+  gap: 2px;
+}
+
+.navbar-dropdown-menu a {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+
+.navbar-dropdown-menu a:hover {
   color: var(--primary-light);
   background: var(--primary-subtle);
 }
@@ -1238,6 +1388,16 @@ pre {
   .navbar {
     padding: 0 18px;
   }
+  .explorer-topbar {
+    grid-template-columns: 1fr minmax(260px, 440px);
+    padding: 0 18px;
+  }
+  .explorer-topbar-actions {
+    display: none;
+  }
+  .navbar-mega-groups {
+    display: none;
+  }
   .site-footer-inner {
     grid-template-columns: 1fr 1fr;
   }
@@ -1274,6 +1434,25 @@ pre {
 
 /* ── Mobile (≤767px) — hamburger kicks in ── */
 @media (max-width: 767px) {
+  .explorer-header {
+    position: sticky;
+  }
+
+  .explorer-topbar {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 9px 14px;
+  }
+
+  .explorer-topbar-stats {
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 0.72rem;
+  }
+
+  .navbar-search {
+    min-height: 38px;
+  }
 
   /* Navbar layout */
   .navbar {
@@ -1319,6 +1498,32 @@ pre {
     font-size: 0.9rem;
     border-radius: var(--radius-sm);
     width: 100%;
+  }
+
+  .navbar-mega-groups {
+    display: grid;
+    width: 100%;
+    margin: 8px 0 0;
+    gap: 4px;
+  }
+
+  .navbar-dropdown-trigger {
+    width: 100%;
+    justify-content: space-between;
+    padding: 10px 14px;
+  }
+
+  .navbar-dropdown-menu {
+    position: static;
+    display: grid;
+    min-width: 0;
+    margin: 2px 0 6px;
+    box-shadow: none;
+    background: var(--bg-input);
+  }
+
+  .navbar-dropdown-menu::before {
+    display: none;
   }
 
   /* mainnet pill inside mobile menu */
