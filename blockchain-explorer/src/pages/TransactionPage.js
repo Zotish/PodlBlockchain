@@ -131,6 +131,21 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
 
   const totalReward = validatorReward + participantReward + totalLP;
 
+  const cardStyle = {
+    border: '1px solid var(--border)',
+    borderRadius: 12,
+    padding: 16,
+    background: 'var(--bg-card)',
+    color: 'var(--text-primary)',
+    marginBottom: 16,
+  };
+  const labelStyle = { fontSize: 13, color: 'var(--text-secondary)' };
+  const monoStyle = {
+    fontFamily: 'monospace',
+    color: 'var(--text-primary)',
+    wordBreak: 'break-all',
+  };
+
   return (
     <div style={{ maxWidth: 960, margin: '0 auto', padding: 16 }}>
       <div style={{ marginBottom: 16 }}>
@@ -143,11 +158,11 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
       {/* ======================== */}
       {/* OVERVIEW CARD            */}
       {/* ======================== */}
-      <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 16, background: '#fff', marginBottom: 16 }}>
+      <div style={cardStyle}>
         <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 13, color: '#6b7280' }}>Transaction Hash:</div>
+          <div style={labelStyle}>Transaction Hash:</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontFamily: 'monospace' }}>{tx.tx_hash}</span>
+            <span style={monoStyle}>{tx.tx_hash}</span>
             <div style={{
               fontSize: 14,
               background: tx.status === 'success' || tx.status === "succsess" ? '#16a34a'
@@ -167,7 +182,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
           gap: 16,
         }}>
           <div>
-            <div style={{ fontSize: 13, color: '#6b7280' }}>Block:</div>
+            <div style={labelStyle}>Block:</div>
             <div style={{ fontSize: 14 }}>
               {meta?.blockNumber != null ? (
                 <>
@@ -175,7 +190,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
                     #{meta.blockNumber}
                   </Link>
                   {typeof meta.txIndex === 'number' && (
-                    <span style={{ fontSize: 12, color: '#6b7280' }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                       {' '} (Position {meta.txIndex})
                     </span>
                   )}
@@ -185,7 +200,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
           </div>
 
           <div>
-            <div style={{ fontSize: 13, color: '#6b7280' }}>Timestamp:</div>
+            <div style={labelStyle}>Timestamp:</div>
             <div style={{ fontSize: 14 }}>{timestamp}</div>
           </div>
         </div>
@@ -194,18 +209,18 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
       {/* ======================== */}
       {/* FROM / TO                */}
       {/* ======================== */}
-      <div style={{ border: '1px solid #e5e7eb', padding: 16, borderRadius: 12, background: '#fff', marginBottom: 16 }}>
+      <div style={cardStyle}>
         <div style={{ marginBottom: 12 }}>
           <strong>From</strong>
-          <div style={{ fontFamily: 'monospace' }}>{tx.from}</div>
+          <div style={monoStyle}>{tx.from}</div>
         </div>
 
         <div>
           <strong>To</strong>
-          <div style={{ fontFamily: 'monospace' }}>
+          <div style={monoStyle}>
             {tx.to}
             {tx.is_contract && (
-              <span style={{ marginLeft: 8, fontSize: 12, color: '#6b7280' }}>
+              <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--text-muted)' }}>
                 (Contract)
               </span>
             )}
@@ -216,13 +231,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
       {/* ======================== */}
       {/* VALUE + GAS              */}
       {/* ======================== */}
-      <div style={{
-        border: '1px solid #e5e7eb',
-        borderRadius: 12,
-        padding: 16,
-        background: '#fff',
-        marginBottom: 16
-      }}>
+      <div style={cardStyle}>
         <h3 style={{ marginBottom: 12 }}>Value & Gas</h3>
 
         <div style={{
@@ -243,13 +252,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
       {/* ⭐ REWARD BREAKDOWN      */}
       {/* ======================== */}
       {rb && (
-        <div style={{
-          border: '1px solid #e5e7eb',
-          borderRadius: 12,
-          padding: 16,
-          background: '#fff',
-          marginBottom: 16
-        }}>
+        <div style={cardStyle}>
           <h3 style={{ marginTop: 0 }}>Reward Breakdown</h3>
 
           <p><strong>Total Reward:</strong> {formatLQD(totalReward)} LQD</p>
@@ -270,12 +273,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
       {/* ======================== */}
       {/* INPUT DATA               */}
       {/* ======================== */}
-      <div style={{
-        border: '1px solid #e5e7eb',
-        padding: 16,
-        borderRadius: 12,
-        background: '#fff'
-      }}>
+      <div style={{ ...cardStyle, marginBottom: 0 }}>
         <h3>Input Data</h3>
 
         {tx.function ? (
@@ -290,7 +288,7 @@ const gasPrice = (tx.gas_price ?? tx.GasPrice ?? 0);
             )}
           </div>
         ) : (
-          <div style={{ color: '#6b7280' }}>No decoded function data.</div>
+          <div style={{ color: 'var(--text-secondary)' }}>No decoded function data.</div>
         )}
       </div>
     </div>
