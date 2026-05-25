@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 
 const NAV_ITEMS = [
   { to: '/',             label: 'Dashboard'  },
@@ -73,30 +73,12 @@ const NAV_GROUPS = [
 
 const Navbar = () => {
   const location  = useLocation();
-  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState('');
 
   const isActive = (to) =>
     to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
 
   const close = () => setOpen(false);
-
-  const handleSearch = (e) => {
-    e.preventDefault();
-    const q = search.trim();
-    if (!q) return;
-
-    if (/^\d+$/.test(q.replace(/^#/, ''))) {
-      navigate(`/blocks/${q.replace(/^#/, '')}`);
-    } else if (q.startsWith('0x') && q.length === 42) {
-      navigate(`/address/${q}`);
-    } else if (q.startsWith('0x')) {
-      navigate(`/tx/${q}`);
-    }
-
-    close();
-  };
 
   return (
     <header className="explorer-header">
@@ -105,15 +87,6 @@ const Navbar = () => {
           <span>LQD Price: <strong>Live Testnet</strong></span>
           <span>Gas: <strong>Dynamic</strong></span>
         </div>
-        <form className="navbar-search" onSubmit={handleSearch}>
-          <span aria-hidden="true">⌕</span>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by Address / Txn Hash / Block / Token"
-            aria-label="Search explorer"
-          />
-        </form>
         <div className="explorer-topbar-actions" aria-label="Explorer tools">
           <span title="API">/</span>
           <span title="Settings">⚙</span>

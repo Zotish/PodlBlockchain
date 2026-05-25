@@ -336,7 +336,7 @@ code, pre, .monospace {
 
 .explorer-topbar {
   display: grid;
-  grid-template-columns: minmax(220px, 0.8fr) minmax(280px, 560px) auto;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 18px;
   min-height: 44px;
@@ -357,33 +357,6 @@ code, pre, .monospace {
 .explorer-topbar-stats strong {
   color: var(--primary-light);
   font-weight: 600;
-}
-
-.navbar-search {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  min-height: 34px;
-  padding: 0 12px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-muted);
-}
-
-.navbar-search input {
-  width: 100%;
-  border: none;
-  background: transparent;
-  padding: 0;
-  color: var(--text-primary);
-  font-size: 0.82rem;
-  box-shadow: none;
-}
-
-.navbar-search input:focus {
-  box-shadow: none;
 }
 
 .explorer-topbar-actions {
@@ -1389,7 +1362,7 @@ pre {
     padding: 0 18px;
   }
   .explorer-topbar {
-    grid-template-columns: 1fr minmax(260px, 440px);
+    grid-template-columns: 1fr;
     padding: 0 18px;
   }
   .explorer-topbar-actions {
@@ -1448,10 +1421,6 @@ pre {
     justify-content: space-between;
     gap: 8px;
     font-size: 0.72rem;
-  }
-
-  .navbar-search {
-    min-height: 38px;
   }
 
   /* Navbar layout */
