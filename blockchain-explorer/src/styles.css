@@ -214,6 +214,40 @@ code, pre, .monospace {
   font-weight: 600;
 }
 
+.footer-socials {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.footer-socials a {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 12px;
+  background: rgba(13, 18, 32, 0.72);
+  color: var(--text-secondary);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+  transition: transform var(--transition), border-color var(--transition), background var(--transition), color var(--transition);
+}
+
+.footer-socials a:hover {
+  transform: translateY(-2px);
+  border-color: rgba(96, 165, 250, 0.42);
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.18), rgba(167, 139, 250, 0.14));
+  color: var(--text-primary);
+}
+
+.footer-socials svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
 .footer-section h4 {
   color: var(--text-primary);
   font-size: 0.8rem;
