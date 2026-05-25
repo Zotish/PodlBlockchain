@@ -4,7 +4,6 @@ import { Link, useLocation } from 'react-router-dom';
 const NAV_ITEMS = [
   { to: '/',             label: 'Dashboard'  },
   { to: '/blocks',       label: 'Blocks'     },
-  { to: '/transactions', label: 'Txns'       },
   { to: '/validators',   label: 'Validators' },
   { to: '/liquidity',    label: 'Liquidity'  },
   { to: '/pools',        label: 'Pools'      },
