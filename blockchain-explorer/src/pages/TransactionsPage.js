@@ -1,7 +1,7 @@
 // TransactionsPage.js
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import TransactionList from '../components/TransactionList';
-import { fetchAllHistoricalTransactions } from '../utils/api';
+import { fetchHistoricalTransactionPage } from '../utils/api';
 
 const PAGE_SIZE = 10;
 
@@ -9,13 +9,17 @@ const TransactionsPage = () => {
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading]           = useState(true);
   const [page, setPage]                 = useState(1);
+  const [totalPages, setTotalPages]     = useState(1);
+  const [total, setTotal]               = useState(0);
   const [error, setError]               = useState('');
 
-  const fetchTransactions = async () => {
+  const fetchTransactions = useCallback(async () => {
     try {
       setError('');
-      const txs = await fetchAllHistoricalTransactions({ timeoutMs: 15000 });
-      setTransactions(txs);
+      const result = await fetchHistoricalTransactionPage(page, PAGE_SIZE, { timeoutMs: 10000 });
+      setTransactions(result.transactions);
+      setTotal(result.total);
+      setTotalPages(result.totalPages);
     } catch (err) {
       console.error('Error fetching transactions:', err);
       setError(String(err.message || err));
@@ -23,19 +27,19 @@ const TransactionsPage = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [page]);
 
   useEffect(() => {
+    setLoading(true);
     fetchTransactions();
     const id = setInterval(fetchTransactions, 15000);
     return () => clearInterval(id);
-  }, []);
+  }, [fetchTransactions]);
 
   // ── client-side pagination ──────────────────────────────────────────
-  const totalPages  = Math.max(1, Math.ceil(transactions.length / PAGE_SIZE));
   const safePage    = Math.min(page, totalPages);          // clamp if data shrinks
   const startIdx    = (safePage - 1) * PAGE_SIZE;
-  const pageTxs     = transactions.slice(startIdx, startIdx + PAGE_SIZE);
+  const pageTxs     = transactions;
 
   const goTo = (p) => setPage(Math.max(1, Math.min(totalPages, p)));
 
@@ -57,12 +61,12 @@ const TransactionsPage = () => {
         letterSpacing: '-0.3px'
       }}>
         Transactions
-        {transactions.length > 0 && (
+        {total > 0 && (
           <span style={{
             marginLeft: 12, fontSize: '0.8rem', fontWeight: 500,
             color: 'var(--text-muted)'
           }}>
-            {transactions.length.toLocaleString()} total
+            {total.toLocaleString()} blocks scanned
           </span>
         )}
       </h2>
@@ -79,8 +83,9 @@ const TransactionsPage = () => {
         totalPages={totalPages}
         pageNumbers={pageNumbers()}
         startIdx={startIdx}
-        endIdx={Math.min(startIdx + PAGE_SIZE, transactions.length)}
-        total={transactions.length}
+        endIdx={Math.min(startIdx + PAGE_SIZE, total)}
+        total={total}
+        label="block range"
         goTo={goTo}
       />
 
@@ -93,8 +98,9 @@ const TransactionsPage = () => {
           totalPages={totalPages}
           pageNumbers={pageNumbers()}
           startIdx={startIdx}
-          endIdx={Math.min(startIdx + PAGE_SIZE, transactions.length)}
-          total={transactions.length}
+          endIdx={Math.min(startIdx + PAGE_SIZE, total)}
+          total={total}
+          label="block range"
           goTo={goTo}
         />
       )}
@@ -105,15 +111,15 @@ const TransactionsPage = () => {
 /* ══════════════════════════════════════════════
    Reusable pagination bar
 ══════════════════════════════════════════════ */
-const PaginationBar = ({ page, totalPages, pageNumbers, startIdx, endIdx, total, goTo }) => (
+const PaginationBar = ({ page, totalPages, pageNumbers, startIdx, endIdx, total, label, goTo }) => (
   <div style={{
     display: 'flex', alignItems: 'center', gap: 6,
     margin: '12px 0 16px', flexWrap: 'wrap',
   }}>
     {/* showing info */}
     <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginRight: 8 }}>
-      Showing <strong style={{ color: 'var(--text-secondary)' }}>{startIdx + 1}–{endIdx}</strong> of{' '}
-      <strong style={{ color: 'var(--text-secondary)' }}>{total}</strong> transactions
+      Showing <strong style={{ color: 'var(--text-secondary)' }}>{total > 0 ? startIdx + 1 : 0}–{endIdx}</strong> of{' '}
+      <strong style={{ color: 'var(--text-secondary)' }}>{total.toLocaleString()}</strong> {label}
     </span>
 
     {/* ← First */}
