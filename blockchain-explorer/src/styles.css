@@ -594,6 +594,83 @@ code, pre, .monospace {
   gap: 10px;
 }
 
+/* ─── Explorer Trackers ─────────────────────────────────────────────── */
+.tracker-page {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.tracker-header {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+}
+
+.tracker-header p {
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.tracker-header .page-title {
+  margin-bottom: var(--space-2);
+}
+
+.tracker-header .page-title span {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.tracker-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.tracker-stat-grid div {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  padding: var(--space-4);
+}
+
+.tracker-stat-grid strong {
+  color: var(--text-primary);
+  display: block;
+  font-size: 1.15rem;
+  margin-top: 6px;
+}
+
+.tracker-table-wrap {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow-x: auto;
+}
+
+.tracker-table {
+  min-width: 760px;
+}
+
+.tracker-table th {
+  background: var(--bg-table-head);
+}
+
+.tracker-table td small {
+  color: var(--text-muted);
+  display: block;
+  margin-top: 2px;
+}
+
+.tracker-empty {
+  color: var(--text-muted);
+  padding: var(--space-8);
+  text-align: center;
+}
+
 /* ─── Cards ──────────────────────────────────────────────────────────── */
 .card {
   background: var(--bg-card);
