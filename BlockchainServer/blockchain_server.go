@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/big"
 	"net/http"
 	"os"
@@ -1252,6 +1253,123 @@ func max(a, b int) int {
 	return b
 }
 
+func transactionListItem(tx *blockchaincomponent.Transaction, source string, block *blockchaincomponent.Block, txIndex int) map[string]interface{} {
+	item := make(map[string]interface{})
+	if tx == nil {
+		return item
+	}
+	if raw, err := json.Marshal(tx); err == nil {
+		_ = json.Unmarshal(raw, &item)
+	}
+	item["source"] = source
+	if block != nil {
+		item["block_hash"] = block.CurrentHash
+		item["block_number"] = block.BlockNumber
+		item["tx_index"] = txIndex
+		item["reward_breakdown"] = block.RewardBreakdown
+		if reward, ok := block.RewardBreakdown.ParticipantRewards[tx.TxHash]; ok {
+			item["participant_reward"] = reward
+		}
+	}
+	return item
+}
+
+func (bcs *BlockchainServer) GetTransactions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	q := r.URL.Query()
+	page := 1
+	pageSize := 50
+	if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
+		page = p
+	}
+	sizeParam := q.Get("size")
+	if sizeParam == "" {
+		sizeParam = q.Get("page_size")
+	}
+	if ps, err := strconv.Atoi(sizeParam); err == nil && ps > 0 {
+		pageSize = ps
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	seen := make(map[string]struct{})
+	all := make([]map[string]interface{}, 0)
+
+	includePending := !strings.EqualFold(q.Get("include_pending"), "false")
+	if includePending {
+		for _, tx := range bcs.BlockchainPtr.Transaction_pool {
+			if tx == nil || strings.TrimSpace(tx.TxHash) == "" {
+				continue
+			}
+			hash := strings.ToLower(strings.TrimSpace(tx.TxHash))
+			if _, ok := seen[hash]; ok {
+				continue
+			}
+			seen[hash] = struct{}{}
+			all = append(all, transactionListItem(tx, "mempool", nil, -1))
+		}
+	}
+
+	for i := len(bcs.BlockchainPtr.Blocks) - 1; i >= 0; i-- {
+		blk := bcs.BlockchainPtr.Blocks[i]
+		if blk == nil {
+			continue
+		}
+		for idx := len(blk.Transactions) - 1; idx >= 0; idx-- {
+			tx := blk.Transactions[idx]
+			if tx == nil || strings.TrimSpace(tx.TxHash) == "" {
+				continue
+			}
+			hash := strings.ToLower(strings.TrimSpace(tx.TxHash))
+			if _, ok := seen[hash]; ok {
+				continue
+			}
+			seen[hash] = struct{}{}
+			all = append(all, transactionListItem(tx, "block", blk, idx))
+		}
+	}
+
+	total := len(all)
+	totalPages := 1
+	if total > 0 {
+		totalPages = int(math.Ceil(float64(total) / float64(pageSize)))
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"transactions": all[start:end],
+		"total":        total,
+		"page":         page,
+		"page_size":    pageSize,
+		"total_pages":  totalPages,
+	})
+}
+
 func (bcs *BlockchainServer) LiquidityLock(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
@@ -1937,12 +2055,15 @@ func (bcs *BlockchainServer) GetTransactionByHash(w http.ResponseWriter, r *http
 		blk := bcs.BlockchainPtr.Blocks[i]
 		for idx, tx := range blk.Transactions {
 			if strings.ToLower(tx.TxHash) == hash {
+				item := transactionListItem(tx, "block", blk, idx)
 				resp := map[string]interface{}{
-					"transaction":  tx,
-					"source":       "block",
-					"block_hash":   blk.CurrentHash,
-					"block_number": blk.BlockNumber,
-					"tx_index":     idx,
+					"transaction":        item,
+					"source":             "block",
+					"block_hash":         blk.CurrentHash,
+					"block_number":       blk.BlockNumber,
+					"tx_index":           idx,
+					"reward_breakdown":   blk.RewardBreakdown,
+					"participant_reward": item["participant_reward"],
 				}
 				json.NewEncoder(w).Encode(resp)
 				return
@@ -3777,6 +3898,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/faucet", b.limiter.middleware(b.Faucet))
 	http.HandleFunc("/block/{id}", b.GetBlock)
 	http.HandleFunc("/validators", b.GetValidators)
+	http.HandleFunc("/transactions", b.GetTransactions)
 	http.HandleFunc("/transactions/recent", b.GetRecentTransactions)
 	http.HandleFunc("/liquidity/lock", b.limiter.middleware(maxBytesMiddleware(b.LiquidityLock, maxBodySize)))
 	http.HandleFunc("/liquidity/unlock", b.limiter.middleware(maxBytesMiddleware(b.LiquidityUnlock, maxBodySize)))

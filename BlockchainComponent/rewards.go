@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -279,7 +280,7 @@ func (bc *Blockchain_struct) CalculateRewardForValidator(totalRewards uint64) ma
 //  … (reaches 1 B supply ~year 27)
 
 const (
-	BlocksPerHalving  = uint64(63_115_200)   // 4 years at 2 s/block
+	BlocksPerHalving  = uint64(63_115_200)    // 4 years at 2 s/block
 	GenesisRewardSats = uint64(2_000_000_000) // 20 LQD in satoshis
 )
 
@@ -337,12 +338,12 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 	total := new(big.Int).Add(emission, gasReward)
 
 	// ── 2. Slice out each category ────────────────────────────────────────────
-	proposerShare    := pctAmount(total, 40) // 40 % → block winner
-	lpCurveShare     := pctAmount(total, 30) // 30 % → all LPs  (was 35%, -5% treasury)
-	lpLongLockShare  := pctAmount(total, 5)  //  5 % → long-lock LPs
-	otherValShare    := pctAmount(total, 12) // 12 % → other validators (was 18%, -6% treasury)
-	txPartShare      := pctAmount(total, 2)  //  2 % → TX senders
-	treasuryShare    := pctAmount(total, 11) // 11 % → treasury (5+6)
+	proposerShare := pctAmount(total, 40)  // 40 % → block winner
+	lpCurveShare := pctAmount(total, 30)   // 30 % → all LPs  (was 35%, -5% treasury)
+	lpLongLockShare := pctAmount(total, 5) //  5 % → long-lock LPs
+	otherValShare := pctAmount(total, 12)  // 12 % → other validators (was 18%, -6% treasury)
+	txPartShare := pctAmount(total, 2)     //  2 % → TX senders
+	treasuryShare := pctAmount(total, 11)  // 11 % → treasury (5+6)
 
 	// ── 3. Proposer (40 %) ────────────────────────────────────────────────────
 	if proposerShare.Sign() > 0 {
@@ -412,13 +413,19 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 	if len(txs) > 0 && txPartShare.Sign() > 0 {
 		totalTxWeight := 0.0
 		for _, tx := range txs {
+			if tx == nil {
+				continue
+			}
 			totalTxWeight += math.Sqrt(AmountToFloat64(tx.Value) + 1)
 		}
 		if totalTxWeight > 0 {
 			for _, tx := range txs {
+				if tx == nil {
+					continue
+				}
 				portion := portionFromWeight(txPartShare, math.Sqrt(AmountToFloat64(tx.Value)+1), totalTxWeight)
 				addStringAmount(breakdown.ParticipantRewards, tx.TxHash, portion)
-				bc.AddParticipantReward(tx.From, portion)
+				bc.AddParticipantReward(rewardParticipantAddress(tx), portion)
 			}
 		}
 	}
@@ -429,6 +436,19 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 	}
 
 	return breakdown
+}
+
+func rewardParticipantAddress(tx *Transaction) string {
+	if tx == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(tx.Type)) {
+	case "lp_reward", "claim_reward", "liquidity_claim":
+		if strings.TrimSpace(tx.To) != "" {
+			return tx.To
+		}
+	}
+	return tx.From
 }
 
 func pctAmount(amount *big.Int, pct int64) *big.Int {
