@@ -1,7 +1,7 @@
 /* global BigInt */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchJSON, firstNodeResult, mergeArrayResults } from '../utils/api';
+import { CHAIN_BASE, fetchJSON, firstNodeResult, mergeArrayResults } from '../utils/api';
 import { buildSignedClaimPayload, connectExtensionWallet, shortWalletAddress } from '../utils/claimWallet';
 import { formatLQD } from '../utils/lqdUnits';
 
@@ -157,6 +157,7 @@ export default function RewardsPage() {
       setClaimAddress(payload.address);
       setClaimStatus('LQD Wallet approved. Submitting claim request...');
       const res = await fetchJSON('/liquidity/claim', {
+        base: CHAIN_BASE,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
