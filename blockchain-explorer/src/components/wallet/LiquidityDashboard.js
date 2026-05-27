@@ -2,9 +2,9 @@
 import React, { useEffect, useState } from "react";
 import './Wallet.css'
 import { formatLQD, parseLQD } from "./lqdUnits";
-import { API_BASE, fetchJSON, firstNodeResult } from "../../utils/api";
+import { CHAIN_BASE, fetchJSON, firstNodeResult } from "../../utils/api";
 
-const API = API_BASE;
+const API = CHAIN_BASE;
 
 export default function LiquidityDashboard({ address }) {
   const [lp, setLP] = useState(null);
@@ -16,7 +16,7 @@ export default function LiquidityDashboard({ address }) {
 
   const fetchInfo = async () => {
     try {
-      const data = await fetchJSON(`/liquidity/info?address=${address}`);
+      const data = await fetchJSON(`/liquidity/info?address=${address}`, { base: CHAIN_BASE });
       const result = firstNodeResult(data);
       if (!result || result.exists === false) {
         setLP(null);

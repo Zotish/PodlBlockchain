@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { formatLQD } from "../utils/lqdUnits";
 import { buildSignedClaimPayload, connectExtensionWallet, shortWalletAddress } from "../utils/claimWallet";
-import { fetchJSON, firstNodeResult, mergeArrayResults } from "../utils/api";
+import { CHAIN_BASE, fetchJSON, firstNodeResult, mergeArrayResults } from "../utils/api";
 
 const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
 const TARGET_BLOCK_SECONDS = 2;
@@ -128,6 +128,7 @@ export default function LiquidityPage() {
       setClaimAddress(payload.address);
       setClaimMessage("LQD Wallet approved. Submitting claim request...");
       const result = await fetchJSON("/liquidity/claim", {
+        base: CHAIN_BASE,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
