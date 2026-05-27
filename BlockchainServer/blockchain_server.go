@@ -2266,6 +2266,62 @@ func (bcs *BlockchainServer) UnstakeLiquidity(w http.ResponseWriter, r *http.Req
 	io.WriteString(w, `{"status":"unstake_started"}`)
 }
 
+func (bcs *BlockchainServer) ClaimLiquidityRewards(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Address       string `json:"address"`
+		WalletAddress string `json:"wallet_address"`
+		Provider      string `json:"provider"`
+	}
+
+	body, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	req.Address = strings.TrimSpace(req.Address)
+	req.WalletAddress = strings.TrimSpace(req.WalletAddress)
+	if req.Address == "" {
+		req.Address = req.WalletAddress
+	}
+	if !wallet.ValidateAddress(req.Address) {
+		http.Error(w, `{"error":"invalid address"}`, http.StatusBadRequest)
+		return
+	}
+	if req.WalletAddress != "" && !strings.EqualFold(req.Address, req.WalletAddress) {
+		http.Error(w, `{"error":"wallet address does not match liquidity provider address"}`, http.StatusForbidden)
+		return
+	}
+
+	claimed, txHash, err := bcs.BlockchainPtr.ClaimLPRewards(req.Address)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":          "claimed",
+		"address":         req.Address,
+		"claimed":         claimed.String(),
+		"tx_hash":         txHash,
+		"pending_rewards": "0",
+		"provider":        req.Provider,
+	})
+}
+
 func (bcs *BlockchainServer) GetLiquidityInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
@@ -3753,6 +3809,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/address/{address}/transactions", b.GetAddressTransactions)
 	http.HandleFunc("/liquidity/provide", b.limiter.middleware(maxBytesMiddleware(b.ProvideLiquidity, maxBodySize)))
 	http.HandleFunc("/liquidity/unstake", b.limiter.middleware(maxBytesMiddleware(b.UnstakeLiquidity, maxBodySize)))
+	http.HandleFunc("/liquidity/claim", b.limiter.middleware(maxBytesMiddleware(b.ClaimLiquidityRewards, maxBodySize)))
 	http.HandleFunc("/liquidity/info", b.GetLiquidityInfo)
 	http.HandleFunc("/liquidity/all", b.GetAllLiquidityProviders)
 	http.HandleFunc("/liquidity/pools", b.GetPoolLiquidity)

@@ -137,7 +137,7 @@ export default function RewardsPage() {
       const account = await connectExtensionWallet();
       setConnectedWallet(account);
       if (!claimAddress.trim()) setClaimAddress(account);
-      setClaimStatus(`Connected ${shortWalletAddress(account)}. Claim will require a wallet signature.`);
+      setClaimStatus(`Connected ${shortWalletAddress(account)} with LQD Wallet. Claim will require extension approval.`);
     } catch (err) {
       setClaimStatus(err.message || 'Wallet connection failed.');
     }
@@ -150,12 +150,12 @@ export default function RewardsPage() {
       return;
     }
     setClaiming(true);
-    setClaimStatus('Waiting for wallet signature...');
+    setClaimStatus('Waiting for LQD Wallet approval...');
     try {
       const payload = await buildSignedClaimPayload(target);
       setConnectedWallet(payload.wallet_address);
       setClaimAddress(payload.address);
-      setClaimStatus('Signature accepted. Submitting signed claim request...');
+      setClaimStatus('LQD Wallet approved. Submitting claim request...');
       const res = await fetchJSON('/liquidity/claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -166,7 +166,7 @@ export default function RewardsPage() {
     } catch (err) {
       const message = err.message || '';
       setClaimStatus(message.includes('Request failed')
-        ? 'Signed claim proof was created, but manual claim endpoint is not active on this node yet. Rewards remain tracked and auto-sync during reward settlement/unstake flows.'
+        ? 'Claim endpoint is not active on this node yet. Rewards remain tracked until the node is upgraded.'
         : message);
     } finally {
       setClaiming(false);

@@ -6,12 +6,26 @@ export const shortWalletAddress = (value = '') => {
   return `${text.slice(0, 6)}...${text.slice(-4)}`;
 };
 
-export async function connectExtensionWallet() {
-  if (!window.ethereum) {
+const getLQDProvider = () => {
+  if (typeof window === 'undefined' || !window.lqd) {
     throw new Error('LQD extension wallet is not installed or not available in this browser.');
   }
-  const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-  const account = accounts?.[0];
+  return window.lqd;
+};
+
+const extractAccount = (result) => {
+  if (Array.isArray(result)) return result[0] || '';
+  if (Array.isArray(result?.accounts)) return result.accounts[0] || '';
+  if (Array.isArray(result?.result)) return result.result[0] || '';
+  if (typeof result?.address === 'string') return result.address;
+  if (typeof result === 'string') return result;
+  return '';
+};
+
+export async function connectExtensionWallet() {
+  const provider = getLQDProvider();
+  const accounts = await provider.request({ method: 'lqd_connect' });
+  const account = extractAccount(accounts);
   if (!account) throw new Error('No wallet account returned by extension.');
   return account;
 }
@@ -35,17 +49,13 @@ export async function buildSignedClaimPayload(address) {
     'Purpose: Claim or sync liquidity provider rewards',
   ].join('\n');
 
-  const signature = await window.ethereum.request({
-    method: 'personal_sign',
-    params: [message, walletAddress],
-  });
-
   return {
     address: target,
     wallet_address: walletAddress,
     message,
-    signature,
+    signature: '',
     issued_at: issuedAt,
     nonce,
+    provider: 'window.lqd',
   };
 }

@@ -107,7 +107,7 @@ export default function LiquidityPage() {
       const account = await connectExtensionWallet();
       setConnectedWallet(account);
       if (!claimAddress.trim()) setClaimAddress(account);
-      setClaimMessage(`Connected ${shortWalletAddress(account)}. Claim will require a wallet signature.`);
+      setClaimMessage(`Connected ${shortWalletAddress(account)} with LQD Wallet. Claim will require extension approval.`);
     } catch (err) {
       setClaimMessage(err.message || "Wallet connection failed.");
     }
@@ -121,12 +121,12 @@ export default function LiquidityPage() {
     }
     setClaiming(true);
     setClaimAddress(target);
-    setClaimMessage("Waiting for wallet signature...");
+    setClaimMessage("Waiting for LQD Wallet approval...");
     try {
       const payload = await buildSignedClaimPayload(target);
       setConnectedWallet(payload.wallet_address);
       setClaimAddress(payload.address);
-      setClaimMessage("Signature accepted. Submitting signed claim request...");
+      setClaimMessage("LQD Wallet approved. Submitting claim request...");
       const result = await fetchJSON("/liquidity/claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -137,7 +137,7 @@ export default function LiquidityPage() {
     } catch (err) {
       const message = err.message || "";
       setClaimMessage(message.includes("Request failed")
-        ? "Signed claim proof was created, but manual claim endpoint is not active on this node. Pending LP rewards remain visible and auto-sync during reward settlement/unstake flows."
+        ? "Claim endpoint is not active on this node. Pending LP rewards remain visible until the node is upgraded."
         : message);
     } finally {
       setClaiming(false);
