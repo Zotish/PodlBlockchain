@@ -1516,6 +1516,27 @@ func (bc *Blockchain_struct) ProvideLiquidity(address string, amount *big.Int, l
 	return nil
 }
 
+func (bc *Blockchain_struct) ClaimLPRewards(address string) (*big.Int, string, error) {
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+
+	lp, exists := bc.LiquidityProviders[address]
+	if !exists {
+		return nil, "", fmt.Errorf("no liquidity position found")
+	}
+	if lp.PendingRewards == nil || lp.PendingRewards.Sign() <= 0 {
+		return big.NewInt(0), "", nil
+	}
+
+	claimed := CopyAmount(lp.PendingRewards)
+	bc.addAccountBalance(address, claimed)
+	rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, claimed)
+	bc.Transaction_pool = append(bc.Transaction_pool, rewardTx)
+	lp.PendingRewards = big.NewInt(0)
+
+	return CopyAmount(claimed), rewardTx.TxHash, nil
+}
+
 // Start unstake request (does not release instantly)
 func (bc *Blockchain_struct) StartUnstake(address string) error {
 	bc.Mutex.Lock()
