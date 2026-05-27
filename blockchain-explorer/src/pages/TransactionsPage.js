@@ -66,7 +66,7 @@ const TransactionsPage = () => {
             marginLeft: 12, fontSize: '0.8rem', fontWeight: 500,
             color: 'var(--text-muted)'
           }}>
-            {total.toLocaleString()} blocks scanned
+            {total.toLocaleString()} transactions
           </span>
         )}
       </h2>
@@ -85,7 +85,7 @@ const TransactionsPage = () => {
         startIdx={startIdx}
         endIdx={Math.min(startIdx + PAGE_SIZE, total)}
         total={total}
-        label="block range"
+        label="transactions"
         goTo={goTo}
       />
 
@@ -100,7 +100,7 @@ const TransactionsPage = () => {
           startIdx={startIdx}
           endIdx={Math.min(startIdx + PAGE_SIZE, total)}
           total={total}
-          label="block range"
+          label="transactions"
           goTo={goTo}
         />
       )}

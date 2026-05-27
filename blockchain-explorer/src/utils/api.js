@@ -140,6 +140,16 @@ export async function fetchRecentBlocks(count = 14, options = {}) {
 }
 
 export async function fetchRecentTransactions(limit = 20, options = {}) {
+  try {
+    const data = await fetchJSON(`/transactions?page=1&size=${limit}`, {
+      cacheTtlMs: 1500,
+      timeoutMs: 10000,
+      ...options,
+    });
+    const primary = firstNodeResult(data);
+    const txs = primary?.transactions || data?.transactions || [];
+    if (Array.isArray(txs)) return txs.slice(0, limit);
+  } catch {}
   const blocks = await fetchRecentBlocks(Math.max(limit, 20), options);
   return transactionsFromBlocks(blocks, limit);
 }
@@ -192,15 +202,14 @@ export async function fetchAllHistoricalTransactions(options = {}) {
 }
 
 export async function fetchHistoricalTransactionPage(page = 1, pageSize = 10, options = {}) {
-  const data = await fetchJSON(`/fetch_last_n_block?page=${page}&size=${pageSize}`, {
+  const data = await fetchJSON(`/transactions?page=${page}&size=${pageSize}`, {
     cacheTtlMs: 1500,
     timeoutMs: 10000,
     ...options,
   });
   const primary = firstNodeResult(data);
-  const blocks = extractBlocks(primary || data);
   return {
-    transactions: transactionsFromBlocks(blocks, Number.POSITIVE_INFINITY),
+    transactions: primary?.transactions || data?.transactions || [],
     total: Number(primary?.total || data?.total || 0),
     totalPages: Math.max(1, Number(primary?.total_pages || data?.total_pages || 1)),
   };
