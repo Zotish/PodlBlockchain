@@ -19,6 +19,16 @@ let bridgeChainId = "bsc-testnet";
 let bridgeFamilyId = "evm";
 let bridgeChains = [];
 let bridgeFamilies = [];
+let lpDashboard = {
+  protocol: null,
+  providers: [],
+  latestRewards: null,
+  recentRewards: [],
+  pools: null,
+  storage: {},
+};
+const LQD_BLOCK_SECONDS = 2;
+const LQD_BLOCKS_PER_YEAR = Math.floor((365 * 24 * 60 * 60) / LQD_BLOCK_SECONDS);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function $(id) { return document.getElementById(id); }
@@ -53,6 +63,37 @@ function fmtAmount(raw, dec = 8) {
     const fs = f.toString().padStart(dec, "0").replace(/0+$/, "");
     return fs ? `${w}.${fs}` : w.toString();
   } catch { return raw || "0"; }
+}
+
+function safeBig(raw) {
+  try {
+    if (raw === null || raw === undefined || raw === "") return 0n;
+    if (typeof raw === "number") return BigInt(Math.trunc(raw));
+    return BigInt(String(raw));
+  } catch { return 0n; }
+}
+
+function formatPercentFromParts(numerator, denominator, decimals = 2) {
+  const n = safeBig(numerator);
+  const d = safeBig(denominator);
+  if (d <= 0n) return "0.00%";
+  const scale = 10n ** BigInt(decimals);
+  const value = (n * 100n * scale) / d;
+  const whole = value / scale;
+  const frac = (value % scale).toString().padStart(decimals, "0");
+  return `${whole}.${frac}%`;
+}
+
+function proportionalAmount(balance, reserve, total) {
+  const b = safeBig(balance);
+  const r = safeBig(reserve);
+  const t = safeBig(total);
+  if (b <= 0n || r <= 0n || t <= 0n) return "0";
+  return ((b * r) / t).toString();
+}
+
+function normalizeContractStorage(data) {
+  return data?.State?.storage || data?.State || data?.storage || data || {};
 }
 
 // Convert human-readable "1.5" → raw base units "150000000" (pure string, no precision loss)
@@ -251,6 +292,7 @@ document.querySelectorAll(".nav-item").forEach(btn => {
     btn.classList.add("active");
     const page = btn.dataset.page;
     $(`page-${page}`)?.classList.add("active");
+    if (page === "liquidity") loadLiquidityDashboard();
     if (page === "activity") loadActivity();
     if (page === "bridge") loadBridgeHistory();
     if (page === "settings") loadNetworkList();
@@ -489,6 +531,278 @@ $("doSendTokenBtn").addEventListener("click", async () => {
   } catch (e) { showResult("sendTokenResult", "✗ " + e.message, true); }
   finally { $("doSendTokenBtn").disabled = false; }
 });
+
+// ══════════════════════════════════════════════════════════════════
+// LIQUIDITY & REWARDS PAGE
+// ══════════════════════════════════════════════════════════════════
+function lpSettingsKey() {
+  return `lqd_lp_settings_${state.address || "default"}`;
+}
+
+function loadSavedLPSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(lpSettingsKey()) || "{}");
+    if ($("lpPoolAddr") && !$("lpPoolAddr").value) $("lpPoolAddr").value = saved.pool || "";
+    if ($("lpTokenA") && !$("lpTokenA").value) $("lpTokenA").value = saved.tokenA || "lqd";
+    if ($("lpTokenB") && !$("lpTokenB").value) $("lpTokenB").value = saved.tokenB || "";
+    if ($("lpDecimalsA") && saved.decimalsA) $("lpDecimalsA").value = saved.decimalsA;
+    if ($("lpDecimalsB") && saved.decimalsB) $("lpDecimalsB").value = saved.decimalsB;
+  } catch { }
+}
+
+function saveLPSettings() {
+  const payload = {
+    pool: $("lpPoolAddr")?.value?.trim() || "",
+    tokenA: $("lpTokenA")?.value?.trim() || "lqd",
+    tokenB: $("lpTokenB")?.value?.trim() || "",
+    decimalsA: parseInt($("lpDecimalsA")?.value, 10) || 8,
+    decimalsB: parseInt($("lpDecimalsB")?.value, 10) || 8,
+  };
+  localStorage.setItem(lpSettingsKey(), JSON.stringify(payload));
+  toast("LP pool saved", "success");
+  return payload;
+}
+
+function getLPForm() {
+  return {
+    pool: $("lpPoolAddr")?.value?.trim() || "",
+    tokenA: $("lpTokenA")?.value?.trim() || "lqd",
+    tokenB: $("lpTokenB")?.value?.trim() || "",
+    decimalsA: parseInt($("lpDecimalsA")?.value, 10) || 8,
+    decimalsB: parseInt($("lpDecimalsB")?.value, 10) || 8,
+  };
+}
+
+function findStorageValue(storage, key, fallback = "0") {
+  if (!storage || !key) return fallback;
+  if (storage[key] !== undefined) return storage[key];
+  const found = Object.keys(storage).find(k => k.toLowerCase() === key.toLowerCase());
+  return found ? storage[found] : fallback;
+}
+
+function resolveDexStorage(storage, form) {
+  const normA = String(form.tokenA || "lqd").toLowerCase();
+  const token0 = String(findStorageValue(storage, "token0", findStorageValue(storage, "tokenA", "")) || "").toLowerCase();
+  const reserve0 = findStorageValue(storage, "reserve0", findStorageValue(storage, "reserveA", "0"));
+  const reserve1 = findStorageValue(storage, "reserve1", findStorageValue(storage, "reserveB", "0"));
+  const reserveA = token0 && normA !== token0 ? reserve1 : reserve0;
+  const reserveB = token0 && normA !== token0 ? reserve0 : reserve1;
+  const lpKey = `lp:${String(state.address || "").toLowerCase()}`;
+  return {
+    reserveA,
+    reserveB,
+    totalLP: findStorageValue(storage, "totalLP", "0"),
+    lpBalance: findStorageValue(storage, lpKey, "0"),
+  };
+}
+
+function computeRewardAnalytics(protocol, providers, latestRewards) {
+  const totalLiquidity = safeBig(protocol?.total_liquidity || protocol?.TotalLiquidity || "0")
+    || (providers || []).reduce((acc, p) => acc + safeBig(p.amount || p.Amount || p.total || p.TotalRewards || "0"), 0n);
+  const liquidityRewards = latestRewards?.liquidity_rewards || latestRewards?.LiquidityRewards || {};
+  const latestRewardTotal = Object.values(liquidityRewards).reduce((acc, value) => acc + safeBig(value), 0n);
+  if (totalLiquidity <= 0n || latestRewardTotal <= 0n) {
+    return { apr: 0, apy: 0, latestRewardTotal: latestRewardTotal.toString() };
+  }
+  const yearlyReward = Number(latestRewardTotal) * LQD_BLOCKS_PER_YEAR;
+  const apr = (yearlyReward / Number(totalLiquidity)) * 100;
+  const apy = (Math.pow(1 + (apr / 100) / 365, 365) - 1) * 100;
+  return { apr, apy, latestRewardTotal: latestRewardTotal.toString() };
+}
+
+function renderLiquidityDashboard() {
+  const form = getLPForm();
+  const dex = resolveDexStorage(lpDashboard.storage, form);
+  const userA = proportionalAmount(dex.lpBalance, dex.reserveA, dex.totalLP);
+  const userB = proportionalAmount(dex.lpBalance, dex.reserveB, dex.totalLP);
+  $("lpBalanceStat").textContent = `${fmtAmount(dex.lpBalance, 8)} LP`;
+  $("lpShareStat").textContent = formatPercentFromParts(dex.lpBalance, dex.totalLP);
+  $("lpTotalStat").textContent = `${fmtAmount(dex.totalLP, 8)} LP`;
+  $("lpReserveAStat").textContent = `${fmtAmount(dex.reserveA, form.decimalsA)} / ${fmtAmount(userA, form.decimalsA)}`;
+  $("lpReserveBStat").textContent = `${fmtAmount(dex.reserveB, form.decimalsB)} / ${fmtAmount(userB, form.decimalsB)}`;
+
+  const protocol = lpDashboard.protocol || {};
+  $("lpPendingRewardStat").textContent = fmtAmount(protocol.pending_rewards || protocol.PendingRewards || "0") + " LQD";
+  $("lpTotalRewardStat").textContent = fmtAmount(protocol.total_rewards || protocol.TotalRewards || "0") + " LQD";
+
+  const analytics = computeRewardAnalytics(protocol, lpDashboard.providers, lpDashboard.latestRewards || {});
+  $("lpLatestRewardStat").textContent = fmtAmount(analytics.latestRewardTotal) + " LQD";
+  $("lpAprStat").textContent = analytics.apr > 0 ? `${analytics.apr.toFixed(2)}%` : "—";
+  $("lpApyStat").textContent = analytics.apy > 0 ? `${analytics.apy.toFixed(2)}%` : "—";
+
+  const timeline = $("lpRewardTimeline");
+  const rows = (lpDashboard.recentRewards || []).slice(-8).reverse();
+  if (!rows.length) {
+    timeline.innerHTML = '<div class="notice">No recent reward snapshots found yet.</div>';
+    return;
+  }
+  timeline.innerHTML = `<div class="lp-timeline">${rows.map((row) => {
+    const rewards = row.liquidity_rewards || row.LiquidityRewards || {};
+    const mine = rewards[state.address] || rewards[String(state.address || "").toLowerCase()] || "0";
+    return `<div class="lp-event">
+      <div class="lp-event-main">
+        <div class="lp-event-title">Block #${row.block_number || row.BlockNumber || "—"}</div>
+        <div class="lp-event-sub">Validator: ${shortAddr(row.validator || row.Validator || "") || "—"}</div>
+      </div>
+      <div class="lp-event-amount">${fmtAmount(mine)} LQD</div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+async function loadLiquidityDashboard() {
+  loadSavedLPSettings();
+  const form = getLPForm();
+  try {
+    const [protocol, providers, latestRewards, recentRewards, pools] = await Promise.all([
+      nodeGet(`/liquidity/info?address=${encodeURIComponent(state.address)}`).catch(() => ({})),
+      nodeGet("/liquidity/all").catch(() => []),
+      nodeGet("/rewards/latest").catch(() => ({})),
+      nodeGet("/rewards/recent").catch(() => []),
+      nodeGet("/liquidity/pools").catch(() => ({})),
+    ]);
+    let storage = {};
+    if (form.pool) {
+      const storageRes = await nodeGet(`/contract/storage?address=${encodeURIComponent(form.pool)}`).catch(() => ({}));
+      storage = normalizeContractStorage(storageRes);
+    }
+    lpDashboard = { protocol, providers: Array.isArray(providers) ? providers : [], latestRewards, recentRewards: Array.isArray(recentRewards) ? recentRewards : [], pools, storage };
+    renderLiquidityDashboard();
+  } catch (e) {
+    toast("Liquidity dashboard failed: " + e.message, "error");
+  }
+}
+
+async function addDexLiquidity() {
+  const form = getLPForm();
+  const amountA = $("lpAmountA")?.value?.trim() || "";
+  const amountB = $("lpAmountB")?.value?.trim() || "";
+  if (!form.pool || !form.tokenA || !form.tokenB || !amountA || !amountB) {
+    toast("Fill pool, tokens, and both amounts", "error");
+    return;
+  }
+  try {
+    $("lpAddBtn").disabled = true;
+    const rawA = parseHuman(amountA, form.decimalsA);
+    const rawB = parseHuman(amountB, form.decimalsB);
+    const nativeValue = form.tokenA.toLowerCase() === "lqd" ? rawA : (form.tokenB.toLowerCase() === "lqd" ? rawB : "0");
+    const res = await contractTx(form.pool, "AddLiquidity", [form.tokenA, form.tokenB, rawA, rawB], nativeValue);
+    const hash = res.tx_hash || res.TxHash || res.hash || "";
+    showResult("lpAddResult", `✓ Liquidity add submitted\nTx: ${hash}`);
+    await recordLocalActivity({ type: "liquidity_add", contract: form.pool, tx_hash: hash, value: `${rawA}/${rawB}` });
+    $("lpAmountA").value = "";
+    $("lpAmountB").value = "";
+    toast("Liquidity add submitted", "success");
+    if (hash) await waitForTx(hash, 6000).catch(() => null);
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("lpAddResult", "✗ " + e.message, true);
+    toast("Add liquidity failed: " + e.message, "error");
+  } finally {
+    $("lpAddBtn").disabled = false;
+  }
+}
+
+async function removeDexLiquidity() {
+  const form = getLPForm();
+  const amount = $("lpRemoveAmount")?.value?.trim() || "";
+  if (!form.pool || !form.tokenA || !form.tokenB || !amount) {
+    toast("Fill pool, tokens, and LP amount", "error");
+    return;
+  }
+  try {
+    $("lpRemoveBtn").disabled = true;
+    const rawLP = parseHuman(amount, 8);
+    const res = await contractTx(form.pool, "RemoveLiquidity", [form.tokenA, form.tokenB, rawLP]);
+    const hash = res.tx_hash || res.TxHash || res.hash || "";
+    showResult("lpRemoveResult", `✓ Liquidity remove submitted\nTx: ${hash}`);
+    await recordLocalActivity({ type: "liquidity_remove", contract: form.pool, tx_hash: hash, value: rawLP });
+    $("lpRemoveAmount").value = "";
+    toast("Liquidity remove submitted", "success");
+    if (hash) await waitForTx(hash, 6000).catch(() => null);
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("lpRemoveResult", "✗ " + e.message, true);
+    toast("Remove liquidity failed: " + e.message, "error");
+  } finally {
+    $("lpRemoveBtn").disabled = false;
+  }
+}
+
+async function provideProtocolLiquidity() {
+  const amount = $("protocolStakeAmount")?.value?.trim() || "";
+  const lockDays = parseInt($("protocolLockDays")?.value, 10) || 30;
+  if (!amount) { toast("Enter stake amount", "error"); return; }
+  try {
+    $("protocolStakeBtn").disabled = true;
+    await nodePost("/liquidity/provide", {
+      address: state.address,
+      amount: parseHuman(amount, 8),
+      lock_days: lockDays,
+    });
+    showResult("protocolLiquidityResult", `✓ Protocol liquidity staked for ${lockDays} days`);
+    $("protocolStakeAmount").value = "";
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("protocolLiquidityResult", "✗ " + e.message, true);
+  } finally {
+    $("protocolStakeBtn").disabled = false;
+  }
+}
+
+async function unstakeProtocolLiquidity() {
+  try {
+    $("protocolUnstakeBtn").disabled = true;
+    await nodePost("/liquidity/unstake", { address: state.address });
+    showResult("protocolLiquidityResult", "✓ Protocol unstake started");
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("protocolLiquidityResult", "✗ " + e.message, true);
+  } finally {
+    $("protocolUnstakeBtn").disabled = false;
+  }
+}
+
+async function claimOrSyncRewards() {
+  try {
+    $("lpClaimBtn").disabled = true;
+    const res = await nodePost("/liquidity/claim", { address: state.address }).catch((err) => {
+      throw new Error(err.message.includes("404") || err.message.includes("not found")
+        ? "Manual claim endpoint is not active on the node yet. Current rewards are auto-accounted by the chain and visible in this dashboard."
+        : err.message);
+    });
+    showResult("lpClaimResult", `✓ Claim/sync complete\n${JSON.stringify(res, null, 2)}`);
+    toast("Rewards synced", "success");
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("lpClaimResult", "ℹ " + e.message, true);
+    toast("Claim sync notice", "info");
+  } finally {
+    $("lpClaimBtn").disabled = false;
+  }
+}
+
+async function syncPoolRegistry() {
+  try {
+    $("lpSyncPoolsBtn").disabled = true;
+    const res = await nodePost("/liquidity/pools/sync", {});
+    showResult("lpClaimResult", `✓ Pool registry synced\n${JSON.stringify(res, null, 2)}`);
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("lpClaimResult", "✗ " + e.message, true);
+  } finally {
+    $("lpSyncPoolsBtn").disabled = false;
+  }
+}
+
+$("lpRefreshBtn")?.addEventListener("click", loadLiquidityDashboard);
+$("lpLoadBtn")?.addEventListener("click", loadLiquidityDashboard);
+$("lpSaveBtn")?.addEventListener("click", () => { saveLPSettings(); loadLiquidityDashboard(); });
+$("lpAddBtn")?.addEventListener("click", addDexLiquidity);
+$("lpRemoveBtn")?.addEventListener("click", removeDexLiquidity);
+$("lpClaimBtn")?.addEventListener("click", claimOrSyncRewards);
+$("lpSyncPoolsBtn")?.addEventListener("click", syncPoolRegistry);
+$("protocolStakeBtn")?.addEventListener("click", provideProtocolLiquidity);
+$("protocolUnstakeBtn")?.addEventListener("click", unstakeProtocolLiquidity);
 
 // ══════════════════════════════════════════════════════════════════
 // CONTRACTS PAGE

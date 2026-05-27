@@ -39,6 +39,9 @@
     <button class="nav-item" data-page="tokens">
       <span class="nav-icon">🪙</span> Tokens
     </button>
+    <button class="nav-item" data-page="liquidity">
+      <span class="nav-icon">💧</span> Liquidity
+    </button>
     <button class="nav-item" data-page="contracts">
       <span class="nav-icon">📜</span> Contracts
     </button>
@@ -165,6 +168,106 @@
         <div class="token-list" id="tokenList">
           <div class="notice">No tokens imported yet. Import a token above or click Auto-Scan.</div>
         </div>
+      </div>
+    </div>
+
+    <!-- ═══ LIQUIDITY PAGE ════════════════════════════════════════ -->
+    <div class="page" id="page-liquidity">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Liquidity &amp; Rewards</div>
+          <div class="page-sub">Manage DEX LP tokens, protocol rewards, and claim readiness from LQD Wallet</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="lpRefreshBtn">⟳ Refresh</button>
+      </div>
+
+      <div class="notice" style="margin-bottom:16px;">
+        This page uses the native <code>window.lqd</code> extension wallet flow. DEX LP positions use pool LP tokens directly; protocol stake below is kept separate.
+      </div>
+
+      <div class="card">
+        <div class="card-title">DEX LP Token Position</div>
+        <div class="field">
+          <label>DEX Pool / Factory Contract</label>
+          <input id="lpPoolAddr" placeholder="0x... pool or factory address" />
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>Token A</label><input id="lpTokenA" placeholder="lqd or 0x..." /></div>
+          <div class="field"><label>Token B</label><input id="lpTokenB" placeholder="0x..." /></div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>Token A Decimals</label><input id="lpDecimalsA" type="number" value="8" min="0" max="36" /></div>
+          <div class="field"><label>Token B Decimals</label><input id="lpDecimalsB" type="number" value="8" min="0" max="36" /></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+          <button class="btn btn-primary btn-sm" id="lpLoadBtn">Load LP Position</button>
+          <button class="btn btn-secondary btn-sm" id="lpSaveBtn">Save Pool</button>
+        </div>
+
+        <div class="grid-3" id="lpStatsGrid">
+          <div class="stat-box"><div class="stat-label">LP Balance</div><div class="stat-value" id="lpBalanceStat">—</div></div>
+          <div class="stat-box"><div class="stat-label">Pool Share</div><div class="stat-value" id="lpShareStat">—</div></div>
+          <div class="stat-box"><div class="stat-label">Total LP</div><div class="stat-value" id="lpTotalStat">—</div></div>
+        </div>
+        <div class="grid-2" style="margin-top:16px;">
+          <div class="stat-box"><div class="stat-label">Reserve A / Yours</div><div class="stat-value" id="lpReserveAStat">—</div></div>
+          <div class="stat-box"><div class="stat-label">Reserve B / Yours</div><div class="stat-value" id="lpReserveBStat">—</div></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Add Liquidity</div>
+          <div class="field"><label>Amount A</label><input id="lpAmountA" type="number" step="0.00000001" placeholder="0.0" /></div>
+          <div class="field"><label>Amount B</label><input id="lpAmountB" type="number" step="0.00000001" placeholder="0.0" /></div>
+          <button class="btn btn-primary btn-full" id="lpAddBtn">Add Liquidity</button>
+          <div id="lpAddResult" class="result-box" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Remove Liquidity</div>
+          <div class="field"><label>LP Amount</label><input id="lpRemoveAmount" type="number" step="0.00000001" placeholder="0.0" /></div>
+          <button class="btn btn-danger btn-full" id="lpRemoveBtn">Remove Liquidity</button>
+          <div id="lpRemoveResult" class="result-box" style="display:none;"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Reward Dashboard</div>
+        <div class="grid-3">
+          <div class="stat-box"><div class="stat-label">Protocol Pending</div><div class="stat-value" id="lpPendingRewardStat">—</div></div>
+          <div class="stat-box"><div class="stat-label">Protocol Total</div><div class="stat-value" id="lpTotalRewardStat">—</div></div>
+          <div class="stat-box"><div class="stat-label">Latest LP Reward</div><div class="stat-value" id="lpLatestRewardStat">—</div></div>
+        </div>
+        <div class="grid-2" style="margin-top:16px;">
+          <div class="stat-box"><div class="stat-label">Estimated APR</div><div class="stat-value" id="lpAprStat">—</div></div>
+          <div class="stat-box"><div class="stat-label">Estimated APY</div><div class="stat-value" id="lpApyStat">—</div></div>
+        </div>
+        <div class="notice" style="margin-top:14px;">
+          APR = latest LP reward per block × estimated yearly blocks ÷ total active liquidity. APY compounds that APR daily.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;">
+          <button class="btn btn-primary btn-sm" id="lpClaimBtn">Claim / Sync Rewards</button>
+          <button class="btn btn-secondary btn-sm" id="lpSyncPoolsBtn">Sync Pool Registry</button>
+        </div>
+        <div id="lpClaimResult" class="result-box" style="display:none;"></div>
+        <div id="lpRewardTimeline" style="margin-top:14px;"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Protocol LQD Stake Rewards</div>
+        <div class="notice" style="margin-bottom:14px;">
+          This is the old single-asset protocol liquidity stake. DEX LP token liquidity above is the primary market LP flow.
+        </div>
+        <div class="grid-2">
+          <div class="field"><label>Stake Amount (LQD)</label><input id="protocolStakeAmount" type="number" step="0.00000001" placeholder="1000" /></div>
+          <div class="field"><label>Lock Days</label><input id="protocolLockDays" type="number" value="30" min="1" /></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" id="protocolStakeBtn">Stake LQD</button>
+          <button class="btn btn-secondary btn-sm" id="protocolUnstakeBtn">Start Unstake</button>
+        </div>
+        <div id="protocolLiquidityResult" class="result-box" style="display:none;"></div>
       </div>
     </div>
 

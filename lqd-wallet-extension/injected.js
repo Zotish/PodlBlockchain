@@ -68,6 +68,8 @@
 
   const provider = {
     isLQD: true,
+    isLQDWallet: true,
+    walletName: "LQD Wallet",
 
     isConnected() { return accounts.length > 0; },
 
