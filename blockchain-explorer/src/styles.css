@@ -671,6 +671,132 @@ code, pre, .monospace {
   text-align: center;
 }
 
+/* ─── Rewards & LP Analytics ─────────────────────────────────────────── */
+.rewards-page,
+.liquidity-page {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.reward-hero {
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 38%),
+    var(--bg-card);
+}
+
+.reward-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-4);
+}
+
+.reward-metric-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-sm);
+}
+
+.reward-metric-card span {
+  color: var(--text-secondary);
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.reward-metric-card strong {
+  color: var(--text-primary);
+  display: block;
+  font-size: 1.28rem;
+  margin-top: 7px;
+}
+
+.reward-metric-card small {
+  color: var(--text-muted);
+  display: block;
+  margin-top: 5px;
+}
+
+.reward-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.reward-panel {
+  padding: 0;
+}
+
+.reward-panel-head {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: var(--space-4);
+  justify-content: space-between;
+  padding: var(--space-5);
+}
+
+.reward-panel-head h3,
+.reward-claim-card h3 {
+  color: var(--text-primary);
+  font-size: 1rem;
+  margin: 0;
+}
+
+.reward-panel-head p,
+.reward-claim-card p {
+  color: var(--text-secondary);
+  margin: 4px 0 0;
+}
+
+.reward-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reward-chip-list span {
+  background: var(--bg-badge);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  padding: 4px 8px;
+}
+
+.reward-claim-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.reward-claim-status {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  padding: var(--space-3);
+}
+
+.btn-secondary.compact {
+  padding: 5px 10px;
+  width: auto;
+}
+
+@media (max-width: 900px) {
+  .reward-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ─── Cards ──────────────────────────────────────────────────────────── */
 .card {
   background: var(--bg-card);

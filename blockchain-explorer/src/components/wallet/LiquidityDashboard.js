@@ -11,6 +11,7 @@ export default function LiquidityDashboard({ address }) {
   const [amount, setAmount] = useState("");
   const [lockDays, setLockDays] = useState(30);
   const [loading, setLoading] = useState(false);
+  const [claiming, setClaiming] = useState(false);
   const [msg, setMsg] = useState("");
 
   const fetchInfo = async () => {
@@ -81,6 +82,28 @@ export default function LiquidityDashboard({ address }) {
     }
   };
 
+  const claimRewards = async () => {
+    setClaiming(true);
+    setMsg("");
+    try {
+      const res = await fetch(`${API}/liquidity/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address }),
+      });
+      if (!res.ok) throw new Error(`Claim endpoint returned ${res.status}`);
+      const text = await res.text();
+      setMsg(text || "Claim submitted.");
+    } catch (e) {
+      setMsg(
+        "Manual claim is not enabled on this node yet. Rewards are tracked here and auto-synced by the chain reward/unstake flow."
+      );
+    } finally {
+      setClaiming(false);
+      fetchInfo();
+    }
+  };
+
   // ---- Derived UI values — use BigInt for raw base-unit arithmetic ----
   const hasLP = !!lp;
   const isUnstaking = lp?.is_unstaking;
@@ -102,6 +125,21 @@ export default function LiquidityDashboard({ address }) {
       : 0;
 
   const remainingRaw = unstakeBig > releasedBig ? (unstakeBig - releasedBig).toString() : "0";
+  const stakeBig = toBig(totalStake);
+  const pendingBig = toBig(pendingRewards);
+  const totalBig = toBig(totalRewards);
+  const annualizedPendingApr =
+    stakeBig > 0n && pendingBig > 0n
+      ? Number((pendingBig * 36500n) / stakeBig)
+      : 0;
+  const estimatedApy =
+    annualizedPendingApr > 0
+      ? (Math.pow(1 + annualizedPendingApr / 100 / 365, 365) - 1) * 100
+      : 0;
+  const rewardRatio =
+    stakeBig > 0n && totalBig > 0n
+      ? Number((totalBig * 10000n) / stakeBig) / 100
+      : 0;
 
   const readableLockTime =
     lp?.lock_time ? new Date(lp.lock_time * 1000).toLocaleString() : "—";
@@ -156,6 +194,16 @@ export default function LiquidityDashboard({ address }) {
                   Auto-distributed into your wallet by the chain.
                 </div>
               </div>
+
+              <div className="lp-stat-block">
+                <h4>APR / APY</h4>
+                <div className="lp-value">
+                  {annualizedPendingApr.toFixed(2)}%
+                </div>
+                <div className="lp-label">
+                  APY {estimatedApy.toFixed(2)}% - earned/stake {rewardRatio.toFixed(2)}%
+                </div>
+              </div>
             </div>
 
             <div className="lp-row lp-row-secondary">
@@ -203,6 +251,13 @@ export default function LiquidityDashboard({ address }) {
 
             {!isUnstaking && (
               <div className="lp-actions">
+                <button
+                  className="btn-primary"
+                  onClick={claimRewards}
+                  disabled={claiming || pendingBig === 0n}
+                >
+                  {claiming ? "Syncing..." : "Claim / Sync Rewards"}
+                </button>
                 <button
                   className="btn-secondary"
                   onClick={unstake}

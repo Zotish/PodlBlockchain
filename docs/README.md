@@ -9,6 +9,12 @@ For a full operator, developer, miner, and user handbook, read [PRODUCTION_GUIDE
 ## Developer Guide
 For smart contract authoring, deployment, and testing instructions, read [DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md).
 
+## User Guides
+- [How to add liquidity](./HOW_TO_ADD_LIQUIDITY.md)
+- [How rewards work](./HOW_REWARDS_WORK.md)
+- [How validator works](./HOW_VALIDATOR_WORKS.md)
+- [How bridge works](./HOW_BRIDGE_WORKS.md)
+
 ## Smart Contract Template
 For a reusable starter token contract, read [SMART_CONTRACT_TEMPLATE_TOKEN.md](./SMART_CONTRACT_TEMPLATE_TOKEN.md).
 

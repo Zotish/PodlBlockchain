@@ -6,6 +6,7 @@ const NAV_ITEMS = [
   { to: '/blocks',       label: 'Blocks'     },
   { to: '/validators',   label: 'Validators' },
   { to: '/liquidity',    label: 'Liquidity'  },
+  { to: '/rewards',      label: 'Rewards'    },
   { to: '/pools',        label: 'Pools'      },
   { to: '/wallet',       label: 'Wallet'     },
 ];
@@ -49,6 +50,7 @@ const NAV_GROUPS = [
       { to: '/liquidity', label: 'Liquidity' },
       { to: '/pools/tracker', label: 'Pools' },
       { to: '/liquidity/providers', label: 'LP Tracker' },
+      { to: '/rewards', label: 'Reward Analytics' },
     ],
   },
   {
@@ -66,6 +68,7 @@ const NAV_GROUPS = [
       { to: '/bridge', label: 'Bridge' },
       { to: '/pools', label: 'Pools' },
       { to: '/liquidity', label: 'Liquidity Mining' },
+      { to: '/rewards', label: 'Reward Center' },
       { to: '/wallet', label: 'Wallet Tools' },
     ],
   },
