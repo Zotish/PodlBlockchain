@@ -255,6 +255,20 @@ select option { background: var(--card2); }
 .token-bal  { font-weight: 600; font-size: 14px; }
 .token-addr { font-size: 11px; color: var(--muted); font-family: monospace; }
 
+/* ── Liquidity dashboard ── */
+.lp-timeline { display: flex; flex-direction: column; gap: 8px; }
+.lp-event {
+  display: flex; justify-content: space-between; gap: 12px;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: var(--rs);
+  padding: 10px 12px;
+}
+.lp-event-main { min-width: 0; }
+.lp-event-title { font-weight: 700; font-size: 13px; color: var(--text); }
+.lp-event-sub { font-size: 11px; color: var(--muted); margin-top: 3px; word-break: break-all; }
+.lp-event-amount { font-weight: 800; color: var(--green); white-space: nowrap; }
+
 /* ── Activity / history ── */
 .activity-list { display: flex; flex-direction: column; gap: 8px; }
 .activity-row {
