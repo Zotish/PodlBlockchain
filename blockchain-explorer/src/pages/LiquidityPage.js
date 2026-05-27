@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { formatLQD } from "../utils/lqdUnits";
+import { buildSignedClaimPayload, connectExtensionWallet, shortWalletAddress } from "../utils/claimWallet";
 import { fetchJSON, firstNodeResult, mergeArrayResults } from "../utils/api";
 
 const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
@@ -41,6 +42,7 @@ export default function LiquidityPage() {
   const [latestRewards, setLatestRewards] = useState(null);
   const [rewardHistory, setRewardHistory] = useState([]);
   const [claimAddress, setClaimAddress] = useState("");
+  const [connectedWallet, setConnectedWallet] = useState("");
   const [claimMessage, setClaimMessage] = useState("");
   const [claiming, setClaiming] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -100,27 +102,43 @@ export default function LiquidityPage() {
     return { totalStake, totalPower, totalRewards, pendingRewards, latestLPReward, apr, apy };
   }, [providers, latestRewards]);
 
+  const connectWallet = async () => {
+    try {
+      const account = await connectExtensionWallet();
+      setConnectedWallet(account);
+      if (!claimAddress.trim()) setClaimAddress(account);
+      setClaimMessage(`Connected ${shortWalletAddress(account)}. Claim will require a wallet signature.`);
+    } catch (err) {
+      setClaimMessage(err.message || "Wallet connection failed.");
+    }
+  };
+
   const claimRewards = async (address) => {
-    const target = String(address || claimAddress).trim();
+    const target = String(address || claimAddress || connectedWallet).trim();
     if (!target) {
       setClaimMessage("Enter or select a liquidity provider address first.");
       return;
     }
     setClaiming(true);
     setClaimAddress(target);
-    setClaimMessage("Checking claim route...");
+    setClaimMessage("Waiting for wallet signature...");
     try {
+      const payload = await buildSignedClaimPayload(target);
+      setConnectedWallet(payload.wallet_address);
+      setClaimAddress(payload.address);
+      setClaimMessage("Signature accepted. Submitting signed claim request...");
       const result = await fetchJSON("/liquidity/claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address: target }),
+        body: JSON.stringify(payload),
         timeoutMs: 10000,
       });
       setClaimMessage(`Claim submitted: ${JSON.stringify(result)}`);
     } catch (err) {
-      setClaimMessage(
-        "Manual claim endpoint is not active on this node. Pending LP rewards remain visible here and are auto-synced by the chain reward/unstake flow."
-      );
+      const message = err.message || "";
+      setClaimMessage(message.includes("Request failed")
+        ? "Signed claim proof was created, but manual claim endpoint is not active on this node. Pending LP rewards remain visible and auto-sync during reward settlement/unstake flows."
+        : message);
     } finally {
       setClaiming(false);
       fetchProviders();
@@ -211,15 +229,17 @@ export default function LiquidityPage() {
         <aside className="reward-claim-card">
           <h3>LP Claim / Sync</h3>
           <p>
-            Use this to check a provider and trigger manual claim if the node
-            exposes it. Current node builds may auto-sync rewards during reward
-            settlement and unstake flows.
+            Connect the LP wallet first. The connected wallet must match the LP
+            address and sign a claim proof before submission.
           </p>
+          <button className="btn-secondary" type="button" onClick={connectWallet}>
+            {connectedWallet ? `Connected ${shortWalletAddress(connectedWallet)}` : "Connect Extension Wallet"}
+          </button>
           <input
             type="text"
             value={claimAddress}
             onChange={(event) => setClaimAddress(event.target.value)}
-            placeholder="0x... provider address"
+            placeholder="0x... connected provider address"
           />
           <button className="btn-primary" disabled={claiming} onClick={() => claimRewards()}>
             {claiming ? "Syncing..." : "Claim / Sync"}
