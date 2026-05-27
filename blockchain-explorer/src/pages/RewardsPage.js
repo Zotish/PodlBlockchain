@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fetchJSON, firstNodeResult, mergeArrayResults } from '../utils/api';
+import { buildSignedClaimPayload, connectExtensionWallet, shortWalletAddress } from '../utils/claimWallet';
 import { formatLQD } from '../utils/lqdUnits';
 
 const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
@@ -50,6 +51,7 @@ export default function RewardsPage() {
   const [providers, setProviders] = useState([]);
   const [claimAddress, setClaimAddress] = useState('');
   const [claimStatus, setClaimStatus] = useState('');
+  const [connectedWallet, setConnectedWallet] = useState('');
   const [loading, setLoading] = useState(true);
   const [claiming, setClaiming] = useState(false);
   const [error, setError] = useState('');
@@ -130,25 +132,42 @@ export default function RewardsPage() {
     [providers]
   );
 
+  const connectWallet = async () => {
+    try {
+      const account = await connectExtensionWallet();
+      setConnectedWallet(account);
+      if (!claimAddress.trim()) setClaimAddress(account);
+      setClaimStatus(`Connected ${shortWalletAddress(account)}. Claim will require a wallet signature.`);
+    } catch (err) {
+      setClaimStatus(err.message || 'Wallet connection failed.');
+    }
+  };
+
   const claimRewards = async () => {
-    if (!claimAddress.trim()) {
+    const target = claimAddress.trim() || connectedWallet;
+    if (!target) {
       setClaimStatus('Enter an LP address first.');
       return;
     }
     setClaiming(true);
-    setClaimStatus('Checking claim route...');
+    setClaimStatus('Waiting for wallet signature...');
     try {
+      const payload = await buildSignedClaimPayload(target);
+      setConnectedWallet(payload.wallet_address);
+      setClaimAddress(payload.address);
+      setClaimStatus('Signature accepted. Submitting signed claim request...');
       const res = await fetchJSON('/liquidity/claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address: claimAddress.trim() }),
+        body: JSON.stringify(payload),
         timeoutMs: 10000,
       });
       setClaimStatus(`Claim submitted: ${JSON.stringify(res)}`);
     } catch (err) {
-      setClaimStatus(
-        'Manual claim endpoint is not active on this node yet. Rewards are still tracked here and the current chain auto-syncs LP rewards during reward settlement/unstake flows.'
-      );
+      const message = err.message || '';
+      setClaimStatus(message.includes('Request failed')
+        ? 'Signed claim proof was created, but manual claim endpoint is not active on this node yet. Rewards remain tracked and auto-sync during reward settlement/unstake flows.'
+        : message);
     } finally {
       setClaiming(false);
       load();
@@ -226,15 +245,17 @@ export default function RewardsPage() {
         <aside className="reward-claim-card">
           <h3>Claim Center</h3>
           <p>
-            Enter an LP address to sync reward status. If the node exposes
-            manual claim, this submits it; otherwise the dashboard confirms the
-            current auto-claim model.
+            Connect the LP wallet before claiming. The connected address must
+            match the LP address, then the extension signs a claim proof.
           </p>
+          <button className="btn-secondary" type="button" onClick={connectWallet}>
+            {connectedWallet ? `Connected ${shortWalletAddress(connectedWallet)}` : 'Connect Extension Wallet'}
+          </button>
           <input
             type="text"
             value={claimAddress}
             onChange={(event) => setClaimAddress(event.target.value)}
-            placeholder="0x... liquidity provider address"
+            placeholder="0x... connected LP provider address"
           />
           <button className="btn-primary" onClick={claimRewards} disabled={claiming}>
             {claiming ? 'Syncing...' : 'Claim / Sync Rewards'}
