@@ -12,6 +12,7 @@ import TransactionPage from './pages/TransactionPage';
 import ValidatorPage from './pages/ValidatorPage';
 import AddressPage from './pages/AddressPage';
 import WalletPage from './pages/WalletPage'; // Add this import
+import RewardsPage from './pages/RewardsPage';
 
 import './styles.css';
 import LiquidityPage from './pages/LiquidityPage';
@@ -45,6 +46,7 @@ function App() {
             <Route path="/validator/:address" element={<ValidatorPage />} />
             <Route path="/address/:address" element={<AddressPage />} />
             <Route path="/wallet" element={<WalletPage />} />
+            <Route path="/rewards" element={<RewardsPage />} />
             <Route path="/liquidity" element={<LiquidityPage />} />
             <Route path="/pools" element={<PoolsPage />} />
             <Route path="/tokens" element={<TokenTrackerPage />} />
