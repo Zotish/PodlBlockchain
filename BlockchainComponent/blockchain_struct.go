@@ -1526,6 +1526,16 @@ func (bc *Blockchain_struct) ClaimLPRewards(address string) (*big.Int, string, e
 
 	lp, exists := bc.LiquidityProviders[address]
 	if !exists {
+		for key, candidate := range bc.LiquidityProviders {
+			if strings.EqualFold(key, address) {
+				lp = candidate
+				address = key
+				exists = true
+				break
+			}
+		}
+	}
+	if !exists {
 		return nil, "", fmt.Errorf("no liquidity position found")
 	}
 	if lp.PendingRewards == nil || lp.PendingRewards.Sign() <= 0 {
@@ -1628,7 +1638,27 @@ func (bc *Blockchain_struct) ProcessUnstakeReleases() {
 func (bc *Blockchain_struct) AddLPReward(address string, reward *big.Int) {
 	lp := bc.LiquidityProviders[address]
 	if lp == nil {
-		return
+		for key, candidate := range bc.LiquidityProviders {
+			if strings.EqualFold(key, address) {
+				lp = candidate
+				address = key
+				break
+			}
+		}
+	}
+	if lp == nil {
+		lp = &LiquidityProvider{
+			Address:        address,
+			StakeAmount:    big.NewInt(0),
+			TotalRewards:   big.NewInt(0),
+			PendingRewards: big.NewInt(0),
+			UnstakeAmount:  big.NewInt(0),
+			ReleasedSoFar:  big.NewInt(0),
+		}
+		if bc.LiquidityProviders == nil {
+			bc.LiquidityProviders = make(map[string]*LiquidityProvider)
+		}
+		bc.LiquidityProviders[address] = lp
 	}
 	if lp.PendingRewards == nil {
 		lp.PendingRewards = big.NewInt(0)

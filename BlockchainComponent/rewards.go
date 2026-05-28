@@ -352,21 +352,34 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 		bc.addAccountBalance(validator, CopyAmount(proposerShare))
 	}
 
-	// ── 4. LP Providers — 30 % (sqrt-curve weighted) ─────────────────────────
+	// ── 4. LP Providers — 30 % (sqrt-curve + reward-tier weighted) ──────────
+	dexLPPositions := bc.dexLPRewardPositions()
 	totalLPWeight := 0.0
+	legacyLPWeights := make(map[string]float64)
 	for _, lp := range bc.LiquidityProviders {
 		if lp.StakeAmount != nil && lp.StakeAmount.Sign() > 0 {
-			totalLPWeight += math.Sqrt(AmountToFloat64(lp.StakeAmount))
+			w := math.Sqrt(AmountToFloat64(lp.StakeAmount))
+			legacyLPWeights[lp.Address] = w
+			totalLPWeight += w
 		}
+	}
+	for _, pos := range dexLPPositions {
+		totalLPWeight += pos.Weight
 	}
 	if totalLPWeight > 0 && lpCurveShare.Sign() > 0 {
 		for _, lp := range bc.LiquidityProviders {
-			if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
+			weight := legacyLPWeights[lp.Address]
+			if weight <= 0 {
 				continue
 			}
-			share := portionFromWeight(lpCurveShare, math.Sqrt(AmountToFloat64(lp.StakeAmount)), totalLPWeight)
+			share := portionFromWeight(lpCurveShare, weight, totalLPWeight)
 			addStringAmount(breakdown.LiquidityRewards, lp.Address, share)
 			bc.AddLPReward(lp.Address, share)
+		}
+		for _, pos := range dexLPPositions {
+			share := portionFromWeight(lpCurveShare, pos.Weight, totalLPWeight)
+			addStringAmount(breakdown.LiquidityRewards, pos.Address, share)
+			bc.AddLPReward(pos.Address, share)
 		}
 	}
 
