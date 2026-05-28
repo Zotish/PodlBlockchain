@@ -760,12 +760,20 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 		}
 		if !found {
 			newValidator := &Validator{
-				Address:        validator.Address,
-				LPStakeAmount:  validator.LPStakeAmount,
-				LockTime:       validator.LockTime,
-				LiquidityPower: validator.LiquidityPower,
-				PenaltyScore:   validator.PenaltyScore,
-				LastActive:     validator.LastActive,
+				Address:             validator.Address,
+				DEXAddress:          validator.DEXAddress,
+				DEXFactoryAddress:   validator.DEXFactoryAddress,
+				PairKey:             validator.PairKey,
+				Token0:              validator.Token0,
+				Token1:              validator.Token1,
+				LPTokenAmount:       validator.LPTokenAmount,
+				LockedLiquidityUSD:  validator.LockedLiquidityUSD,
+				ValidatorPairWeight: validator.ValidatorPairWeight,
+				LPStakeAmount:       validator.LPStakeAmount,
+				LockTime:            validator.LockTime,
+				LiquidityPower:      validator.LiquidityPower,
+				PenaltyScore:        validator.PenaltyScore,
+				LastActive:          validator.LastActive,
 			}
 			ns.Blockchain.Validators = append(ns.Blockchain.Validators, newValidator)
 			log.Printf("Added new validator from network: %s", validator.Address)

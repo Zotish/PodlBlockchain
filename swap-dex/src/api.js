@@ -56,6 +56,23 @@ export async function getContractStorage(address) {
   return unwrapAggregator(data);
 }
 
+export async function registerDexValidator({ address, pairAddress }) {
+  const res = await fetch(`${getNodeUrl()}/validator/register-dex`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address, pair_address: pairAddress })
+  });
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+  if (!res.ok) throw new Error(data.error || text || "Validator registration failed");
+  return unwrapAggregator(data);
+}
+
 export async function sendContractTx({
   address,
   privateKey,

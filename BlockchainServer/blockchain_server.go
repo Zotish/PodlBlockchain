@@ -1145,14 +1145,22 @@ func (bcs *BlockchainServer) GetValidators(w http.ResponseWriter, r *http.Reques
 	validators := make([]map[string]interface{}, len(bcs.BlockchainPtr.Validators))
 	for i, v := range bcs.BlockchainPtr.Validators {
 		validators[i] = map[string]interface{}{
-			"address":         v.Address,
-			"stake":           v.LPStakeAmount,
-			"liquidity_power": v.LiquidityPower,
-			"penalty_score":   v.PenaltyScore,
-			"blocks_proposed": v.BlocksProposed,
-			"blocks_included": v.BlocksIncluded,
-			"last_active":     v.LastActive.Format(time.RFC3339),
-			"lock_time":       v.LockTime.Format(time.RFC3339),
+			"address":              v.Address,
+			"stake":                v.LPStakeAmount,
+			"dex_address":          v.DEXAddress,
+			"dex_factory_address":  v.DEXFactoryAddress,
+			"pair_key":             v.PairKey,
+			"token0":               v.Token0,
+			"token1":               v.Token1,
+			"lp_token_amount":      v.LPTokenAmount,
+			"locked_liquidity_usd": v.LockedLiquidityUSD,
+			"pair_weight":          v.ValidatorPairWeight,
+			"liquidity_power":      v.LiquidityPower,
+			"penalty_score":        v.PenaltyScore,
+			"blocks_proposed":      v.BlocksProposed,
+			"blocks_included":      v.BlocksIncluded,
+			"last_active":          v.LastActive.Format(time.RFC3339),
+			"lock_time":            v.LockTime.Format(time.RFC3339),
 		}
 	}
 
@@ -1940,6 +1948,14 @@ func (bcs *BlockchainServer) AddValidatorFromPeer(w http.ResponseWriter, r *http
 	for _, v := range bcs.BlockchainPtr.Validators {
 		if v.Address == incoming.Address {
 			// Optional: update stake/LP/penalty/stats from the incoming object
+			v.DEXAddress = incoming.DEXAddress
+			v.DEXFactoryAddress = incoming.DEXFactoryAddress
+			v.PairKey = incoming.PairKey
+			v.Token0 = incoming.Token0
+			v.Token1 = incoming.Token1
+			v.LPTokenAmount = incoming.LPTokenAmount
+			v.LockedLiquidityUSD = incoming.LockedLiquidityUSD
+			v.ValidatorPairWeight = incoming.ValidatorPairWeight
 			v.LPStakeAmount = incoming.LPStakeAmount
 			v.LockTime = incoming.LockTime
 			v.LiquidityPower = incoming.LiquidityPower
@@ -1970,8 +1986,17 @@ func (bcs *BlockchainServer) AddValidatorFromPeer(w http.ResponseWriter, r *http
 
 func (bcs *BlockchainServer) AddValidator(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !strings.EqualFold(os.Getenv("LQD_ALLOW_LEGACY_VALIDATORS"), "true") {
+		http.Error(w, "legacy validator registration is disabled; use /validator/register-dex with a locked canonical DEX LP position", http.StatusForbidden)
 		return
 	}
 
@@ -1996,12 +2021,89 @@ func (bcs *BlockchainServer) AddValidator(w http.ResponseWriter, r *http.Request
 	}
 
 	// rebroadcast all so peers converge
-	for _, v := range bcs.BlockchainPtr.Validators {
-		go bcs.BlockchainPtr.Network.BroadcastValidator(v)
+	if bcs.BlockchainPtr.Network != nil {
+		for _, v := range bcs.BlockchainPtr.Validators {
+			go bcs.BlockchainPtr.Network.BroadcastValidator(v)
+		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": "ok", "address": req.Address, "amount": req.Amount, "minStake": bcs.BlockchainPtr.MinStake,
 	})
+}
+
+func (bcs *BlockchainServer) RegisterDEXValidator(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Address     string `json:"address"`
+		PairAddress string `json:"pair_address"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	req.Address = strings.TrimSpace(req.Address)
+	req.PairAddress = strings.TrimSpace(req.PairAddress)
+	if !wallet.ValidateAddress(req.Address) || !wallet.ValidateAddress(req.PairAddress) {
+		http.Error(w, "invalid address or pair_address", http.StatusBadRequest)
+		return
+	}
+
+	assessment, err := bcs.BlockchainPtr.RegisterDEXValidator(req.Address, req.PairAddress)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":     "rejected",
+			"error":      err.Error(),
+			"assessment": assessment,
+		})
+		return
+	}
+
+	if bcs.BlockchainPtr.Network != nil {
+		for _, v := range bcs.BlockchainPtr.Validators {
+			go bcs.BlockchainPtr.Network.BroadcastValidator(v)
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":     "ok",
+		"assessment": assessment,
+	})
+}
+
+func (bcs *BlockchainServer) AssessDEXValidator(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	address := strings.TrimSpace(r.URL.Query().Get("address"))
+	pairAddress := strings.TrimSpace(r.URL.Query().Get("pair_address"))
+	if !wallet.ValidateAddress(address) || !wallet.ValidateAddress(pairAddress) {
+		http.Error(w, "invalid address or pair_address", http.StatusBadRequest)
+		return
+	}
+	assessment, err := bcs.BlockchainPtr.AssessDEXValidator(address, pairAddress)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(assessment)
 }
 
 func (bcs *BlockchainServer) GetTransactionByHash(w http.ResponseWriter, r *http.Request) {
@@ -3912,6 +4014,8 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/rpc", b.limiter.middleware(maxBytesMiddleware(b.JSONRPC, maxBodySize)))
 	http.HandleFunc("/validator/new", b.AddValidatorFromPeer)
 	http.HandleFunc("/validator/add", b.AddValidator)
+	http.HandleFunc("/validator/register-dex", b.RegisterDEXValidator)
+	http.HandleFunc("/validator/assess-dex", b.AssessDEXValidator)
 	http.HandleFunc("/tx/", b.GetTransactionByHash)
 	http.HandleFunc("/contract/deploy", b.limiter.middleware(maxBytesMiddleware(b.ContractDeploy, deployBodySize)))
 	http.HandleFunc("/contract/call", b.limiter.middleware(maxBytesMiddleware(b.ContractCall, maxBodySize)))

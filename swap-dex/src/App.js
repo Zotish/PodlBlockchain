@@ -11,6 +11,7 @@ import {
   getTokenAllowance,
   getTokenBalance,
   getTokenMeta,
+  registerDexValidator,
   waitForTx,
   sendContractTx,
 } from "./api";
@@ -676,7 +677,16 @@ export default function App() {
     const days = parseInt(valDays, 10);
     if (!days || days <= 0) { showToast("Invalid lock duration", "error"); return; }
     const rawLP = parseHuman(valLPAmt, 8);  // LP tokens always 8 decimals
-    await sendTx(dexAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation");
+    const ok = await sendTx(dexAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation");
+    if (ok && pairAddr) {
+      try {
+        const registration = await registerDexValidator({ address: wallet.address, pairAddress: pairAddr });
+        const value = registration?.assessment?.locked_liquidity_usd;
+        showToast(value ? `Validator registered: $${Number(value).toFixed(2)} locked` : "Validator registered", "success");
+      } catch (err) {
+        showToast(err.message || "LP locked, validator registration needs review", "error");
+      }
+    }
   }
 
   async function doUnlockLP() {
