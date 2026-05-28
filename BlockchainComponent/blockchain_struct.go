@@ -925,10 +925,14 @@ func (bc *Blockchain_struct) GetNetworkStats() map[string]interface{} {
 	validators := make([]map[string]interface{}, len(bc.Validators))
 	for i, v := range bc.Validators {
 		validators[i] = map[string]interface{}{
-			"address":         v.Address,
-			"stake":           v.LPStakeAmount,
-			"liquidity_power": v.LiquidityPower,
-			"penalty_score":   v.PenaltyScore,
+			"address":              v.Address,
+			"stake":                v.LPStakeAmount,
+			"dex_address":          v.DEXAddress,
+			"pair_key":             v.PairKey,
+			"locked_liquidity_usd": v.LockedLiquidityUSD,
+			"pair_weight":          v.ValidatorPairWeight,
+			"liquidity_power":      v.LiquidityPower,
+			"penalty_score":        v.PenaltyScore,
 		}
 	}
 

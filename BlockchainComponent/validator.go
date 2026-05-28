@@ -5,7 +5,9 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +30,14 @@ type Validator struct {
 	// When DEXAddress is set the validator's power is derived from their locked
 	// LP position in that DEX pool (multi-asset liquidity), not from a single-
 	// asset stake.  This is the canonical PosDL mode.
-	DEXAddress    string `json:"dex_address,omitempty"`
-	LPTokenAmount string `json:"lp_token_amount,omitempty"` // decimal big-int string
+	DEXAddress          string  `json:"dex_address,omitempty"`
+	DEXFactoryAddress   string  `json:"dex_factory_address,omitempty"`
+	PairKey             string  `json:"pair_key,omitempty"`
+	Token0              string  `json:"token0,omitempty"`
+	Token1              string  `json:"token1,omitempty"`
+	LPTokenAmount       string  `json:"lp_token_amount,omitempty"` // decimal big-int string
+	LockedLiquidityUSD  float64 `json:"locked_liquidity_usd,omitempty"`
+	ValidatorPairWeight float64 `json:"validator_pair_weight,omitempty"`
 
 	// ── Legacy PoS (used when DEXAddress == "") ───────────────────────────────
 	LPStakeAmount float64 `json:"lp_stake_amount"`
@@ -41,6 +49,26 @@ type Validator struct {
 	BlocksProposed int       `json:"blocks_proposed"`
 	BlocksIncluded int       `json:"blocks_included"`
 	LastActive     time.Time `json:"last_active"`
+}
+
+type DEXValidatorAssessment struct {
+	Address            string  `json:"address"`
+	PairAddress        string  `json:"pair_address"`
+	PairKey            string  `json:"pair_key"`
+	Token0             string  `json:"token0"`
+	Token1             string  `json:"token1"`
+	Token0Symbol       string  `json:"token0_symbol"`
+	Token1Symbol       string  `json:"token1_symbol"`
+	LockedLP           string  `json:"locked_lp"`
+	TotalLP            string  `json:"total_lp"`
+	LockUntil          int64   `json:"lock_until"`
+	LockedLiquidityUSD float64 `json:"locked_liquidity_usd"`
+	MinLiquidityUSD    float64 `json:"min_liquidity_usd"`
+	PairWeight         float64 `json:"pair_weight"`
+	LockMultiplier     float64 `json:"lock_multiplier"`
+	LiquidityPower     float64 `json:"liquidity_power"`
+	Eligible           bool    `json:"eligible"`
+	Reason             string  `json:"reason,omitempty"`
 }
 
 func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lockDuration time.Duration) error {
@@ -86,33 +114,50 @@ func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lo
 }
 
 // AddDEXValidator registers a validator using a DEX LP position — the True PosDL mode.
-// The validator must already hold LP tokens in the DEX pool at dexAddress.
-// lpTokenAmount is the amount of LP tokens (decimal string) to lock for validation.
+// The validator must have locked LP in a canonical LQD pair. Eligibility is based on
+// USD/LQD-equivalent locked liquidity value, not raw LP token count.
 func (bc *Blockchain_struct) AddDEXValidator(address, dexAddress, lpTokenAmount string, lockDuration time.Duration) error {
 	bc.Mutex.Lock()
 	defer bc.Mutex.Unlock()
 
+	assessment, err := bc.assessDEXValidatorNoLock(address, dexAddress, lpTokenAmount)
+	if err != nil {
+		return err
+	}
+	if !assessment.Eligible {
+		return fmt.Errorf("validator not eligible: %s", assessment.Reason)
+	}
+
+	applyAssessment := func(v *Validator) {
+		v.DEXAddress = strings.ToLower(dexAddress)
+		v.PairKey = assessment.PairKey
+		v.Token0 = assessment.Token0
+		v.Token1 = assessment.Token1
+		v.LPTokenAmount = assessment.LockedLP
+		v.LockedLiquidityUSD = assessment.LockedLiquidityUSD
+		v.ValidatorPairWeight = assessment.PairWeight
+		v.LockTime = time.Unix(assessment.LockUntil, 0)
+		v.LiquidityPower = assessment.LiquidityPower
+		v.LastActive = time.Now()
+	}
+
 	for _, v := range bc.Validators {
-		if v.Address == address {
-			log.Printf("PosDL validator %s already registered; continuing", address)
+		if strings.EqualFold(v.Address, address) {
+			applyAssessment(v)
+			dbCopy := *bc
+			dbCopy.Mutex = sync.Mutex{}
+			if err := PutIntoDB(dbCopy); err != nil {
+				return fmt.Errorf("error saving PosDL validator: %v", err)
+			}
+			log.Printf("PosDL validator updated: %s DEX=%s lpAmount=%s", address, dexAddress, assessment.LockedLP)
 			return nil
 		}
 	}
-	if dexAddress == "" {
-		return fmt.Errorf("dex_address is required for PosDL validator registration")
-	}
-	if lpTokenAmount == "" || lpTokenAmount == "0" {
-		return fmt.Errorf("lp_token_amount must be > 0")
-	}
 
 	newVal := &Validator{
-		Address:       address,
-		DEXAddress:    strings.ToLower(dexAddress),
-		LPTokenAmount: lpTokenAmount,
-		LockTime:      time.Now().Add(lockDuration),
-		LastActive:    time.Now(),
+		Address: address,
 	}
-	newVal.LiquidityPower = bc.getDEXLPPower(newVal)
+	applyAssessment(newVal)
 
 	bc.Validators = append(bc.Validators, newVal)
 	if bc.Network != nil {
@@ -126,6 +171,20 @@ func (bc *Blockchain_struct) AddDEXValidator(address, dexAddress, lpTokenAmount 
 	}
 	log.Printf("PosDL validator registered: %s DEX=%s lpAmount=%s", address, dexAddress, lpTokenAmount)
 	return nil
+}
+
+func (bc *Blockchain_struct) AssessDEXValidator(address, pairAddress string) (*DEXValidatorAssessment, error) {
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+	return bc.assessDEXValidatorNoLock(address, pairAddress, "")
+}
+
+func (bc *Blockchain_struct) RegisterDEXValidator(address, pairAddress string) (*DEXValidatorAssessment, error) {
+	if err := bc.AddDEXValidator(address, pairAddress, "", 0); err != nil {
+		assessment, _ := bc.AssessDEXValidator(address, pairAddress)
+		return assessment, err
+	}
+	return bc.AssessDEXValidator(address, pairAddress)
 }
 
 // UpdateLiquidityPower refreshes every validator's LiquidityPower.
@@ -160,43 +219,18 @@ func legacyLiquidityPower(stakeAmount float64, lockTime time.Time) float64 {
 //
 // where lockMultiplier = 1 + remainingLockYears, so longer locks earn more power.
 func (bc *Blockchain_struct) getDEXLPPower(v *Validator) float64 {
-	if bc.ContractEngine == nil || v.DEXAddress == "" {
+	assessment, err := bc.assessDEXValidatorNoLock(v.Address, v.DEXAddress, v.LPTokenAmount)
+	if err != nil || assessment == nil {
 		return 0
 	}
-
-	storage, err := bc.ContractEngine.DB.LoadAllStorage(strings.ToLower(v.DEXAddress))
-	if err != nil || len(storage) == 0 {
-		return 0
-	}
-
-	// Prefer the on-chain locked amount; fall back to the registered amount
-	// (useful during bootstrapping before the contract tx is mined).
-	valKey := "val_lp:" + strings.ToLower(v.Address)
-	lockedLPStr, ok := storage[valKey]
-	if !ok || lockedLPStr == "" || lockedLPStr == "0" {
-		lockedLPStr = v.LPTokenAmount
-	}
-
-	lockedLP := parseBigToFloat(lockedLPStr)
-	totalLP := parseBigToFloat(storage["totalLP"])
-	resA := parseBigToFloat(storage["reserveA"])
-	resB := parseBigToFloat(storage["reserveB"])
-
-	if totalLP <= 0 || lockedLP <= 0 {
-		return 0
-	}
-
-	// LP backing value
-	lpValue := lockedLP * (resA + resB) / totalLP
-
-	// Lock time multiplier: base 1.0 + remaining fraction of a year
-	remaining := time.Until(v.LockTime).Hours()
-	if remaining < 0 {
-		remaining = 0
-	}
-	lockMultiplier := 1.0 + (remaining / 8760.0)
-
-	return lpValue * lockMultiplier
+	v.PairKey = assessment.PairKey
+	v.Token0 = assessment.Token0
+	v.Token1 = assessment.Token1
+	v.LPTokenAmount = assessment.LockedLP
+	v.LockedLiquidityUSD = assessment.LockedLiquidityUSD
+	v.ValidatorPairWeight = assessment.PairWeight
+	v.LockTime = time.Unix(assessment.LockUntil, 0)
+	return assessment.LiquidityPower
 }
 
 // parseBigToFloat converts a decimal integer string (e.g. big.Int.String()) to float64.
@@ -211,6 +245,267 @@ func parseBigToFloat(v string) float64 {
 	}
 	f, _ := new(big.Float).SetInt(z).Float64()
 	return f
+}
+
+func (bc *Blockchain_struct) assessDEXValidatorNoLock(address, pairAddress, fallbackLockedLP string) (*DEXValidatorAssessment, error) {
+	address = strings.ToLower(strings.TrimSpace(address))
+	pairAddress = strings.ToLower(strings.TrimSpace(pairAddress))
+	if address == "" || pairAddress == "" {
+		return nil, fmt.Errorf("address and pair_address are required")
+	}
+	if bc.ContractEngine == nil {
+		return nil, fmt.Errorf("contract engine unavailable")
+	}
+
+	storage, err := bc.ContractEngine.DB.LoadAllStorage(pairAddress)
+	if err != nil || len(storage) == 0 {
+		return nil, fmt.Errorf("pair contract storage not found")
+	}
+
+	token0 := strings.ToLower(strings.TrimSpace(storage["token0"]))
+	token1 := strings.ToLower(strings.TrimSpace(storage["token1"]))
+	if token0 == "" || token1 == "" {
+		return nil, fmt.Errorf("pair contract missing token0/token1")
+	}
+
+	sym0 := bc.validatorTokenSymbol(token0)
+	sym1 := bc.validatorTokenSymbol(token1)
+	pairKey, pairWeight, pairOK := validatorCanonicalPair(sym0, sym1)
+	if !pairOK {
+		return &DEXValidatorAssessment{
+			Address:      address,
+			PairAddress:  pairAddress,
+			Token0:       token0,
+			Token1:       token1,
+			Token0Symbol: sym0,
+			Token1Symbol: sym1,
+			Eligible:     false,
+			Reason:       "pair is not one of LQD/USDT, LQD/USDC, LQD/ETH, LQD/BNB, LQD/BTC",
+		}, nil
+	}
+
+	lockedLP := strings.TrimSpace(storage["vlp:"+address])
+	if (lockedLP == "" || lockedLP == "0") && fallbackLockedLP != "" {
+		lockedLP = strings.TrimSpace(fallbackLockedLP)
+	}
+	totalLP := strings.TrimSpace(storage["totalLP"])
+	lockUntil := parseInt64(storage["vlu:"+address])
+	minUSD := validatorMinLiquidityUSD()
+	if lockedLP == "" {
+		lockedLP = "0"
+	}
+	if totalLP == "" {
+		totalLP = "0"
+	}
+
+	assessment := &DEXValidatorAssessment{
+		Address:         address,
+		PairAddress:     pairAddress,
+		PairKey:         pairKey,
+		Token0:          token0,
+		Token1:          token1,
+		Token0Symbol:    sym0,
+		Token1Symbol:    sym1,
+		LockedLP:        lockedLP,
+		TotalLP:         totalLP,
+		LockUntil:       lockUntil,
+		MinLiquidityUSD: minUSD,
+		PairWeight:      pairWeight,
+	}
+
+	lockedLPFloat := parseBigToFloat(lockedLP)
+	totalLPFloat := parseBigToFloat(totalLP)
+	if lockedLPFloat <= 0 {
+		assessment.Reason = "no locked LP found for validator address"
+		return assessment, nil
+	}
+	if totalLPFloat <= 0 {
+		assessment.Reason = "pair total LP supply is zero"
+		return assessment, nil
+	}
+	if lockUntil <= time.Now().Unix() {
+		assessment.Reason = "validator LP lock is expired or missing"
+		return assessment, nil
+	}
+
+	reserve0USD := bc.validatorReserveUSD(token0, storage["reserve0"])
+	reserve1USD := bc.validatorReserveUSD(token1, storage["reserve1"])
+	totalPairUSD := reserve0USD + reserve1USD
+	if totalPairUSD <= 0 {
+		assessment.Reason = "pair reserve value is zero or token price unavailable"
+		return assessment, nil
+	}
+
+	lockedValueUSD := totalPairUSD * (lockedLPFloat / totalLPFloat)
+	remainingHours := time.Until(time.Unix(lockUntil, 0)).Hours()
+	if remainingHours < 0 {
+		remainingHours = 0
+	}
+	lockMultiplier := 1.0 + (remainingHours / 8760.0)
+	if lockMultiplier < 1 {
+		lockMultiplier = 1
+	}
+	assessment.LockedLiquidityUSD = lockedValueUSD
+	assessment.LockMultiplier = lockMultiplier
+	assessment.LiquidityPower = math.Sqrt(lockedValueUSD) * pairWeight * lockMultiplier
+
+	if lockedValueUSD < minUSD {
+		assessment.Reason = fmt.Sprintf("locked liquidity %.2f USD is below minimum %.2f USD", lockedValueUSD, minUSD)
+		return assessment, nil
+	}
+
+	assessment.Eligible = true
+	return assessment, nil
+}
+
+func (bc *Blockchain_struct) validatorReserveUSD(token string, rawReserve string) float64 {
+	decimals := bc.validatorTokenDecimals(token)
+	human := parseBigToFloat(rawReserve) / math.Pow10(decimals)
+	return human * validatorTokenPriceUSD(bc.validatorTokenSymbol(token))
+}
+
+func (bc *Blockchain_struct) validatorTokenSymbol(token string) string {
+	token = strings.ToLower(strings.TrimSpace(token))
+	if token == "" {
+		return ""
+	}
+	if token == "lqd" {
+		return "LQD"
+	}
+	for addr, symbol := range parseKVEnv("LQD_VALIDATOR_TOKEN_SYMBOLS") {
+		if strings.EqualFold(addr, token) {
+			return strings.ToUpper(symbol)
+		}
+	}
+	if bc.ContractEngine != nil {
+		storage, err := bc.ContractEngine.DB.LoadAllStorage(token)
+		if err == nil {
+			if symbol := strings.TrimSpace(storage["symbol"]); symbol != "" {
+				return strings.ToUpper(symbol)
+			}
+		}
+	}
+	return strings.ToUpper(token)
+}
+
+func (bc *Blockchain_struct) validatorTokenDecimals(token string) int {
+	token = strings.ToLower(strings.TrimSpace(token))
+	if token == "" || token == "lqd" {
+		return 8
+	}
+	for addr, decimals := range parseKVEnv("LQD_VALIDATOR_TOKEN_DECIMALS") {
+		if strings.EqualFold(addr, token) {
+			if n, err := strconv.Atoi(decimals); err == nil && n >= 0 && n <= 36 {
+				return n
+			}
+		}
+	}
+	if bc.ContractEngine != nil {
+		storage, err := bc.ContractEngine.DB.LoadAllStorage(token)
+		if err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(storage["decimals"])); err == nil && n >= 0 && n <= 36 {
+				return n
+			}
+		}
+	}
+	return 8
+}
+
+func validatorCanonicalPair(symbolA, symbolB string) (string, float64, bool) {
+	a := strings.ToUpper(strings.TrimSpace(symbolA))
+	b := strings.ToUpper(strings.TrimSpace(symbolB))
+	if a != "LQD" && b != "LQD" {
+		return "", 0, false
+	}
+	quote := a
+	if quote == "LQD" {
+		quote = b
+	}
+	allowed := map[string]float64{
+		"USDT": 1.00,
+		"USDC": 1.00,
+		"ETH":  1.10,
+		"BNB":  1.10,
+		"BTC":  1.20,
+	}
+	weight, ok := allowed[quote]
+	if !ok {
+		return "", 0, false
+	}
+	if override := validatorPairWeight("LQD/" + quote); override > 0 {
+		weight = override
+	}
+	return "LQD/" + quote, weight, true
+}
+
+func validatorMinLiquidityUSD() float64 {
+	if v := parseEnvFloat("LQD_VALIDATOR_MIN_LIQUIDITY_USD"); v > 0 {
+		return v
+	}
+	return 100000
+}
+
+func validatorTokenPriceUSD(symbol string) float64 {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	defaults := map[string]float64{
+		"LQD":  1,
+		"USDT": 1,
+		"USDC": 1,
+		"ETH":  3500,
+		"BNB":  650,
+		"BTC":  100000,
+	}
+	if prices := parseKVEnv("LQD_VALIDATOR_TOKEN_PRICES"); len(prices) > 0 {
+		if v, ok := prices[symbol]; ok {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+				return f
+			}
+		}
+	}
+	return defaults[symbol]
+}
+
+func validatorPairWeight(pairKey string) float64 {
+	for key, value := range parseKVEnv("LQD_VALIDATOR_PAIR_WEIGHTS") {
+		if strings.EqualFold(strings.ReplaceAll(key, "-", "/"), pairKey) {
+			if f, err := strconv.ParseFloat(value, 64); err == nil && f > 0 {
+				return f
+			}
+		}
+	}
+	return 0
+}
+
+func parseKVEnv(name string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(os.Getenv(name), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			key, value, ok = strings.Cut(part, ":")
+		}
+		if !ok {
+			continue
+		}
+		out[strings.ToUpper(strings.TrimSpace(key))] = strings.TrimSpace(value)
+	}
+	return out
+}
+
+func parseEnvFloat(name string) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv(name)), 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func parseInt64(v string) int64 {
+	n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	return n
 }
 
 func (bc *Blockchain_struct) MonitorValidators() {

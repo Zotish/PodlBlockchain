@@ -394,16 +394,24 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 	// ── 6. Other Validators — 12 % (non-winner, LP-weighted) ─────────────────
 	var otherValWeightSum float64
 	for _, v := range bc.Validators {
-		if v.Address != validator && v.LPStakeAmount > 0 {
-			otherValWeightSum += math.Sqrt(v.LPStakeAmount)
+		power := v.LiquidityPower
+		if power <= 0 {
+			power = v.LPStakeAmount
+		}
+		if v.Address != validator && power > 0 {
+			otherValWeightSum += math.Sqrt(power)
 		}
 	}
 	if otherValWeightSum > 0 && otherValShare.Sign() > 0 {
 		for _, v := range bc.Validators {
-			if v.Address == validator || v.LPStakeAmount <= 0 {
+			power := v.LiquidityPower
+			if power <= 0 {
+				power = v.LPStakeAmount
+			}
+			if v.Address == validator || power <= 0 {
 				continue
 			}
-			portion := portionFromWeight(otherValShare, math.Sqrt(v.LPStakeAmount), otherValWeightSum)
+			portion := portionFromWeight(otherValShare, math.Sqrt(power), otherValWeightSum)
 			addStringAmount(breakdown.ValidatorPartRewards, v.Address, portion)
 			bc.addAccountBalance(v.Address, portion)
 		}
