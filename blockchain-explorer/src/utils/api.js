@@ -148,7 +148,12 @@ export async function fetchRecentTransactions(limit = 20, options = {}) {
     });
     const primary = firstNodeResult(data);
     const txs = primary?.transactions || data?.transactions || [];
-    if (Array.isArray(txs)) return txs.slice(0, limit);
+    const hasTransactionPage =
+      Array.isArray(primary?.transactions) ||
+      Array.isArray(data?.transactions) ||
+      primary?.total === 0 ||
+      data?.total === 0;
+    if (hasTransactionPage && Array.isArray(txs)) return txs.slice(0, limit);
   } catch {}
   const blocks = await fetchRecentBlocks(Math.max(limit, 20), options);
   return transactionsFromBlocks(blocks, limit);
@@ -202,16 +207,38 @@ export async function fetchAllHistoricalTransactions(options = {}) {
 }
 
 export async function fetchHistoricalTransactionPage(page = 1, pageSize = 10, options = {}) {
-  const data = await fetchJSON(`/transactions?page=${page}&size=${pageSize}`, {
+  try {
+    const data = await fetchJSON(`/transactions?page=${page}&size=${pageSize}`, {
+      cacheTtlMs: 1500,
+      timeoutMs: 10000,
+      ...options,
+    });
+    const primary = firstNodeResult(data);
+    const transactions = primary?.transactions || data?.transactions;
+    const hasTransactionPage =
+      Array.isArray(transactions) ||
+      primary?.total === 0 ||
+      data?.total === 0;
+    if (hasTransactionPage) {
+      return {
+        transactions: Array.isArray(transactions) ? transactions : [],
+        total: Number(primary?.total || data?.total || 0),
+        totalPages: Math.max(1, Number(primary?.total_pages || data?.total_pages || 1)),
+      };
+    }
+  } catch {}
+
+  const fallback = await fetchJSON(`/fetch_last_n_block?page=${page}&size=${pageSize}`, {
     cacheTtlMs: 1500,
     timeoutMs: 10000,
     ...options,
   });
-  const primary = firstNodeResult(data);
+  const primary = firstNodeResult(fallback);
+  const blocks = extractBlocks(primary || fallback);
   return {
-    transactions: primary?.transactions || data?.transactions || [],
-    total: Number(primary?.total || data?.total || 0),
-    totalPages: Math.max(1, Number(primary?.total_pages || data?.total_pages || 1)),
+    transactions: transactionsFromBlocks(blocks, pageSize),
+    total: Number(primary?.total || fallback?.total || blocks.length || 0),
+    totalPages: Math.max(1, Number(primary?.total_pages || fallback?.total_pages || 1)),
   };
 }
 
