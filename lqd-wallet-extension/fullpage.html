@@ -210,23 +210,36 @@
       </div>
 
       <div class="card">
-        <div class="card-title">DEX LP Token Position</div>
-        <div class="field">
-          <label>DEX Pool / Factory Contract</label>
-          <input id="lpPoolAddr" placeholder="0x... pool or factory address" />
+        <div class="lp-card-head">
+          <div>
+            <div class="card-title">Multi-Pool LP Positions</div>
+            <div class="card-sub">Select any registered pool. Your LP balance, share, and reserves load automatically.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="lpSyncPoolsTopBtn">Sync Pools</button>
         </div>
-        <div class="grid-2">
-          <div class="field"><label>Token A</label><input id="lpTokenA" placeholder="lqd or 0x..." /></div>
-          <div class="field"><label>Token B</label><input id="lpTokenB" placeholder="0x..." /></div>
+        <div id="lpPoolList" class="lp-pool-list">
+          <div class="notice">Loading registered pools...</div>
         </div>
-        <div class="grid-2">
-          <div class="field"><label>Token A Decimals</label><input id="lpDecimalsA" type="number" value="8" min="0" max="36" /></div>
-          <div class="field"><label>Token B Decimals</label><input id="lpDecimalsB" type="number" value="8" min="0" max="36" /></div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
-          <button class="btn btn-primary btn-sm" id="lpLoadBtn">Load LP Position</button>
-          <button class="btn btn-secondary btn-sm" id="lpSaveBtn">Save Pool</button>
-        </div>
+
+        <details class="advanced-box">
+          <summary>Advanced manual pool</summary>
+          <div class="field">
+            <label>DEX Pool / Factory Contract</label>
+            <input id="lpPoolAddr" placeholder="0x... pool or factory address" />
+          </div>
+          <div class="grid-2">
+            <div class="field"><label>Token A</label><input id="lpTokenA" placeholder="lqd or 0x..." /></div>
+            <div class="field"><label>Token B</label><input id="lpTokenB" placeholder="0x..." /></div>
+          </div>
+          <div class="grid-2">
+            <div class="field"><label>Token A Decimals</label><input id="lpDecimalsA" type="number" value="8" min="0" max="36" /></div>
+            <div class="field"><label>Token B Decimals</label><input id="lpDecimalsB" type="number" value="8" min="0" max="36" /></div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+            <button class="btn btn-primary btn-sm" id="lpLoadBtn">Load Manual Pool</button>
+            <button class="btn btn-secondary btn-sm" id="lpSaveBtn">Save to Multi-Pool</button>
+          </div>
+        </details>
 
         <div class="grid-3" id="lpStatsGrid">
           <div class="stat-box"><div class="stat-label">LP Balance</div><div class="stat-value" id="lpBalanceStat">—</div></div>

@@ -26,6 +26,8 @@ let lpDashboard = {
   recentRewards: [],
   pools: null,
   storage: {},
+  poolCards: [],
+  selectedPool: null,
 };
 const LQD_BLOCK_SECONDS = 2;
 const LQD_BLOCKS_PER_YEAR = Math.floor((365 * 24 * 60 * 60) / LQD_BLOCK_SECONDS);
@@ -111,6 +113,15 @@ function parseHuman(humanStr, decimals = 8) {
 function shortAddr(a) {
   if (!a || a.length < 10) return a || "";
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function isLocalEndpoint(url = "") {
@@ -539,6 +550,50 @@ function lpSettingsKey() {
   return `lqd_lp_settings_${state.address || "default"}`;
 }
 
+function lpSavedPoolsKey() {
+  return `lqd_lp_saved_pools_${state.address || "default"}`;
+}
+
+function loadSavedLPPools() {
+  try {
+    const list = JSON.parse(localStorage.getItem(lpSavedPoolsKey()) || "[]");
+    const pools = Array.isArray(list) ? list : [];
+    const single = JSON.parse(localStorage.getItem(lpSettingsKey()) || "{}");
+    if (single.pool) pools.unshift(single);
+    const seen = new Set();
+    return pools
+      .filter(p => p?.pool)
+      .filter((p) => {
+        const key = String(p.pool).toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  } catch {
+    return [];
+  }
+}
+
+function saveSavedLPPools(pools) {
+  const cleaned = [];
+  const seen = new Set();
+  (pools || []).forEach((pool) => {
+    if (!pool?.pool) return;
+    const key = String(pool.pool).toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    cleaned.push(pool);
+  });
+  localStorage.setItem(lpSavedPoolsKey(), JSON.stringify(cleaned.slice(0, 30)));
+}
+
+function upsertSavedLPPool(pool) {
+  if (!pool?.pool) return;
+  const key = String(pool.pool).toLowerCase();
+  const pools = loadSavedLPPools().filter(p => String(p.pool).toLowerCase() !== key);
+  saveSavedLPPools([{ ...pool, pool: pool.pool }, ...pools]);
+}
+
 function loadSavedLPSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(lpSettingsKey()) || "{}");
@@ -559,7 +614,8 @@ function saveLPSettings() {
     decimalsB: parseInt($("lpDecimalsB")?.value, 10) || 8,
   };
   localStorage.setItem(lpSettingsKey(), JSON.stringify(payload));
-  toast("LP pool saved", "success");
+  upsertSavedLPPool(payload);
+  toast("Pool saved to multi-pool list", "success");
   return payload;
 }
 
@@ -580,6 +636,40 @@ function findStorageValue(storage, key, fallback = "0") {
   return found ? storage[found] : fallback;
 }
 
+function normalizePoolMap(poolsPayload) {
+  const raw = poolsPayload?.pools || poolsPayload?.Pools || {};
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+
+function tokenLabel(value) {
+  const token = String(value || "").trim();
+  if (!token) return "Token";
+  if (token.toLowerCase() === "lqd") return "LQD";
+  if (token.startsWith("0x")) return shortAddr(token);
+  return token.toUpperCase();
+}
+
+function inferPoolForm(address, storage = {}, saved = {}) {
+  const tokenA = saved.tokenA || findStorageValue(storage, "token0", findStorageValue(storage, "tokenA", "lqd")) || "lqd";
+  const tokenB = saved.tokenB || findStorageValue(storage, "token1", findStorageValue(storage, "tokenB", "")) || "";
+  return {
+    pool: address,
+    tokenA,
+    tokenB,
+    decimalsA: parseInt(saved.decimalsA || findStorageValue(storage, "decimals0", findStorageValue(storage, "decimalsA", "8")), 10) || 8,
+    decimalsB: parseInt(saved.decimalsB || findStorageValue(storage, "decimals1", findStorageValue(storage, "decimalsB", "8")), 10) || 8,
+  };
+}
+
+function setLPForm(form) {
+  if (!form) return;
+  if ($("lpPoolAddr")) $("lpPoolAddr").value = form.pool || "";
+  if ($("lpTokenA")) $("lpTokenA").value = form.tokenA || "lqd";
+  if ($("lpTokenB")) $("lpTokenB").value = form.tokenB || "";
+  if ($("lpDecimalsA")) $("lpDecimalsA").value = form.decimalsA || 8;
+  if ($("lpDecimalsB")) $("lpDecimalsB").value = form.decimalsB || 8;
+}
+
 function resolveDexStorage(storage, form) {
   const normA = String(form.tokenA || "lqd").toLowerCase();
   const token0 = String(findStorageValue(storage, "token0", findStorageValue(storage, "tokenA", "")) || "").toLowerCase();
@@ -594,6 +684,82 @@ function resolveDexStorage(storage, form) {
     totalLP: findStorageValue(storage, "totalLP", "0"),
     lpBalance: findStorageValue(storage, lpKey, "0"),
   };
+}
+
+async function buildPoolCards(poolsPayload, preferredForm) {
+  const poolMap = normalizePoolMap(poolsPayload);
+  const savedPools = loadSavedLPPools();
+  const byAddress = new Map();
+  Object.keys(poolMap).forEach((address) => {
+    if (address) byAddress.set(String(address).toLowerCase(), { pool: address });
+  });
+  savedPools.forEach((pool) => {
+    const key = String(pool.pool).toLowerCase();
+    byAddress.set(key, { ...(byAddress.get(key) || {}), ...pool });
+  });
+  if (preferredForm?.pool) {
+    const key = String(preferredForm.pool).toLowerCase();
+    byAddress.set(key, { ...(byAddress.get(key) || {}), ...preferredForm });
+  }
+
+  const entries = Array.from(byAddress.values()).slice(0, 30);
+  const cards = [];
+  for (const entry of entries) {
+    const address = entry.pool;
+    let storage = {};
+    try {
+      const storageRes = await nodeGet(`/contract/storage?address=${encodeURIComponent(address)}`);
+      storage = normalizeContractStorage(storageRes);
+    } catch { }
+    const form = inferPoolForm(address, storage, entry);
+    const dex = resolveDexStorage(storage, form);
+    cards.push({
+      address,
+      form,
+      storage,
+      dex,
+      registryLiquidity: poolMap[address] || poolMap[String(address).toLowerCase()] || "0",
+      pair: `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
+    });
+  }
+  return cards;
+}
+
+function renderPoolCards() {
+  const list = $("lpPoolList");
+  if (!list) return;
+  const cards = lpDashboard.poolCards || [];
+  const selected = (getLPForm().pool || lpDashboard.selectedPool?.address || "").toLowerCase();
+  if (!cards.length) {
+    list.innerHTML = '<div class="notice">No pools found yet. Click Sync Pools or add a pool from Advanced manual pool.</div>';
+    return;
+  }
+  list.innerHTML = cards.map((card, idx) => {
+    const active = String(card.address).toLowerCase() === selected ? " active" : "";
+    return `<button class="lp-pool-card${active}" data-pool-idx="${idx}" type="button">
+      <div>
+        <div class="lp-pool-pair">${escapeHtml(card.pair)}</div>
+        <div class="lp-pool-meta">${escapeHtml(shortAddr(card.address))}</div>
+      </div>
+      <div class="lp-pool-metrics">
+        <span class="lp-pool-badge">${escapeHtml(fmtAmount(card.dex.lpBalance, 8))} LP</span>
+        <span class="lp-pool-small">${escapeHtml(formatPercentFromParts(card.dex.lpBalance, card.dex.totalLP))} share</span>
+      </div>
+    </button>`;
+  }).join("");
+  list.querySelectorAll("[data-pool-idx]").forEach((btn) => {
+    btn.addEventListener("click", () => selectPoolCard(cards[Number(btn.dataset.poolIdx)]));
+  });
+}
+
+function selectPoolCard(card) {
+  if (!card) return;
+  setLPForm(card.form);
+  upsertSavedLPPool(card.form);
+  lpDashboard.selectedPool = card;
+  lpDashboard.storage = card.storage || {};
+  renderPoolCards();
+  renderLiquidityDashboard();
 }
 
 function computeRewardAnalytics(protocol, providers, latestRewards) {
@@ -651,7 +817,7 @@ function renderLiquidityDashboard() {
 
 async function loadLiquidityDashboard() {
   loadSavedLPSettings();
-  const form = getLPForm();
+  let form = getLPForm();
   try {
     const [protocol, providers, latestRewards, recentRewards, pools] = await Promise.all([
       nodeGet(`/liquidity/info?address=${encodeURIComponent(state.address)}`).catch(() => ({})),
@@ -660,12 +826,29 @@ async function loadLiquidityDashboard() {
       nodeGet("/rewards/recent").catch(() => []),
       nodeGet("/liquidity/pools").catch(() => ({})),
     ]);
+    const poolCards = await buildPoolCards(pools, form);
+    let selectedPool = poolCards.find(card => String(card.address).toLowerCase() === String(form.pool).toLowerCase());
+    if (!selectedPool && poolCards.length) selectedPool = poolCards[0];
     let storage = {};
-    if (form.pool) {
+    if (selectedPool) {
+      setLPForm(selectedPool.form);
+      form = selectedPool.form;
+      storage = selectedPool.storage || {};
+    } else if (form.pool) {
       const storageRes = await nodeGet(`/contract/storage?address=${encodeURIComponent(form.pool)}`).catch(() => ({}));
       storage = normalizeContractStorage(storageRes);
     }
-    lpDashboard = { protocol, providers: Array.isArray(providers) ? providers : [], latestRewards, recentRewards: Array.isArray(recentRewards) ? recentRewards : [], pools, storage };
+    lpDashboard = {
+      protocol,
+      providers: Array.isArray(providers) ? providers : [],
+      latestRewards,
+      recentRewards: Array.isArray(recentRewards) ? recentRewards : [],
+      pools,
+      storage,
+      poolCards,
+      selectedPool,
+    };
+    renderPoolCards();
     renderLiquidityDashboard();
   } catch (e) {
     toast("Liquidity dashboard failed: " + e.message, "error");
@@ -782,15 +965,16 @@ async function claimOrSyncRewards() {
 }
 
 async function syncPoolRegistry() {
+  const buttons = [$("lpSyncPoolsBtn"), $("lpSyncPoolsTopBtn")].filter(Boolean);
   try {
-    $("lpSyncPoolsBtn").disabled = true;
+    buttons.forEach(btn => { btn.disabled = true; });
     const res = await nodePost("/liquidity/pools/sync", {});
     showResult("lpClaimResult", `✓ Pool registry synced\n${JSON.stringify(res, null, 2)}`);
     await loadLiquidityDashboard();
   } catch (e) {
     showResult("lpClaimResult", "✗ " + e.message, true);
   } finally {
-    $("lpSyncPoolsBtn").disabled = false;
+    buttons.forEach(btn => { btn.disabled = false; });
   }
 }
 
@@ -801,6 +985,7 @@ $("lpAddBtn")?.addEventListener("click", addDexLiquidity);
 $("lpRemoveBtn")?.addEventListener("click", removeDexLiquidity);
 $("lpClaimBtn")?.addEventListener("click", claimOrSyncRewards);
 $("lpSyncPoolsBtn")?.addEventListener("click", syncPoolRegistry);
+$("lpSyncPoolsTopBtn")?.addEventListener("click", syncPoolRegistry);
 $("protocolStakeBtn")?.addEventListener("click", provideProtocolLiquidity);
 $("protocolUnstakeBtn")?.addEventListener("click", unstakeProtocolLiquidity);
 
