@@ -796,8 +796,10 @@ function renderPoolCards() {
         <div class="lp-pool-meta">${escapeHtml(card.tierLabel)} · Weight ${escapeHtml(card.weightLabel)} · ${escapeHtml(shortAddr(card.address))}</div>
       </div>
       <div class="lp-pool-metrics">
-        <span class="lp-pool-badge">${escapeHtml(fmtAmount(card.dex.lpBalance, 8))} LP</span>
+        <span class="lp-pool-badge">Unlocked ${escapeHtml(fmtAmount(card.dex.lpBalance, 8))} LP</span>
+        <span class="lp-pool-badge">Locked ${escapeHtml(fmtAmount(card.dex.lockedLP, 8))} LP</span>
         <span class="lp-pool-small">${escapeHtml(formatPercentFromParts(card.dex.lpBalance, card.dex.totalLP))} share</span>
+        <span class="lp-pool-small">${escapeHtml(formatUnlockTime(card.dex.lockUntil))}</span>
       </div>
     </button>`;
   };
@@ -937,62 +939,6 @@ async function loadLiquidityDashboard() {
     renderLiquidityDashboard();
   } catch (e) {
     toast("Liquidity dashboard failed: " + e.message, "error");
-  }
-}
-
-async function addDexLiquidity() {
-  const form = getLPForm();
-  const amountA = $("lpAmountA")?.value?.trim() || "";
-  const amountB = $("lpAmountB")?.value?.trim() || "";
-  if (!form.pool || !form.tokenA || !form.tokenB || !amountA || !amountB) {
-    toast("Fill pool, tokens, and both amounts", "error");
-    return;
-  }
-  try {
-    $("lpAddBtn").disabled = true;
-    const rawA = parseHuman(amountA, form.decimalsA);
-    const rawB = parseHuman(amountB, form.decimalsB);
-    const nativeValue = form.tokenA.toLowerCase() === "lqd" ? rawA : (form.tokenB.toLowerCase() === "lqd" ? rawB : "0");
-    const res = await contractTx(form.pool, "AddLiquidity", [form.tokenA, form.tokenB, rawA, rawB], nativeValue);
-    const hash = res.tx_hash || res.TxHash || res.hash || "";
-    showResult("lpAddResult", `✓ Liquidity add submitted\nTx: ${hash}`);
-    await recordLocalActivity({ type: "liquidity_add", contract: form.pool, tx_hash: hash, value: `${rawA}/${rawB}` });
-    $("lpAmountA").value = "";
-    $("lpAmountB").value = "";
-    toast("Liquidity add submitted", "success");
-    if (hash) await waitForTx(hash, 6000).catch(() => null);
-    await loadLiquidityDashboard();
-  } catch (e) {
-    showResult("lpAddResult", "✗ " + e.message, true);
-    toast("Add liquidity failed: " + e.message, "error");
-  } finally {
-    $("lpAddBtn").disabled = false;
-  }
-}
-
-async function removeDexLiquidity() {
-  const form = getLPForm();
-  const amount = $("lpRemoveAmount")?.value?.trim() || "";
-  if (!form.pool || !form.tokenA || !form.tokenB || !amount) {
-    toast("Fill pool, tokens, and LP amount", "error");
-    return;
-  }
-  try {
-    $("lpRemoveBtn").disabled = true;
-    const rawLP = parseHuman(amount, 8);
-    const res = await contractTx(form.pool, "RemoveLiquidity", [form.tokenA, form.tokenB, rawLP]);
-    const hash = res.tx_hash || res.TxHash || res.hash || "";
-    showResult("lpRemoveResult", `✓ Liquidity remove submitted\nTx: ${hash}`);
-    await recordLocalActivity({ type: "liquidity_remove", contract: form.pool, tx_hash: hash, value: rawLP });
-    $("lpRemoveAmount").value = "";
-    toast("Liquidity remove submitted", "success");
-    if (hash) await waitForTx(hash, 6000).catch(() => null);
-    await loadLiquidityDashboard();
-  } catch (e) {
-    showResult("lpRemoveResult", "✗ " + e.message, true);
-    toast("Remove liquidity failed: " + e.message, "error");
-  } finally {
-    $("lpRemoveBtn").disabled = false;
   }
 }
 
@@ -1145,8 +1091,6 @@ async function syncPoolRegistry() {
 $("lpRefreshBtn")?.addEventListener("click", loadLiquidityDashboard);
 $("lpLoadBtn")?.addEventListener("click", loadLiquidityDashboard);
 $("lpSaveBtn")?.addEventListener("click", () => { saveLPSettings(); loadLiquidityDashboard(); });
-$("lpAddBtn")?.addEventListener("click", addDexLiquidity);
-$("lpRemoveBtn")?.addEventListener("click", removeDexLiquidity);
 $("lpLockBtn")?.addEventListener("click", lockDexLPForValidation);
 $("lpUnlockBtn")?.addEventListener("click", unlockDexLPForValidation);
 $("lpRegisterValidatorBtn")?.addEventListener("click", registerDexValidatorFromLockedLP);
