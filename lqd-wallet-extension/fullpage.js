@@ -31,6 +31,13 @@ let lpDashboard = {
 };
 const LQD_BLOCK_SECONDS = 2;
 const LQD_BLOCKS_PER_YEAR = Math.floor((365 * 24 * 60 * 60) / LQD_BLOCK_SECONDS);
+const LP_CANONICAL_POOL_SLOTS = [
+  { id: "lqd-usdt", token: "USDT", label: "LQD / USDT", tier: "Tier 1", weight: "1.25x" },
+  { id: "lqd-usdc", token: "USDC", label: "LQD / USDC", tier: "Tier 1", weight: "1.25x" },
+  { id: "lqd-eth", token: "ETH", label: "LQD / ETH", tier: "Tier 2", weight: "1.00x" },
+  { id: "lqd-bnb", token: "BNB", label: "LQD / BNB", tier: "Tier 2", weight: "0.90x" },
+  { id: "lqd-btc", token: "BTC", label: "LQD / BTC", tier: "Tier 2", weight: "1.00x" },
+];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function $(id) { return document.getElementById(id); }
@@ -649,6 +656,21 @@ function tokenLabel(value) {
   return token.toUpperCase();
 }
 
+function normalizePoolAsset(value) {
+  const token = String(value || "").trim();
+  if (!token) return "";
+  if (token.startsWith("0x")) return token.toLowerCase();
+  return token.toUpperCase();
+}
+
+function canonicalSlotForForm(form) {
+  const a = normalizePoolAsset(form?.tokenA);
+  const b = normalizePoolAsset(form?.tokenB);
+  if (a !== "LQD" && b !== "LQD") return null;
+  const other = a === "LQD" ? b : a;
+  return LP_CANONICAL_POOL_SLOTS.find(slot => slot.token === other) || null;
+}
+
 function inferPoolForm(address, storage = {}, saved = {}) {
   const tokenA = saved.tokenA || findStorageValue(storage, "token0", findStorageValue(storage, "tokenA", "lqd")) || "lqd";
   const tokenB = saved.tokenB || findStorageValue(storage, "token1", findStorageValue(storage, "tokenB", "")) || "";
@@ -713,6 +735,7 @@ async function buildPoolCards(poolsPayload, preferredForm) {
     } catch { }
     const form = inferPoolForm(address, storage, entry);
     const dex = resolveDexStorage(storage, form);
+    const slot = canonicalSlotForForm(form);
     cards.push({
       address,
       form,
@@ -720,6 +743,9 @@ async function buildPoolCards(poolsPayload, preferredForm) {
       dex,
       registryLiquidity: poolMap[address] || poolMap[String(address).toLowerCase()] || "0",
       pair: `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
+      slotId: slot?.id || "",
+      tierLabel: slot?.tier || "Tier 3",
+      weightLabel: slot?.weight || "0.35x",
     });
   }
   return cards;
@@ -730,23 +756,48 @@ function renderPoolCards() {
   if (!list) return;
   const cards = lpDashboard.poolCards || [];
   const selected = (getLPForm().pool || lpDashboard.selectedPool?.address || "").toLowerCase();
-  if (!cards.length) {
-    list.innerHTML = '<div class="notice">No pools found yet. Click Sync Pools or add a pool from Advanced manual pool.</div>';
-    return;
-  }
-  list.innerHTML = cards.map((card, idx) => {
+  const used = new Set();
+  const renderRealCard = (card, idx, extraClass = "") => {
     const active = String(card.address).toLowerCase() === selected ? " active" : "";
-    return `<button class="lp-pool-card${active}" data-pool-idx="${idx}" type="button">
+    return `<button class="lp-pool-card${active} ${extraClass}" data-pool-idx="${idx}" type="button">
       <div>
         <div class="lp-pool-pair">${escapeHtml(card.pair)}</div>
-        <div class="lp-pool-meta">${escapeHtml(shortAddr(card.address))}</div>
+        <div class="lp-pool-meta">${escapeHtml(card.tierLabel)} · Weight ${escapeHtml(card.weightLabel)} · ${escapeHtml(shortAddr(card.address))}</div>
       </div>
       <div class="lp-pool-metrics">
         <span class="lp-pool-badge">${escapeHtml(fmtAmount(card.dex.lpBalance, 8))} LP</span>
         <span class="lp-pool-small">${escapeHtml(formatPercentFromParts(card.dex.lpBalance, card.dex.totalLP))} share</span>
       </div>
     </button>`;
+  };
+  const canonicalCards = LP_CANONICAL_POOL_SLOTS.map((slot) => {
+    const idx = cards.findIndex(card => card.slotId === slot.id && !used.has(String(card.address).toLowerCase()));
+    if (idx !== -1) {
+      used.add(String(cards[idx].address).toLowerCase());
+      return renderRealCard(cards[idx], idx, "tier-core");
+    }
+    return `<div class="lp-pool-card placeholder">
+      <div>
+        <div class="lp-pool-pair">${escapeHtml(slot.label)}</div>
+        <div class="lp-pool-meta">${escapeHtml(slot.tier)} · Weight ${escapeHtml(slot.weight)} · Add after pool deployment</div>
+      </div>
+      <div class="lp-pool-metrics">
+        <span class="lp-pool-badge muted">Not configured</span>
+        <span class="lp-pool-small">Save pool below</span>
+      </div>
+    </div>`;
   }).join("");
+  const communityCards = cards
+    .map((card, idx) => ({ card, idx }))
+    .filter(({ card }) => !used.has(String(card.address).toLowerCase()))
+    .map(({ card, idx }) => renderRealCard(card, idx, "tier-community"))
+    .join("");
+  list.innerHTML = `
+    <div class="lp-pool-section-title">Core reward pools</div>
+    ${canonicalCards}
+    <div class="lp-pool-section-title">Tier 3 community pools</div>
+    ${communityCards || '<div class="notice">No community pools yet. Approved new pools will appear here automatically.</div>'}
+  `;
   list.querySelectorAll("[data-pool-idx]").forEach((btn) => {
     btn.addEventListener("click", () => selectPoolCard(cards[Number(btn.dataset.poolIdx)]));
   });

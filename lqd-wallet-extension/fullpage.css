@@ -275,6 +275,15 @@ select option { background: var(--card2); }
   gap: 10px;
   margin-bottom: 14px;
 }
+.lp-pool-section-title {
+  grid-column: 1 / -1;
+  color: var(--text2);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
 .lp-pool-card {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -297,6 +306,17 @@ select option { background: var(--card2); }
 .lp-pool-card.active {
   border-color: var(--accent);
   background: linear-gradient(145deg, rgba(123,97,255,0.16), rgba(35,43,75,0.9));
+}
+.lp-pool-card.placeholder {
+  cursor: default;
+  opacity: 0.7;
+  border-style: dashed;
+}
+.lp-pool-card.tier-core {
+  border-color: rgba(123,97,255,0.35);
+}
+.lp-pool-card.tier-community {
+  border-color: rgba(247,196,48,0.25);
 }
 .lp-pool-pair {
   font-weight: 800;
@@ -322,6 +342,11 @@ select option { background: var(--card2); }
   font-size: 11px;
   font-weight: 800;
   white-space: nowrap;
+}
+.lp-pool-badge.muted {
+  color: var(--muted);
+  background: rgba(99,110,138,0.1);
+  border-color: rgba(99,110,138,0.22);
 }
 .lp-pool-small {
   color: var(--muted);
