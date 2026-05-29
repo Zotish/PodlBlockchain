@@ -699,13 +699,44 @@ function resolveDexStorage(storage, form) {
   const reserve1 = findStorageValue(storage, "reserve1", findStorageValue(storage, "reserveB", "0"));
   const reserveA = token0 && normA !== token0 ? reserve1 : reserve0;
   const reserveB = token0 && normA !== token0 ? reserve0 : reserve1;
-  const lpKey = `lp:${String(state.address || "").toLowerCase()}`;
+  const owner = String(state.address || "").toLowerCase();
+  const lpKey = `lp:${owner}`;
+  const lockedKey = `vlp:${owner}`;
+  const unlockKey = `vlu:${owner}`;
   return {
     reserveA,
     reserveB,
     totalLP: findStorageValue(storage, "totalLP", "0"),
     lpBalance: findStorageValue(storage, lpKey, "0"),
+    lockedLP: findStorageValue(storage, lockedKey, "0"),
+    lockUntil: findStorageValue(storage, unlockKey, "0"),
   };
+}
+
+function sortedPairKey(tokenA, tokenB) {
+  const a = String(tokenA || "").trim().toLowerCase();
+  const b = String(tokenB || "").trim().toLowerCase();
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+function getPairAddressForLPAction(form, storage = lpDashboard.storage || {}) {
+  const key = sortedPairKey(form.tokenA, form.tokenB);
+  return findStorageValue(storage, `pairAddr:${key}`, "") || form.pool || "";
+}
+
+function isFactoryPoolForm(form, storage = lpDashboard.storage || {}) {
+  const key = sortedPairKey(form.tokenA, form.tokenB);
+  return !!findStorageValue(storage, `pairAddr:${key}`, "");
+}
+
+function formatUnlockTime(raw) {
+  const ts = Number(raw || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return "Not locked";
+  const remainingMs = (ts * 1000) - Date.now();
+  const date = new Date(ts * 1000).toLocaleString();
+  if (remainingMs <= 0) return `Ready · ${date}`;
+  const days = Math.ceil(remainingMs / 86400000);
+  return `${days}d · ${date}`;
 }
 
 async function buildPoolCards(poolsPayload, preferredForm) {
@@ -837,6 +868,9 @@ function renderLiquidityDashboard() {
   $("lpTotalStat").textContent = `${fmtAmount(dex.totalLP, 8)} LP`;
   $("lpReserveAStat").textContent = `${fmtAmount(dex.reserveA, form.decimalsA)} / ${fmtAmount(userA, form.decimalsA)}`;
   $("lpReserveBStat").textContent = `${fmtAmount(dex.reserveB, form.decimalsB)} / ${fmtAmount(userB, form.decimalsB)}`;
+  $("lpUnlockedStat").textContent = `${fmtAmount(dex.lpBalance, 8)} LP`;
+  $("lpLockedStat").textContent = `${fmtAmount(dex.lockedLP, 8)} LP`;
+  $("lpUnlockTimeStat").textContent = formatUnlockTime(dex.lockUntil);
 
   const protocol = lpDashboard.protocol || {};
   $("lpPendingRewardStat").textContent = fmtAmount(protocol.pending_rewards || protocol.PendingRewards || "0") + " LQD";
@@ -962,6 +996,85 @@ async function removeDexLiquidity() {
   }
 }
 
+async function lockDexLPForValidation() {
+  const form = getLPForm();
+  const amount = $("lpLockAmount")?.value?.trim() || "";
+  const days = parseInt($("lpLockDays")?.value, 10) || 365;
+  if (!form.pool || !form.tokenA || !form.tokenB || !amount) {
+    toast("Select a pool and enter LP amount", "error");
+    return;
+  }
+  try {
+    $("lpLockBtn").disabled = true;
+    const rawLP = parseHuman(amount, 8);
+    const durationSecs = String(Math.max(1, days) * 86400);
+    const useFactory = isFactoryPoolForm(form);
+    const args = useFactory ? [form.tokenA, form.tokenB, rawLP, durationSecs] : [rawLP, durationSecs];
+    const res = await contractTx(form.pool, "LockLPForValidation", args);
+    const hash = res.tx_hash || res.TxHash || res.hash || "";
+    showResult("lpLockResult", `✓ LP lock submitted\nTx: ${hash}`);
+    await recordLocalActivity({ type: "lp_lock", contract: form.pool, tx_hash: hash, value: rawLP });
+    $("lpLockAmount").value = "";
+    toast("LP lock submitted", "success");
+    if (hash) await waitForTx(hash, 6000).catch(() => null);
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("lpLockResult", "✗ " + e.message, true);
+    toast("LP lock failed: " + e.message, "error");
+  } finally {
+    $("lpLockBtn").disabled = false;
+  }
+}
+
+async function unlockDexLPForValidation() {
+  const form = getLPForm();
+  if (!form.pool || !form.tokenA || !form.tokenB) {
+    toast("Select a pool first", "error");
+    return;
+  }
+  try {
+    $("lpUnlockBtn").disabled = true;
+    const useFactory = isFactoryPoolForm(form);
+    const args = useFactory ? [form.tokenA, form.tokenB] : [];
+    const res = await contractTx(form.pool, "UnlockValidatorLP", args);
+    const hash = res.tx_hash || res.TxHash || res.hash || "";
+    showResult("lpLockResult", `✓ LP unlock submitted\nTx: ${hash}`);
+    await recordLocalActivity({ type: "lp_unlock", contract: form.pool, tx_hash: hash });
+    toast("LP unlock submitted", "success");
+    if (hash) await waitForTx(hash, 6000).catch(() => null);
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("lpLockResult", "✗ " + e.message, true);
+    toast("LP unlock failed: " + e.message, "error");
+  } finally {
+    $("lpUnlockBtn").disabled = false;
+  }
+}
+
+async function registerDexValidatorFromLockedLP() {
+  const form = getLPForm();
+  const pairAddress = getPairAddressForLPAction(form);
+  if (!pairAddress) {
+    toast("Select a configured pool first", "error");
+    return;
+  }
+  try {
+    $("lpRegisterValidatorBtn").disabled = true;
+    const res = await nodePost("/validator/register-dex", {
+      address: state.address,
+      pair_address: pairAddress,
+    });
+    showResult("lpLockResult", `✓ Validator registration submitted\n${JSON.stringify(res, null, 2)}`);
+    toast("Validator registered from locked LP", "success");
+    await loadLiquidityDashboard();
+  } catch (e) {
+    showResult("lpLockResult", "✗ " + e.message, true);
+    toast("Validator registration failed: " + e.message, "error");
+  } finally {
+    $("lpRegisterValidatorBtn").disabled = false;
+  }
+}
+
 async function provideProtocolLiquidity() {
   const amount = $("protocolStakeAmount")?.value?.trim() || "";
   const lockDays = parseInt($("protocolLockDays")?.value, 10) || 30;
@@ -1034,6 +1147,9 @@ $("lpLoadBtn")?.addEventListener("click", loadLiquidityDashboard);
 $("lpSaveBtn")?.addEventListener("click", () => { saveLPSettings(); loadLiquidityDashboard(); });
 $("lpAddBtn")?.addEventListener("click", addDexLiquidity);
 $("lpRemoveBtn")?.addEventListener("click", removeDexLiquidity);
+$("lpLockBtn")?.addEventListener("click", lockDexLPForValidation);
+$("lpUnlockBtn")?.addEventListener("click", unlockDexLPForValidation);
+$("lpRegisterValidatorBtn")?.addEventListener("click", registerDexValidatorFromLockedLP);
 $("lpClaimBtn")?.addEventListener("click", claimOrSyncRewards);
 $("lpSyncPoolsBtn")?.addEventListener("click", syncPoolRegistry);
 $("lpSyncPoolsTopBtn")?.addEventListener("click", syncPoolRegistry);
