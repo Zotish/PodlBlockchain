@@ -12,7 +12,9 @@ if (typeof global.crypto === 'undefined') {
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Alert,
+  AppState,
   Dimensions,
   FlatList,
   Keyboard,
@@ -76,9 +78,7 @@ import {
   nodeStatus,
   normalizeUrl,
   postJson,
-  resolveTokenBalance,
   resolveTokenBalanceMultichain,
-  resolveTokenMeta,
   resolveTokenMetaMultichain,
   walletBalance,
   walletBridgeBurn,
@@ -96,6 +96,9 @@ import {
   walletSend,
 } from "./src/api";
 import { STORAGE_KEYS, loadJSON, loadString, removeItem, saveJSON, saveString } from "./src/storage";
+import { runWalletMigrations } from "./src/migrations";
+import { installGlobalErrorReporter, recordError, recordTelemetry } from "./src/telemetry";
+import { createTrackedTransaction, mergeTrackedTransaction, refreshTrackedTransactions } from "./src/txTracker";
 import {
   deriveCosmosLikeAddress,
   deriveHarmonyAddress,
@@ -113,6 +116,12 @@ import {
 import {
   deriveAllChainKeys,
   signEip155Tx,
+  signPersonalMessage,
+  signEd25519Message,
+  signSecp256k1Message,
+  signCosmosAminoDoc,
+  ed25519PublicKey,
+  secp256k1CompressedPublicKey,
   encodeErc20Transfer,
   signCosmosTx,
   signSolanaTransfer,
@@ -125,6 +134,20 @@ import {
   exportKeyInfo,
   base58Encode as cryptoBase58Encode,
 } from "./src/crypto";
+import {
+  buildTonTransferBoc,
+  buildJettonTransferBoc,
+  getTonSeqno,
+  getTonJettonWalletAddress,
+  getTonJettonBalance,
+  broadcastTonBoc,
+} from "./src/ton";
+import {
+  starknetArgentAddress,
+  broadcastStarknetTransfer,
+  broadcastStarknetTokenTransfer,
+  starkSign,
+} from "./src/starknet";
 
 // Convert hex string to Uint8Array (used for NEAR pubkey base58 conversion)
 const hexToBytes = (hex) => {
@@ -134,8 +157,8 @@ const hexToBytes = (hex) => {
   return u8;
 };
 
-const PROD_CHAIN_URL = "https://dazzling-peace-production-3529.up.railway.app";
-const PROD_WALLET_URL = "https://enchanting-hope-production-1c63.up.railway.app";
+const PROD_CHAIN_URL = "https://chain.178-105-133-94.sslip.io";
+const PROD_WALLET_URL = "https://wallet.178-105-133-94.sslip.io";
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const encodeBase58 = (hex) => {
@@ -169,7 +192,7 @@ const deriveFamilyAddress = (privKey, family) => {
     return "";
   } catch { return ""; }
 };
-const PROD_AGGREGATOR_URL = "https://keen-enjoyment-production-0440.up.railway.app";
+const PROD_AGGREGATOR_URL = "https://api.178-105-133-94.sslip.io";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
 const DEFAULT_BROWSER_URL = PROD_EXPLORER_URL;
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -204,6 +227,33 @@ const DEFAULT_ENDPOINTS = {
   explorerUrl: PROD_EXPLORER_URL,
 };
 
+const LP_REWARD_TIERS = [
+  {
+    tier: "Tier 1",
+    title: "Stable Core",
+    pairs: "LQD/USDT · LQD/USDC",
+    detail: "Highest stable-liquidity reward for deep market pairs.",
+    weight: "1.25x",
+    accent: "#10b981",
+  },
+  {
+    tier: "Tier 2",
+    title: "Blue-Chip",
+    pairs: "LQD/ETH · LQD/BNB · LQD/BTC",
+    detail: "Medium/high reward for volatile canonical liquidity.",
+    weight: "0.90x-1.00x",
+    accent: "#60a5fa",
+  },
+  {
+    tier: "Tier 3",
+    title: "Community",
+    pairs: "Admin approved pools",
+    detail: "Community pools earn only after governance/admin approval.",
+    weight: "0.35x default",
+    accent: "#f59e0b",
+  },
+];
+
 function migrateLocalEndpoint(value, fallback) {
   const current = String(value || "").trim();
   if (!current) return fallback;
@@ -214,6 +264,16 @@ function migrateLocalEndpoint(value, fallback) {
     return PROD_CHAIN_URL;
   }
   return current;
+}
+
+function migrateNetworkId(value) {
+  const id = String(value || "").trim();
+  const renamed = {
+    "berachain-artio": "berachain-bepolia",
+    "celo-alfajores": "celo-sepolia",
+    "starknet-testnet": "starknet-sepolia",
+  };
+  return renamed[id] || id;
 }
 
 const BUILTIN_TEMPLATES = [
@@ -313,6 +373,12 @@ function coerceBrowserUrl(value) {
   if (!raw) return DEFAULT_BROWSER_URL;
   if (/^https?:\/\//i.test(raw)) return raw;
   return `https://${raw}`;
+}
+
+function isDefaultBrowserUrl(value) {
+  const clean = String(value || "").trim().replace(/\/+$/, "");
+  const home = String(DEFAULT_BROWSER_URL || "").trim().replace(/\/+$/, "");
+  return clean === home;
 }
 
 function normalizeAddress(value) {
@@ -455,6 +521,29 @@ function Stat({ label, value, subvalue }) {
   );
 }
 
+function LPRewardTierGuide() {
+  return (
+    <Card
+      title="LP Reward Tiers"
+      subtitle="Only approved LQD pairs receive block LP rewards. Add liquidity in DEX, then track rewards from your wallet."
+    >
+      <View style={styles.lpTierList}>
+        {LP_REWARD_TIERS.map((item) => (
+          <View key={item.tier} style={[styles.lpTierRow, { borderColor: `${item.accent}55` }]}>
+            <View style={[styles.lpTierDot, { backgroundColor: item.accent }]} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.lpTierKicker}>{item.tier} · {item.title}</Text>
+              <Text style={styles.lpTierPairs}>{item.pairs}</Text>
+              <Text style={styles.lpTierDetail}>{item.detail}</Text>
+            </View>
+            <Text style={[styles.lpTierWeight, { color: item.accent }]}>{item.weight}</Text>
+          </View>
+        ))}
+      </View>
+    </Card>
+  );
+}
+
 const TokenRow = ({ item, onSend, onRefresh, onRemove }) => (
   <View style={styles.rowCard}>
     <View style={styles.rowIcon}>
@@ -474,7 +563,8 @@ const TokenRow = ({ item, onSend, onRefresh, onRemove }) => (
 );
 
 const BridgeRow = ({ item }) => {
-  const isLock = item.direction === "bsc_to_lqd" || item.direction === "lock";
+  const direction = String(item.direction || item.Direction || item.type || item.Type || "").toLowerCase();
+  const isInbound = direction.includes("external") || direction.includes("bsc_to_lqd") || direction.includes("lock");
   const s = String(item.status || "pending").toLowerCase();
   let statusColor = "#fbbf24"; // yellow
   if (s.includes("complete") || s.includes("success") || s.includes("confirmed")) statusColor = "#4ade80";
@@ -483,11 +573,11 @@ const BridgeRow = ({ item }) => {
   return (
     <View style={[styles.rowCard, { borderLeftWidth: 4, borderLeftColor: statusColor }]}>
       <View style={[styles.rowIcon, { backgroundColor: statusColor + "20" }]}>
-        <Text style={{ color: statusColor, fontSize: scale(16) }}>{isLock ? "📥" : "📤"}</Text>
+        <Text style={{ color: statusColor, fontSize: scale(16) }}>{isInbound ? "📥" : "📤"}</Text>
       </View>
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text style={styles.rowTitle}>{isLock ? "Lock & Mint" : "Burn & Unlock"}</Text>
+          <Text style={styles.rowTitle}>{isInbound ? "External → LQD" : "LQD → External"}</Text>
           <View style={{ backgroundColor: statusColor + "15", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
             <Text style={{ color: statusColor, fontSize: scale(10), fontWeight: "800" }}>{s.toUpperCase()}</Text>
           </View>
@@ -587,21 +677,21 @@ const initialTokenImportForm = {
 };
 
 const FAMILY_TOKEN_UI = {
-  evm:       { label: "Contract Address",  placeholder: "0x...",                 hint: "ERC-20 token contract address",      autoFetch: true,  supported: true  },
-  solana:    { label: "Mint Address",      placeholder: "EPjFWdd5…",             hint: "SPL token mint address (base58)",    autoFetch: false, supported: true  },
-  cosmos:    { label: "IBC Denom / CW20",  placeholder: "ibc/... or cosmos1...", hint: "IBC denom or CosmWasm CW20 contract",autoFetch: false, supported: true  },
+  evm: { label: "Contract Address", placeholder: "0x...", hint: "ERC-20 token contract address", autoFetch: true, supported: true },
+  solana: { label: "Mint Address", placeholder: "EPjFWdd5…", hint: "SPL token mint address (base58)", autoFetch: false, supported: true },
+  cosmos: { label: "IBC Denom / CW20", placeholder: "ibc/... or cosmos1...", hint: "IBC denom or CosmWasm CW20 contract", autoFetch: false, supported: true },
   "cosmos-testnet": { label: "IBC Denom / CW20", placeholder: "ibc/... or cosmos1...", hint: "IBC denom or CosmWasm CW20 contract", autoFetch: false, supported: true },
-  sei:       { label: "Contract / Denom",  placeholder: "sei1... or factory/...",hint: "SEI CW20 or native denom",           autoFetch: false, supported: true  },
-  injective: { label: "Contract / Denom",  placeholder: "inj1... or factory/...",hint: "INJ CW20 or native denom",           autoFetch: false, supported: true  },
-  near:      { label: "Contract Account",  placeholder: "token.near",            hint: "NEP-141 fungible token contract ID", autoFetch: false, supported: true  },
-  tron:      { label: "TRC-20 Contract",   placeholder: "T...",                  hint: "TRC-20 token contract address",      autoFetch: false, supported: true  },
-  ton:       { label: "Jetton Address",    placeholder: "EQ...",                 hint: "TON Jetton master contract address", autoFetch: false, supported: true  },
-  aptos:     { label: "Coin Type",         placeholder: "0x1::module::Coin",     hint: "Aptos coin type identifier",         autoFetch: false, supported: true  },
-  sui:       { label: "Coin Type",         placeholder: "0x2::sui::SUI",         hint: "SUI coin type address",              autoFetch: false, supported: true  },
-  starknet:  { label: "Contract Address",  placeholder: "0x0...",                hint: "Starknet ERC-20 contract",           autoFetch: false, supported: true  },
-  harmony:   { label: "Contract Address",  placeholder: "one1... or 0x...",      hint: "HRC-20 token contract address",      autoFetch: false, supported: true  },
-  utxo:      { supported: false, unsupportedMsg: "Bitcoin does not support token contracts. UTXO chains use only the native coin." },
-  litecoin:  { supported: false, unsupportedMsg: "Litecoin does not support token contracts. UTXO chains use only the native coin." },
+  sei: { label: "Contract / Denom", placeholder: "sei1... or factory/...", hint: "SEI CW20 or native denom", autoFetch: false, supported: true },
+  injective: { label: "Contract / Denom", placeholder: "inj1... or factory/...", hint: "INJ CW20 or native denom", autoFetch: false, supported: true },
+  near: { label: "Contract Account", placeholder: "token.near", hint: "NEP-141 fungible token contract ID", autoFetch: false, supported: true },
+  tron: { label: "TRC-20 Contract", placeholder: "T...", hint: "TRC-20 token contract address", autoFetch: false, supported: true },
+  ton: { label: "Jetton Address", placeholder: "EQ...", hint: "TON Jetton master contract address", autoFetch: false, supported: true },
+  aptos: { label: "Coin Type", placeholder: "0x1::module::Coin", hint: "Aptos coin type identifier", autoFetch: false, supported: true },
+  sui: { label: "Coin Type", placeholder: "0x2::sui::SUI", hint: "SUI coin type address", autoFetch: false, supported: true },
+  starknet: { label: "Contract Address", placeholder: "0x0...", hint: "Starknet ERC-20 contract", autoFetch: false, supported: true },
+  harmony: { label: "Contract Address", placeholder: "one1... or 0x...", hint: "HRC-20 token contract address", autoFetch: false, supported: true },
+  utxo: { supported: false, unsupportedMsg: "Bitcoin does not support token contracts. UTXO chains use only the native coin." },
+  litecoin: { supported: false, unsupportedMsg: "Litecoin does not support token contracts. UTXO chains use only the native coin." },
 };
 const DEFAULT_FAMILY_UI = { label: "Token Address", placeholder: "...", hint: "Enter token identifier for this network", autoFetch: false, supported: true };
 
@@ -611,26 +701,35 @@ function getDefaultDecimalsForFamily(family) {
 }
 
 const SEND_ADDR_PLACEHOLDER = {
-  evm:              "0x...",
-  harmony:          "one1... or 0x...",
-  solana:           "e.g. EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-  cosmos:           "cosmos1...",
+  evm: "0x...",
+  harmony: "one1... or 0x...",
+  solana: "e.g. EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  cosmos: "cosmos1...",
   "cosmos-testnet": "cosmos1...",
-  sei:              "sei1...",
-  injective:        "inj1...",
-  near:             "account.testnet",
-  tron:             "T...",
-  ton:              "EQ...",
-  aptos:            "0x...",
-  sui:              "0x...",
-  starknet:         "0x0...",
-  utxo:             "tb1... or m...",
-  litecoin:         "tltc1...",
+  sei: "sei1...",
+  injective: "inj1...",
+  near: "account.testnet",
+  tron: "T...",
+  ton: "EQ...",
+  aptos: "0x...",
+  sui: "0x...",
+  starknet: "0x0...",
+  utxo: "tb1... or m...",
+  litecoin: "tltc1...",
 };
 
 const initialTokenSendForm = {
   to: "",
   amount: "",
+};
+
+const initialFeeInfo = {
+  display: "Estimating...",
+  raw: "0",
+  gasLimit: "",
+  gasPrice: "",
+  loading: false,
+  error: "",
 };
 
 const initialDeployForm = {
@@ -711,41 +810,41 @@ const initialNetworkForm = {
 
 const NETWORKS = [
   { id: 'lqd', name: 'LQD Testnet', symbol: 'LQD', family: 'evm', decimals: 8, chainId: 139, nodeUrl: DEFAULT_ENDPOINTS.nodeUrl, walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: DEFAULT_ENDPOINTS.explorerUrl, icon: '💎', color: '#8a78ff' },
-  { id: 'eth-sepolia', name: 'Ethereum Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 11155111, nodeUrl: 'https://rpc.sepolia.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.etherscan.io', icon: '🔷', color: '#627EEA' },
-  { id: 'bsc-testnet', name: 'BSC Testnet', symbol: 'tBNB', family: 'evm', decimals: 18, chainId: 97, nodeUrl: 'https://data-seed-prebsc-1-s1.binance.org:8545', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.bscscan.com', icon: '🟡', color: '#F3BA2F' },
+  { id: 'eth-sepolia', name: 'Ethereum Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 11155111, nodeUrl: 'https://ethereum-sepolia-rpc.publicnode.com', rpcUrls: ['https://rpc.sepolia.org'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.etherscan.io', icon: '🔷', color: '#627EEA' },
+  { id: 'bsc-testnet', name: 'BSC Testnet', symbol: 'tBNB', family: 'evm', decimals: 18, chainId: 97, nodeUrl: 'https://bsc-testnet-rpc.publicnode.com', rpcUrls: ['https://data-seed-prebsc-1-s1.binance.org:8545'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.bscscan.com', icon: '🟡', color: '#F3BA2F' },
   { id: 'solana-devnet', name: 'Solana Devnet', symbol: 'SOL', family: 'solana', decimals: 9, nodeUrl: 'https://api.devnet.solana.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.solana.com/?cluster=devnet', icon: '☀️', color: '#14F195' },
-  { id: 'polygon-amoy', name: 'Polygon Amoy', symbol: 'POL', family: 'evm', decimals: 18, chainId: 80002, nodeUrl: 'https://rpc-amoy.polygon.technology', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://amoy.polygonscan.com', icon: '💜', color: '#8247E5' },
-  { id: 'arb-sepolia', name: 'Arbitrum Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 421614, nodeUrl: 'https://sepolia-rollup.arbitrum.io/rpc', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.arbiscan.io', icon: '🔵', color: '#28A0F0' },
-  { id: 'op-sepolia', name: 'Optimism Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 11155420, nodeUrl: 'https://sepolia.optimism.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia-optimistic.etherscan.io', icon: '🔴', color: '#FF0420' },
-  { id: 'base-sepolia', name: 'Base Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 84532, nodeUrl: 'https://sepolia.base.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.basescan.org', icon: '🔵', color: '#0052FF' },
-  { id: 'avax-fuji', name: 'Avalanche Fuji', symbol: 'AVAX', family: 'evm', decimals: 18, chainId: 43113, nodeUrl: 'https://api.avax-test.network/ext/bc/C/rpc', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.snowtrace.io', icon: '🔺', color: '#E84142' },
-  { id: 'linea-sepolia', name: 'Linea Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 59141, nodeUrl: 'https://rpc.sepolia.linea.build', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.lineascan.build', icon: '🧬', color: '#121212' },
-  { id: 'scroll-sepolia', name: 'Scroll Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 534351, nodeUrl: 'https://sepolia-rpc.scroll.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.scrollscan.com', icon: '📜', color: '#FFDEC1' },
-  { id: 'berachain-artio', name: 'Berachain Artio', symbol: 'BERA', family: 'evm', decimals: 18, chainId: 80085, nodeUrl: 'https://artio.rpc.berachain.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://artio.beratrail.io', icon: '🐻', color: '#FFB237' },
-  { id: 'fantom-testnet', name: 'Fantom Testnet', symbol: 'FTM', family: 'evm', decimals: 18, chainId: 4002, nodeUrl: 'https://rpc.testnet.fantom.network', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.ftmscan.com', icon: '👻', color: '#1969FF' },
+  { id: 'polygon-amoy', name: 'Polygon Amoy', symbol: 'POL', family: 'evm', decimals: 18, chainId: 80002, nodeUrl: 'https://polygon-amoy-bor-rpc.publicnode.com', rpcUrls: ['https://rpc-amoy.polygon.technology'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://amoy.polygonscan.com', icon: '💜', color: '#8247E5' },
+  { id: 'arb-sepolia', name: 'Arbitrum Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 421614, nodeUrl: 'https://arbitrum-sepolia-rpc.publicnode.com', rpcUrls: ['https://sepolia-rollup.arbitrum.io/rpc'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.arbiscan.io', icon: '🔵', color: '#28A0F0' },
+  { id: 'op-sepolia', name: 'Optimism Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 11155420, nodeUrl: 'https://optimism-sepolia.drpc.org', rpcUrls: ['https://sepolia.optimism.io'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia-optimistic.etherscan.io', icon: '🔴', color: '#FF0420' },
+  { id: 'base-sepolia', name: 'Base Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 84532, nodeUrl: 'https://base-sepolia-rpc.publicnode.com', rpcUrls: ['https://sepolia.base.org'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.basescan.org', icon: '🔵', color: '#0052FF' },
+  { id: 'avax-fuji', name: 'Avalanche Fuji', symbol: 'AVAX', family: 'evm', decimals: 18, chainId: 43113, nodeUrl: 'https://avalanche-fuji-c-chain-rpc.publicnode.com', rpcUrls: ['https://api.avax-test.network/ext/bc/C/rpc'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.snowtrace.io', icon: '🔺', color: '#E84142' },
+  { id: 'linea-sepolia', name: 'Linea Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 59141, nodeUrl: 'https://linea-sepolia-rpc.publicnode.com', rpcUrls: ['https://rpc.sepolia.linea.build'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.lineascan.build', icon: '🧬', color: '#121212' },
+  { id: 'scroll-sepolia', name: 'Scroll Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 534351, nodeUrl: 'https://scroll-sepolia-rpc.publicnode.com', rpcUrls: ['https://sepolia-rpc.scroll.io'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.scrollscan.com', icon: '📜', color: '#FFDEC1' },
+  { id: 'berachain-bepolia', name: 'Berachain Bepolia', symbol: 'BERA', family: 'evm', decimals: 18, chainId: 80069, nodeUrl: 'https://bepolia.rpc.berachain.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://bepolia.beratrail.io', icon: '🐻', color: '#FFB237' },
+  { id: 'fantom-testnet', name: 'Fantom Testnet', symbol: 'FTM', family: 'evm', decimals: 18, chainId: 4002, nodeUrl: 'https://fantom-testnet.rpc.thirdweb.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.ftmscan.com', icon: '👻', color: '#1969FF' },
   { id: 'bitcoin-testnet', name: 'Bitcoin Testnet', symbol: 'tBTC', family: 'utxo', decimals: 8, nodeUrl: 'https://blockstream.info/testnet/api', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://blockstream.info/testnet', icon: '₿', color: '#F7931A' },
   { id: 'litecoin-testnet', name: 'Litecoin Testnet', symbol: 'tLTC', family: 'litecoin', decimals: 8, nodeUrl: 'https://api.blockcypher.com/v1/ltc/test3', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://live.blockcypher.com/ltc-testnet', icon: 'Ł', color: '#345D9D' },
-  { id: 'cosmos-testnet', name: 'Cosmos Hub Testnet', symbol: 'ATOM', family: 'cosmos', decimals: 6, cosmosChainId: 'theta-testnet-001', nodeUrl: 'https://rest.sentry-01.theta-testnet.polypore.xyz', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.theta-testnet.polypore.xyz', icon: '⚛️', color: '#2E3148' },
+  { id: 'cosmos-testnet', name: 'Cosmos Hub Testnet', symbol: 'ATOM', family: 'cosmos', decimals: 6, cosmosChainId: 'theta-testnet-001', nodeUrl: 'https://cosmos-testnet-api.polkachu.com', cosmosRestUrls: ['https://rest.sentry-01.theta-testnet.polypore.xyz'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.theta-testnet.polypore.xyz', icon: '⚛️', color: '#2E3148' },
   { id: 'blast-sepolia', name: 'Blast Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 168587773, nodeUrl: 'https://sepolia.blast.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.blastscan.io', icon: '💥', color: '#FCFC03' },
   { id: 'zksync-sepolia', name: 'zkSync Sepolia', symbol: 'ETH', family: 'evm', decimals: 18, chainId: 300, nodeUrl: 'https://sepolia.era.zksync.dev', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.explorer.zksync.io', icon: '🔗', color: '#3333FF' },
-  { id: 'monad-testnet', name: 'Monad Testnet', symbol: 'MON', family: 'evm', decimals: 18, chainId: 10143, nodeUrl: 'https://rpc-devnet.monad.xyz', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.monad.xyz', icon: '🟣', color: '#836EF9' },
+  { id: 'monad-testnet', name: 'Monad Testnet', symbol: 'MON', family: 'evm', decimals: 18, chainId: 10143, nodeUrl: 'https://testnet-rpc.monad.xyz', rpcUrls: ['https://rpc-testnet.monadinfra.com'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.monad.xyz', icon: '🟣', color: '#836EF9' },
   { id: 'near-testnet', name: 'NEAR Testnet', symbol: 'NEAR', family: 'near', decimals: 24, nodeUrl: 'https://rpc.testnet.near.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.testnet.near.org', icon: 'Ⓝ', color: '#000000' },
   { id: 'aptos-testnet', name: 'Aptos Testnet', symbol: 'APT', family: 'aptos', decimals: 8, nodeUrl: 'https://fullnode.testnet.aptoslabs.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.aptoslabs.com/?network=testnet', icon: '🌀', color: '#EDF2F7' },
   { id: 'tron-shasta', name: 'Tron Shasta', symbol: 'TRX', family: 'tron', decimals: 6, chainId: 2494104990, nodeUrl: 'https://api.shasta.trongrid.io/jsonrpc', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://shasta.tronscan.org', icon: '🔴', color: '#FF0013' },
-  { id: 'celo-alfajores', name: 'Celo Alfajores', symbol: 'CELO', family: 'evm', decimals: 18, chainId: 44787, nodeUrl: 'https://alfajores-forno.celo-testnet.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://alfajores.celoscan.io', icon: '🌿', color: '#35D07F' },
+  { id: 'celo-sepolia', name: 'Celo Sepolia', symbol: 'CELO', family: 'evm', decimals: 18, chainId: 11142220, nodeUrl: 'https://forno.celo-sepolia.celo-testnet.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://celo-sepolia.blockscout.com', icon: '🌿', color: '#35D07F' },
   { id: 'sui-testnet', name: 'Sui Testnet', symbol: 'SUI', family: 'sui', decimals: 9, nodeUrl: 'https://fullnode.testnet.sui.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.sui.io/?network=testnet', icon: '💧', color: '#6FBCF0' },
   { id: 'mantle-sepolia', name: 'Mantle Sepolia', symbol: 'MNT', family: 'evm', decimals: 18, chainId: 5003, nodeUrl: 'https://rpc.sepolia.mantle.xyz', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.sepolia.mantle.xyz', icon: '🧤', color: '#000000' },
-  { id: 'cronos-testnet', name: 'Cronos Testnet', symbol: 'TCRO', family: 'evm', decimals: 18, chainId: 338, nodeUrl: 'https://evm-t3.cronos.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://cronos.org/explorer/testnet3', icon: '🔵', color: '#002D74' },
-  { id: 'metis-sepolia', name: 'Metis Sepolia', symbol: 'METIS', family: 'evm', decimals: 18, chainId: 59902, nodeUrl: 'https://sepolia.metisdevops.link', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.explorer.metis.io', icon: '🌿', color: '#00D2FF' },
+  { id: 'cronos-testnet', name: 'Cronos Testnet', symbol: 'TCRO', family: 'evm', decimals: 18, chainId: 338, nodeUrl: 'https://cronos-testnet.drpc.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://cronos.org/explorer/testnet3', icon: '🔵', color: '#002D74' },
+  { id: 'metis-sepolia', name: 'Metis Sepolia', symbol: 'METIS', family: 'evm', decimals: 18, chainId: 59902, nodeUrl: 'https://sepolia.metisdevops.link', rpcUrls: ['https://59902.rpc.thirdweb.com'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.explorer.metis.io', icon: '🌿', color: '#00D2FF' },
   { id: 'moonriver-test', name: 'Moonbase Alpha', symbol: 'DEV', family: 'evm', decimals: 18, chainId: 1287, nodeUrl: 'https://rpc.api.moonbase.moonbeam.network', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://moonbase.moonscan.io', icon: '🌙', color: '#53CBC9' },
   { id: 'harmony-test', name: 'Harmony Testnet', symbol: 'ONE', family: 'harmony', decimals: 18, chainId: 1666700000, nodeUrl: 'https://api.s0.b.hmny.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://explorer.testnet.harmony.one', icon: '💠', color: '#00AEEF' },
   { id: 'ton-testnet', name: 'TON Testnet', symbol: 'TON', family: 'ton', decimals: 9, nodeUrl: 'https://testnet.toncenter.com/api/v2/jsonRPC', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.tonscan.org', icon: '💎', color: '#0088CC' },
-  { id: 'sei-testnet', name: 'Sei Atlantic', symbol: 'SEI', family: 'sei', decimals: 6, chainId: 1328, cosmosChainId: 'atlantic-2', nodeUrl: 'https://evm-rpc.atlantic-2.seinetwork.io', cosmosRestUrl: 'https://rest.atlantic-2.seinetwork.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://atlantic-2.seiscan.app', icon: '🔴', color: '#FF0000' },
-  { id: 'hyperliquid-test', name: 'Hyperliquid Test', symbol: 'HYPE', family: 'evm', decimals: 18, chainId: 998, nodeUrl: 'https://api.hyperliquid-testnet.xyz/evm', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://app.hyperliquid.xyz/explorer', icon: '📈', color: '#27C19F' },
-  { id: 'story-testnet', name: 'Story Testnet', symbol: 'IP', family: 'evm', decimals: 18, chainId: 1513, nodeUrl: 'https://testnet.storyrpc.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.storyscan.xyz', icon: '📖', color: '#000000' },
+  { id: 'sei-testnet', name: 'Sei Atlantic', symbol: 'SEI', family: 'sei', decimals: 6, chainId: 1328, cosmosChainId: 'atlantic-2', nodeUrl: 'https://evm-rpc-testnet.sei-apis.com', rpcUrls: ['https://evm-rpc.atlantic-2.seinetwork.io'], cosmosRestUrl: 'https://rest-testnet.sei-apis.com', cosmosRestUrls: ['https://rest.atlantic-2.seinetwork.io'], walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://atlantic-2.seiscan.app', icon: '🔴', color: '#FF0000' },
+  { id: 'hyperliquid-test', name: 'Hyperliquid Test', symbol: 'HYPE', family: 'evm', decimals: 18, chainId: 998, nodeUrl: 'https://rpc.hyperliquid-testnet.xyz/evm', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://app.hyperliquid.xyz/explorer', icon: '📈', color: '#27C19F' },
+  { id: 'story-testnet', name: 'Story Aeneid', symbol: 'IP', family: 'evm', decimals: 18, chainId: 1315, nodeUrl: 'https://aeneid.storyrpc.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://aeneid.storyscan.xyz', icon: '📖', color: '#000000' },
   { id: 'injective-testnet', name: 'Injective Testnet', symbol: 'INJ', family: 'injective', decimals: 18, cosmosChainId: 'injective-888', nodeUrl: 'https://testnet.sentry.lcd.injective.network', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.explorer.injective.network', icon: '🌀', color: '#00A3FF' },
-  { id: 'sonic-testnet', name: 'Sonic Testnet', symbol: 'S', family: 'evm', decimals: 18, chainId: 64165, nodeUrl: 'https://rpc.testnet.soniclabs.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.sonicscan.org', icon: '⚡', color: '#FFFFFF' },
-  { id: 'starknet-testnet', name: 'Starknet Goerli', symbol: 'ETH', family: 'starknet', decimals: 18, nodeUrl: 'https://alpha4.starknet.io', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://goerli.starkscan.co', icon: '✨', color: '#0C0C4F' }
+  { id: 'sonic-testnet', name: 'Sonic Testnet', symbol: 'S', family: 'evm', decimals: 18, chainId: 14601, nodeUrl: 'https://rpc.testnet.soniclabs.com', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://testnet.sonicscan.org', icon: '⚡', color: '#FFFFFF' },
+  { id: 'starknet-sepolia', name: 'Starknet Sepolia', symbol: 'ETH', family: 'starknet', decimals: 18, nodeUrl: 'https://starknet-sepolia.drpc.org', walletUrl: DEFAULT_ENDPOINTS.walletUrl, explorer: 'https://sepolia.starkscan.co', icon: '✨', color: '#0C0C4F' }
 ];
 
 const initialEndpointsForm = {
@@ -765,6 +864,8 @@ function App() {
   const [networkModalVisible, setNetworkModalVisible] = useState(false);
   const [sendVisible, setSendVisible] = useState(false);
   const [tokenImportVisible, setTokenImportVisible] = useState(false);
+  const [tokenPreviewMeta, setTokenPreviewMeta] = useState(null);
+  const [tokenPreviewLoading, setTokenPreviewLoading] = useState(false);
   const [nftImportVisible, setNftImportVisible] = useState(false);
   const [faucetVisible, setFaucetVisible] = useState(false);
   const [isMainMenuVisible, setIsMainMenuVisible] = useState(false);
@@ -806,6 +907,10 @@ function App() {
   const [tokenImportForm, setTokenImportForm] = useState(initialTokenImportForm);
   const [selectedTokenForSend, setSelectedTokenForSend] = useState(null);
   const [tokenSendForm, setTokenSendForm] = useState(initialTokenSendForm);
+  const [hiddenTokens, setHiddenTokens] = useState([]); // [{address, networkId}]
+  const [removedTokens, setRemovedTokens] = useState([]); // [{address, networkId}] — persisted blacklist
+  const [tokenActionTarget, setTokenActionTarget] = useState(null); // token being actioned
+  const [showHiddenTokens, setShowHiddenTokens] = useState(false);
 
   const [deployForm, setDeployForm] = useState(initialDeployForm);
   const [customSource, setCustomSource] = useState(DEFAULT_CUSTOM_SOURCE);
@@ -828,9 +933,27 @@ function App() {
   const [compiledBinary, setCompiledBinary] = useState(null);
   const [bridgeBaseFee, setBridgeBaseFee] = useState(10);
   const [isNodeOnline, setIsNodeOnline] = useState(true);
+  const [networkHealth, setNetworkHealth] = useState({ state: "checking", message: "Checking node", checkedAt: 0 });
+  const [balanceLoadError, setBalanceLoadError] = useState("");
+  const [lastWalletRefresh, setLastWalletRefresh] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const refreshInFlightRef = useRef(null);
+  const lastRefreshRequestRef = useRef({ key: "", at: 0 });
   const [processingMessage, setProcessingMessage] = useState("");
   const [toast, setToast] = useState({ visible: false, message: "", type: "info" });
+
+  // ── Premium spinner animation ────────────────────────────────────────────────
+  const _spinAnim = useRef(new Animated.Value(0)).current;
+  const _spinAnim2 = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!processingMessage) { _spinAnim.setValue(0); _spinAnim2.setValue(0); return; }
+    const loop1 = Animated.loop(Animated.timing(_spinAnim,  { toValue: 1, duration: 900,  useNativeDriver: true }));
+    const loop2 = Animated.loop(Animated.timing(_spinAnim2, { toValue: 1, duration: 1500, useNativeDriver: true }));
+    loop1.start(); loop2.start();
+    return () => { loop1.stop(); loop2.stop(); };
+  }, [processingMessage]);
+  const _rotateDeg  = _spinAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const _rotateDeg2 = _spinAnim2.interpolate({ inputRange: [0, 1], outputRange: ['360deg', '0deg'] });
   const [bridgeDirection, setBridgeDirection] = useState("lqd_to_external"); // lqd_to_external or external_to_lqd
   const [bridgeSelectedToken, setBridgeSelectedToken] = useState(null);
   const [bridgeChainModalVisible, setBridgeChainModalVisible] = useState(false);
@@ -842,13 +965,69 @@ function App() {
     setTimeout(() => setToast((p) => ({ ...p, visible: false })), 4000);
   }
 
+  function addTrackedTx({ hash, type, symbol, to, network = currentNetwork, family = currentNetwork?.family }) {
+    if (!settingsTxTrackingEnabled || !hash) return;
+    const tx = createTrackedTransaction({
+      hash,
+      type,
+      symbol,
+      to,
+      networkId: network?.id || activeNetworkId,
+      family: network?.id === "lqd" ? "lqd" : (family || network?.family),
+    });
+    if (!tx) return;
+    setTrackedTxs((prev) => mergeTrackedTransaction(prev, { ...tx, nodeUrl: getRpcCandidatesForFamily(network, family)[0] || nodeUrl }));
+  }
+
+  function isAllowedBrowserOrigin(origin) {
+    const value = String(origin || "").trim();
+    if (!value || value === "null") return false;
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol === "https:") return true;
+      if (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost") return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  function isLqdNetworkUrl(value = nodeUrl) {
+    const text = `${currentNetwork?.id || ""} ${currentNetwork?.name || ""} ${value || ""}`.toLowerCase();
+    return text.includes("lqd") || text.includes("podl") || text.includes("railway") || text.includes("dazzling-peace") || text.includes("178.105.133.94") || text.includes("178-105-133-94.sslip.io");
+  }
+
+  function tokenKey(token, fallbackNetworkId = activeNetworkId) {
+    return `${String(token?.networkId || fallbackNetworkId)}:${String(token?.address || token?.contract || "").toLowerCase()}`;
+  }
+
+  function isGenericTokenMeta(token) {
+    const symbol = String(token?.symbol || "").trim().toUpperCase();
+    const name = String(token?.name || "").trim().toUpperCase();
+    return !symbol || symbol === "TOKEN" || symbol === "UNKNOWN" || name === "TOKEN" || name === "UNKNOWN TOKEN";
+  }
+
+  function healthDotColor() {
+    if (isRefreshing || networkHealth.state === "checking") return "#f59e0b";
+    if (networkHealth.state === "online") return "#10b981";
+    if (networkHealth.state === "slow") return "#f59e0b";
+    return "#ef4444";
+  }
+
 
   const [backupText, setBackupText] = useState("");
   const [settingsAutoRefresh, setSettingsAutoRefresh] = useState(true);
+  const [settingsTelemetryEnabled, setSettingsTelemetryEnabled] = useState(false);
+  const [settingsTxTrackingEnabled, setSettingsTxTrackingEnabled] = useState(true);
+  const [legalRiskAccepted, setLegalRiskAccepted] = useState(false);
+  const [trackedTxs, setTrackedTxs] = useState([]);
   const [walletVisible, setWalletVisible] = useState(false);
   const [scannerVisible, setScannerVisible] = useState(false);
   const [scannerTarget, setScannerTarget] = useState("");
+  const [scanChoiceVisible, setScanChoiceVisible] = useState(false);
   const [estimatedFee, setEstimatedFee] = useState("0.00001");
+  const [nativeFeeInfo, setNativeFeeInfo] = useState(initialFeeInfo);
+  const [tokenFeeInfo, setTokenFeeInfo] = useState(initialFeeInfo);
   const [receiveVisible, setReceiveVisible] = useState(false);
   const [watchAddresses, setWatchAddresses] = useState({}); // { networkId: externalAddress } for ed25519 chains
   const [watchAddrInput, setWatchAddrInput] = useState("");
@@ -860,8 +1039,9 @@ function App() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [biometricEnabled, setBiometricEnabled] = useState(true);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
-  const [browserInput, setBrowserInput] = useState(DEFAULT_BROWSER_URL);
-  const [browserUrl, setBrowserUrl] = useState(DEFAULT_BROWSER_URL);
+  const [browserInput, setBrowserInput] = useState("");
+  const [browserUrl, setBrowserUrl] = useState("");
+  const [browserHistory, setBrowserHistory] = useState([]);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserCanGoBack, setBrowserCanGoBack] = useState(false);
   const [browserCanGoForward, setBrowserCanGoForward] = useState(false);
@@ -882,6 +1062,218 @@ function App() {
   const aggregatorUrl = useMemo(() => normalizeUrl(endpoints.aggregatorUrl || DEFAULT_ENDPOINTS.aggregatorUrl), [endpoints.aggregatorUrl]);
   const explorerUrl = useMemo(() => normalizeUrl(endpoints.explorerUrl || DEFAULT_ENDPOINTS.explorerUrl), [endpoints.explorerUrl]);
 
+  function dedupeUrls(values = []) {
+    return [...new Set((values || []).map((value) => normalizeUrl(value)).filter(Boolean))];
+  }
+
+  function getNetworkNodeCandidates(network = currentNetwork) {
+    const list = [network?.nodeUrl, ...(network?.rpcUrls || [])];
+    if (String(network?.id || "") === "lqd" && endpoints.nodeUrl) {
+      list.unshift(endpoints.nodeUrl);
+    }
+    return dedupeUrls(list);
+  }
+
+  function getNetworkRestCandidates(network = currentNetwork) {
+    return dedupeUrls([network?.cosmosRestUrl, ...(network?.cosmosRestUrls || [])]);
+  }
+
+  function getRpcCandidatesForFamily(network = currentNetwork, familyOverride = "") {
+    const family = String(familyOverride || network?.family || "evm").toLowerCase();
+    if (family === "sei" || family === "injective" || family === "cosmos-testnet" || family === "cosmos") {
+      const rest = getNetworkRestCandidates(network);
+      return rest.length ? rest : getNetworkNodeCandidates(network);
+    }
+    return getNetworkNodeCandidates(network);
+  }
+
+  async function tryRpcCandidates(candidates, runner, accept = (result) => result !== null && result !== undefined) {
+    let lastError = null;
+    for (const candidate of dedupeUrls(candidates)) {
+      try {
+        const result = await runner(candidate);
+        if (accept(result)) return { result, url: candidate };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError) throw lastError;
+    return { result: null, url: "" };
+  }
+
+  function hexQuantity(value) {
+    try {
+      return "0x" + BigInt(value || 0).toString(16);
+    } catch {
+      return "0x0";
+    }
+  }
+
+  function feeInfo(raw, decimals, symbol, extra = {}) {
+    const value = String(raw || "0");
+    return {
+      ...initialFeeInfo,
+      raw: value,
+      display: `~${formatUnits(value, decimals || 18, 8)} ${symbol || currentNetwork.symbol}`,
+      ...extra,
+    };
+  }
+
+  function evmFeeSigner(family) {
+    if (family === "harmony") return chainKeys?.harmony?.address || chainKeys?.evm?.address || wallet?.address || "";
+    if (family === "tron") return chainKeys?.tron?.address || wallet?.address || "";
+    if (family === "sei") return chainKeys?.sei?.evmAddress || chainKeys?.evm?.address || wallet?.address || "";
+    return chainKeys?.evm?.address || wallet?.address || "";
+  }
+
+  function isZeroFeeNetwork(network, family) {
+    return network?.id === "monad-testnet" || family === "sei";
+  }
+
+  async function estimateWalletFee({ token = null } = {}) {
+    const network = token
+      ? (NETWORKS.find((n) => n.id === (token.networkId || activeNetworkId)) || currentNetwork)
+      : currentNetwork;
+    const family = String(token?.family || network.family || "evm").toLowerCase();
+    const symbol = network.symbol || currentNetwork.symbol;
+    const decimals = network.decimals || currentNetwork.decimals || 18;
+    const candidates = getRpcCandidatesForFamily(network, family);
+    const primary = candidates[0] || nodeUrl;
+    const amountText = token ? tokenSendForm.amount : sendForm.amount;
+    const recipient = (token ? tokenSendForm.to : sendForm.to).trim();
+    const amountRaw = amountText ? parseUnits(amountText, token?.decimals || decimals) : "0";
+
+    if (network.id === "lqd") {
+      const gasLimit = token ? 50000 : 21000;
+      const base = await nodeBaseFee(primary).catch(() => 10);
+      const gasPrice = String(base?.base_fee || base?.BaseFee || base?.baseFee || base || 10);
+      return feeInfo(BigInt(gasPrice) * BigInt(gasLimit), 8, "LQD", {
+        gasLimit: String(gasLimit),
+        gasPrice,
+      });
+    }
+
+    if (isZeroFeeNetwork(network, family)) {
+      return feeInfo("0", decimals, symbol, {
+        display: "No network fee",
+        gasLimit: String(token ? 80000 : 21000),
+        gasPrice: "0",
+      });
+    }
+
+    if (family === "tron") {
+      const tronBaseUrl = normalizeUrl(String(primary).replace(/\/jsonrpc\/?$/, ""));
+      const params = await postJson(`${tronBaseUrl}/wallet/getchainparameters`, {}).catch(() => null);
+      const chainParams = Array.isArray(params?.chainParameter) ? params.chainParameter : [];
+      const getParam = (key, fallback) => {
+        const item = chainParams.find((entry) => entry?.key === key);
+        return Number(item?.value || fallback);
+      };
+      const transactionFeePerByte = getParam("getTransactionFee", 1000);
+      const energyFee = getParam("getEnergyFee", 420);
+      const rawFee = token
+        ? Math.ceil(energyFee * 65000)
+        : Math.ceil(transactionFeePerByte * 300);
+      return feeInfo(String(rawFee), 6, "TRX", {
+        gasLimit: token ? "65000" : "300",
+        gasPrice: String(token ? energyFee : transactionFeePerByte),
+      });
+    }
+
+    if (family === "evm" || family === "harmony" || family === "sei") {
+      const fromAddr = evmFeeSigner(family);
+      const safeTo = token
+        ? token.address
+        : (recipient && isLikelyAddressForFamily(recipient, family) ? recipient : fromAddr);
+      const data = token && recipient && isLikelyAddressForFamily(recipient, family)
+        ? encodeErc20Transfer(recipient, amountRaw)
+        : "";
+      const tx = {
+        from: fromAddr,
+        to: safeTo,
+        value: token ? "0x0" : hexQuantity(amountRaw),
+      };
+      if (data) tx.data = data;
+      const [gasPriceRes, gasRes] = await Promise.all([
+        tryRpcCandidates(candidates, (url) => postJson(url, {
+          jsonrpc: "2.0", id: 1, method: "eth_gasPrice", params: [],
+        }).catch(() => null), (r) => !!r?.result).then(({ result }) => result).catch(() => null),
+        fromAddr && safeTo ? tryRpcCandidates(candidates, (url) => postJson(url, {
+          jsonrpc: "2.0", id: 2, method: "eth_estimateGas", params: [tx],
+        }).catch(() => null), (r) => !!r?.result).then(({ result }) => result).catch(() => null) : Promise.resolve(null),
+      ]);
+      const gasPrice = gasPriceRes?.result ? BigInt(gasPriceRes.result).toString() : String(10_000_000_000n);
+      const gasLimit = gasRes?.result ? BigInt(gasRes.result).toString() : String(token ? 80000 : 21000);
+      return feeInfo(BigInt(gasPrice) * BigInt(gasLimit), decimals, symbol, { gasLimit, gasPrice });
+    }
+
+    if (family === "cosmos" || family === "cosmos-testnet" || family === "injective") {
+      return feeInfo("5000", decimals, symbol, { gasLimit: "200000", gasPrice: "0.025" });
+    }
+
+    if (family === "solana") {
+      const recentFees = await postJson(primary, {
+        jsonrpc: "2.0", id: 1, method: "getRecentPrioritizationFees", params: [],
+      }).catch(() => null);
+      const priority = Array.isArray(recentFees?.result)
+        ? Math.max(0, ...recentFees.result.slice(-20).map((x) => Number(x?.prioritizationFee || 0)))
+        : 0;
+      return feeInfo(5000n + BigInt(priority || 0), 9, "SOL", { gasLimit: "1", gasPrice: String(priority || 5000) });
+    }
+
+    if (family === "near") {
+      const gasPriceRes = await postJson(primary, {
+        jsonrpc: "2.0", id: 1, method: "gas_price", params: [null],
+      }).catch(() => null);
+      const gasPrice = BigInt(gasPriceRes?.result?.gas_price || "100000000");
+      const gasLimit = token ? 30000000000000n : 1000000000000n;
+      return feeInfo(gasPrice * gasLimit, 24, "NEAR", { gasLimit: gasLimit.toString(), gasPrice: gasPrice.toString() });
+    }
+
+    if (family === "aptos") {
+      const gasRes = await getJson(`${normalizeUrl(primary)}/estimate_gas_price`).catch(() => null);
+      const gasPrice = BigInt(gasRes?.gas_estimate || gasRes?.prioritized_gas_estimate || "100");
+      const gasLimit = 2000n;
+      return feeInfo(gasPrice * gasLimit, 8, "APT", { gasLimit: gasLimit.toString(), gasPrice: gasPrice.toString() });
+    }
+
+    if (family === "sui") {
+      const gasRes = await postJson(primary, {
+        jsonrpc: "2.0", id: 1, method: "suix_getReferenceGasPrice", params: [],
+      }).catch(() => null);
+      const gasPrice = BigInt(gasRes?.result || "1000");
+      const gasBudget = token ? 5000000n : 2000000n;
+      return feeInfo(gasBudget, 9, "SUI", { gasLimit: gasBudget.toString(), gasPrice: gasPrice.toString() });
+    }
+
+    if (family === "utxo") {
+      const fees = await getJson(`${normalizeUrl(primary)}/fee-estimates`).catch(() => null);
+      const satsPerVb = Math.ceil(Number(fees?.["3"] || fees?.["6"] || 2));
+      const vbytes = token ? 180 : 140;
+      return feeInfo(String(satsPerVb * vbytes), 8, "tBTC", { gasLimit: String(vbytes), gasPrice: String(satsPerVb) });
+    }
+
+    if (family === "litecoin") {
+      const fees = await getJson(`${normalizeUrl(primary)}`).catch(() => null);
+      const perKb = Number(fees?.high_fee_per_kb || fees?.medium_fee_per_kb || 100000);
+      const vbytes = token ? 180 : 140;
+      return feeInfo(String(Math.ceil((perKb / 1000) * vbytes)), 8, "tLTC", { gasLimit: String(vbytes), gasPrice: String(perKb) });
+    }
+
+    if (family === "ton") {
+      return feeInfo("50000000", 9, "TON", { gasLimit: "1", gasPrice: "50000000" });
+    }
+
+    if (family === "starknet") {
+      return feeInfo("100000000000000", 18, "ETH", { gasLimit: "1", gasPrice: "100000000000000" });
+    }
+
+    return { ...initialFeeInfo, display: "Fee unavailable", error: "Unsupported fee estimator" };
+  }
+
+  const activeNodeCandidates = useMemo(() => getNetworkNodeCandidates(currentNetwork), [currentNetwork, endpoints.nodeUrl]);
+  const activeRestCandidates = useMemo(() => getRpcCandidatesForFamily(currentNetwork), [currentNetwork, endpoints.nodeUrl]);
+
 
   const currentBridgeChain = useMemo(() => {
 
@@ -891,23 +1283,81 @@ function App() {
       || null;
   }, [bridgeChains, bridgeChainId]);
 
+  const bridgeNativeSymbol = useMemo(() => (
+    String(currentBridgeChain?.native_symbol || currentBridgeChain?.nativeSymbol || "LQD").trim() || "LQD"
+  ), [currentBridgeChain]);
+
+  const bridgeExternalFee = useMemo(() => {
+    const value = Number(
+      currentBridgeChain?.fee_estimate
+      ?? currentBridgeChain?.feeEstimate
+      ?? currentBridgeChain?.native_fee
+      ?? currentBridgeChain?.nativeFee
+      ?? currentBridgeChain?.relayer_fee
+      ?? currentBridgeChain?.relayerFee
+      ?? 0
+    );
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  }, [currentBridgeChain]);
+
+  const bridgeSourceFee = useMemo(() => (
+    bridgeDirection === "lqd_to_external" ? Number(bridgeBaseFee || 0) : bridgeExternalFee
+  ), [bridgeDirection, bridgeBaseFee, bridgeExternalFee]);
+
+  const bridgeTargetFee = useMemo(() => (
+    bridgeDirection === "lqd_to_external" ? bridgeExternalFee : Number(bridgeBaseFee || 0)
+  ), [bridgeDirection, bridgeBaseFee, bridgeExternalFee]);
+
   const bridgeTotalFee = useMemo(() => {
     const amount = parseFloat(bridgeForm.amount) || 0;
     const platformFee = amount * 0.005; // 0.5%
+    return (Number(bridgeSourceFee || 0) + Number(bridgeTargetFee || 0) + platformFee).toFixed(4);
+  }, [bridgeForm.amount, bridgeSourceFee, bridgeTargetFee]);
 
-    // Dynamic estimates:
-    // Source: Assume 5 LQD for LQD network, 10 LQD for external
-    // Target: Use bridgeBaseFee from API as target network estimate
-    const sourceFee = bridgeDirection === 'lqd_to_external' ? 5 : 10;
-    const targetFee = bridgeDirection === 'lqd_to_external' ? bridgeBaseFee : 5;
-
-    return (sourceFee + targetFee + platformFee).toFixed(4);
-  }, [bridgeForm.amount, bridgeDirection, bridgeBaseFee]);
+  const bridgeHistoryItems = useMemo(() => {
+    const fromRequests = (Array.isArray(bridgeRequests) ? bridgeRequests : []).map((item) => ({
+      ...item,
+      type: "bridge",
+        tx_hash: bridgeRequestHash(item),
+        amount: item.amount || item.Amount || "0",
+        token: item.token || item.Token || "LQD",
+        mode: item.mode || item.Mode || "public",
+        family: item.family || item.Family || currentBridgeChain?.family || "evm",
+        direction: item.direction || item.Direction || item.bridge_direction || item.BridgeDirection || "",
+        status: item.status || item.Status || "pending",
+        timestamp: item.updated_at || item.UpdatedAt || item.created_at || item.CreatedAt || 0,
+      }));
+    const fromActivity = (activity || [])
+      .filter((item) => (item.Type || item.type) === "bridge" || (item.Type || item.type) === "lock")
+      .map((item) => ({
+        ...item,
+        type: "bridge",
+        tx_hash: item.TxHash || item.tx_hash || item.hash || "",
+        amount: item.Value || item.amount || "0",
+        token: item.token || item.Token || "LQD",
+        mode: item.mode || item.Mode || "public",
+        family: item.family || item.Family || currentBridgeChain?.family || "evm",
+        direction: item.direction || item.Direction || "",
+        status: item.Status || item.status || "pending",
+        timestamp: item.Timestamp || item.timestamp || 0,
+      }));
+    const seen = new Set();
+    return [...fromRequests, ...fromActivity]
+      .filter((item) => {
+        const key = String(item.tx_hash || item.id || item.ID || `${item.timestamp}:${item.amount}:${item.to || item.To}`).toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))
+      .slice(0, 10);
+  }, [bridgeRequests, activity, currentBridgeChain]);
 
 
   const activeAddress = useMemo(() => {
     if (!wallet) return "";
     const family = String(currentNetwork.family || "evm").toLowerCase();
+    if (currentNetwork.id === "lqd") return wallet.address;
     // If chainKeys are available (derived from mnemonic), use them for all chains
     if (chainKeys) {
       if (family === "evm") return chainKeys.evm.address;
@@ -923,7 +1373,11 @@ function App() {
       if (family === "ton") return chainKeys.ton?.address || chainKeys.ton?.rawPubkey || "";
       if (family === "utxo") return chainKeys.btc?.address || "";
       if (family === "litecoin") return chainKeys.ltc?.address || "";
-      if (family === "starknet") return chainKeys.starknet?.address || "";
+      if (family === "starknet") {
+        // Use Pedersen-based correct ArgentX address (starknet.js)
+        const pub = chainKeys.starknet?.publicKey;
+        return pub ? starknetArgentAddress(pub) : (chainKeys.starknet?.address || "");
+      }
     }
     // Fallback: legacy derivation (EVM key only)
     if (family === "evm") return wallet.address;
@@ -933,13 +1387,58 @@ function App() {
     return watchAddresses[activeNetworkId] || "";
   }, [wallet, chainKeys, currentNetwork, activeNetworkId, watchAddresses]);
 
+  useEffect(() => {
+    if (!sendVisible || !wallet?.address) return;
+    let alive = true;
+    setNativeFeeInfo((prev) => ({ ...prev, loading: true, error: "" }));
+    estimateWalletFee()
+      .then((info) => { if (alive) setNativeFeeInfo(info); })
+      .catch((error) => {
+        if (alive) setNativeFeeInfo({ ...initialFeeInfo, display: "Fee unavailable", error: error?.message || "Fee estimate failed" });
+      });
+    return () => { alive = false; };
+  }, [sendVisible, sendForm.to, sendForm.amount, activeNetworkId, activeAddress, nodeUrl, wallet?.address]);
+
+  useEffect(() => {
+    if (!selectedTokenForSend || !wallet?.address) return;
+    let alive = true;
+    setTokenFeeInfo((prev) => ({ ...prev, loading: true, error: "" }));
+    estimateWalletFee({ token: selectedTokenForSend })
+      .then((info) => { if (alive) setTokenFeeInfo(info); })
+      .catch((error) => {
+        if (alive) setTokenFeeInfo({ ...initialFeeInfo, display: "Fee unavailable", error: error?.message || "Token fee estimate failed" });
+      });
+    return () => { alive = false; };
+  }, [selectedTokenForSend, tokenSendForm.to, tokenSendForm.amount, activeNetworkId, activeAddress, nodeUrl, wallet?.address]);
+
 
   const currentBridgeFamily = String(currentBridgeChain?.family || "evm").toLowerCase();
-  const isExternalBridgeFamily = currentBridgeFamily === "cosmos" || currentBridgeFamily === "utxo" || currentBridgeFamily === "cardano" || currentBridgeFamily === "solana" || currentBridgeFamily === "substrate" || currentBridgeFamily === "xrpl" || currentBridgeFamily === "ton" || currentBridgeFamily === "near" || currentBridgeFamily === "aptos";
+  const bridgeWalletSignedFamilies = ["evm", "harmony", "sei", "monad"];
+  const isExternalBridgeFamily = ["aptos", "bitcoin", "btc", "cardano", "cosmos", "cosmos-testnet", "injective", "litecoin", "near", "solana", "starknet", "substrate", "sui", "ton", "tron", "utxo", "xrpl"].includes(currentBridgeFamily);
 
   const unlockInProgress = useRef(false);
   const scanHandlerRef = useRef(() => { });
   const browserRef = useRef(null);
+
+  function rememberBrowserUrl(url) {
+    const next = String(url || "").trim();
+    if (!next) return;
+    setBrowserHistory((items) => [next, ...items.filter((item) => item !== next)].slice(0, 8));
+  }
+
+  function openBrowserUrl(value) {
+    const raw = String(value || "").trim();
+    if (!raw) {
+      showToast("Enter a website URL first", "info");
+      return;
+    }
+    const next = coerceBrowserUrl(raw);
+    setBrowserUrl(next);
+    setBrowserInput("");
+    rememberBrowserUrl(next);
+    setBrowserVisible(false);
+  }
+
   const lqdProviderScript = useMemo(() => {
     let currentOrigin = "";
     try {
@@ -948,7 +1447,7 @@ function App() {
       currentOrigin = "";
     }
     const isTrusted = trustedOrigins.includes(currentOrigin);
-    const selectedAddress = isTrusted ? (wallet?.address || "") : "";
+    const selectedAddress = isTrusted ? (activeAddress || wallet?.address || "") : "";
     const chainId = currentNetwork?.chainId || "0x8b";
     const networkVersion = parseInt(chainId, 16).toString();
 
@@ -964,6 +1463,10 @@ function App() {
         if (eventListeners[event]) {
           eventListeners[event].forEach(function(cb) { try { cb(data); } catch(e) {} });
         }
+      }
+
+      function lqdRequest(method, params) {
+        return provider.request({ method: method, params: params || [] });
       }
 
       var provider = {
@@ -1035,14 +1538,67 @@ function App() {
 
       window.lqd = provider;
       window.ethereum = provider;
+      window.solana = {
+        isPhantom: true,
+        publicKey: _currentAddr ? { toString: function() { return _currentAddr; } } : null,
+        connect: function() { return lqdRequest("solana_connect", []).then(function(res) {
+          var addr = res && (res.publicKey || res.address || (Array.isArray(res) ? res[0] : ""));
+          if (addr) { _currentAddr = addr; this.publicKey = { toString: function() { return addr; } }; }
+          return { publicKey: this.publicKey };
+        }.bind(this)); },
+        disconnect: function() { _currentAddr = ""; this.publicKey = null; emit("disconnect"); return Promise.resolve(); },
+        signMessage: function(message) { return lqdRequest("solana_signMessage", [message]); },
+        signAndSendTransaction: function(transaction) { return lqdRequest("solana_signAndSendTransaction", [transaction]); }
+      };
+      window.phantom = window.phantom || {};
+      window.phantom.solana = window.solana;
+      window.aptos = {
+        connect: function() { return lqdRequest("aptos_connect", []); },
+        account: function() { return lqdRequest("aptos_account", []); },
+        signMessage: function(payload) { return lqdRequest("aptos_signMessage", [payload]); },
+        signAndSubmitTransaction: function(payload) { return lqdRequest("aptos_signAndSubmitTransaction", [payload]); }
+      };
+      window.petra = window.aptos;
+      window.suiWallet = {
+        requestPermissions: function() { return lqdRequest("sui_requestPermissions", []); },
+        getAccounts: function() { return lqdRequest("sui_getAccounts", []); },
+        signPersonalMessage: function(payload) { return lqdRequest("sui_signPersonalMessage", [payload]); },
+        signAndExecuteTransactionBlock: function(payload) { return lqdRequest("sui_signAndExecuteTransactionBlock", [payload]); }
+      };
+      window.sui = window.suiWallet;
+      window.keplr = {
+        enable: function(chainId) { return lqdRequest("keplr_enable", [chainId]); },
+        getKey: function(chainId) { return lqdRequest("keplr_getKey", [chainId]); },
+        signAmino: function(chainId, signer, signDoc) { return lqdRequest("keplr_signAmino", [chainId, signer, signDoc]); },
+        sendTx: function(chainId, tx, mode) { return lqdRequest("keplr_sendTx", [chainId, tx, mode]); }
+      };
+      window.ton = {
+        connect: function() { return lqdRequest("ton_connect", []); },
+        sendTransaction: function(payload) { return lqdRequest("ton_sendTransaction", [payload]); },
+        signData: function(payload) { return lqdRequest("ton_signData", [payload]); }
+      };
+      window.tonkeeper = window.ton;
+      window.starknet = {
+        isConnected: false,
+        selectedAddress: _currentAddr || "",
+        enable: function() { return lqdRequest("starknet_enable", []).then(function(accounts) {
+          var addr = Array.isArray(accounts) ? accounts[0] : (accounts && accounts.address);
+          if (addr) { this.selectedAddress = addr; this.isConnected = true; }
+          return Array.isArray(accounts) ? accounts : [addr].filter(Boolean);
+        }.bind(this)); },
+        request: function(payload) { return lqdRequest((payload || {}).method, (payload || {}).params || []); },
+        execute: function(calls) { return lqdRequest("starknet_execute", [calls]); },
+        signMessage: function(message) { return lqdRequest("starknet_signMessage", [message]); }
+      };
+      window.starknet_argentX = window.starknet;
 
       window.__LQD_MOBILE_PROVIDER_RESPONSE__ = function(message) {
         var req = pending[String(message.id)];
         if (!req) return;
         delete pending[String(message.id)];
         if (message.ok) {
-          if (message.method === "eth_requestAccounts" || message.method === "lqd_requestAccounts" || message.method === "lqd_connect") {
-            _currentAddr = message.result[0];
+          if (message.method === "eth_requestAccounts" || message.method === "lqd_requestAccounts" || message.method === "lqd_connect" || message.method === "wallet_requestPermissions") {
+            _currentAddr = Array.isArray(message.result) ? message.result[0] : (message.result && (message.result.address || message.result.publicKey)) || _currentAddr;
             emit("accountsChanged", [_currentAddr]);
           }
           req.resolve(message.result);
@@ -1067,11 +1623,33 @@ function App() {
       return true;
     })();
     `;
-  }, [wallet?.address, currentNetwork?.chainId, trustedOrigins]);
+  }, [wallet?.address, activeAddress, currentNetwork?.chainId, trustedOrigins]);
 
+  // Always keep ref fresh — no deps so every render updates it.
+  // Camera onBarcodeScanned uses this ref to avoid stale closures.
   useEffect(() => {
     scanHandlerRef.current = openFromScan;
-  }, [scannerTarget, currentNetwork.chainId, wallet?.address]);
+  });
+
+  // Auto-fetch token metadata when address is pasted in import modal (Trust Wallet style)
+  useEffect(() => {
+    if (!tokenImportVisible) { setTokenPreviewMeta(null); return; }
+    const addr = tokenImportForm.address.trim();
+    const family = currentNetwork?.family || "evm";
+    if (!addr || !isLikelyAddressForFamily(addr, family)) { setTokenPreviewMeta(null); return; }
+    let cancelled = false;
+    setTokenPreviewLoading(true);
+    setTokenPreviewMeta(null);
+    const effectiveNodeUrls = getRpcCandidatesForFamily(currentNetwork, family);
+    const holderAddr = activeAddress || wallet?.address || "";
+    const timer = setTimeout(() => {
+      resolveTokenMetaMultichain(effectiveNodeUrls, addr, holderAddr, family)
+        .then(meta => { if (!cancelled) setTokenPreviewMeta(meta || null); })
+        .catch(() => { if (!cancelled) setTokenPreviewMeta(null); })
+        .finally(() => { if (!cancelled) setTokenPreviewLoading(false); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [tokenImportForm.address, tokenImportVisible, currentNetwork, activeAddress, wallet?.address]);
 
   useEffect(() => {
     const handleUrl = ({ url }) => {
@@ -1096,10 +1674,30 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!bridgeChainId) return;
+    loadBridgeTokens().catch(() => null);
+  }, [bridgeChainId]);
+
+  useEffect(() => {
+    if (!activeBridgeTx) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      await refreshBridgeTracking(activeBridgeTx).catch(() => null);
+    };
+    tick();
+    const timer = setInterval(tick, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeBridgeTx?.tx_hash, activeBridgeTx?.hash, nodeUrl]);
+
+  useEffect(() => {
     if (!wallet?.address || !settingsAutoRefresh) return undefined;
     let cancelled = false;
     const tick = () => {
-      refreshWalletSnapshot().catch((e) => {
+      refreshWalletSnapshot("", { full: false, refreshTokens: false }).catch((e) => {
         if (!cancelled) setStatus(e.message || "Refresh failed");
       });
     };
@@ -1119,20 +1717,20 @@ function App() {
       setChainKeys(keys);
       // Also update multiWallets for backwards-compat display
       setMultiWallets({
-        evm:      { address: keys.evm.address,                            pk: keys.evm.privateKey },
-        harmony:  { address: keys.harmony.address,                        pk: keys.harmony.privateKey },
-        cosmos:   { address: keys.cosmos.address,                         pk: keys.cosmos.privateKey },
-        sei:      { address: keys.sei.address,                            pk: keys.sei.privateKey },
-        injective:{ address: keys.injective.address,                      pk: keys.injective.privateKey },
-        tron:     { address: keys.tron.tronAddress || keys.tron.address,  pk: keys.tron.privateKey },
-        solana:   { address: keys.solana.address,                         pk: keys.solana.privateKey },
-        near:     { address: keys.near.address,                           pk: keys.near.privateKey },
-        aptos:    { address: keys.aptos.address,                          pk: keys.aptos.privateKey },
-        sui:      { address: keys.sui.address,                            pk: keys.sui.privateKey },
-        ton:      { address: keys.ton.address || keys.ton.rawPubkey,      pk: keys.ton.privateKey },
-        btc:      { address: keys.btc?.address,                           pk: keys.btc?.privateKey },
-        ltc:      { address: keys.ltc?.address,                           pk: keys.ltc?.privateKey },
-        starknet: { address: keys.starknet?.address,                      pk: keys.starknet?.privateKey },
+        evm: { address: keys.evm.address, pk: keys.evm.privateKey },
+        harmony: { address: keys.harmony.address, pk: keys.harmony.privateKey },
+        cosmos: { address: keys.cosmos.address, pk: keys.cosmos.privateKey },
+        sei: { address: keys.sei.address, pk: keys.sei.privateKey },
+        injective: { address: keys.injective.address, pk: keys.injective.privateKey },
+        tron: { address: keys.tron.tronAddress || keys.tron.address, pk: keys.tron.privateKey },
+        solana: { address: keys.solana.address, pk: keys.solana.privateKey },
+        near: { address: keys.near.address, pk: keys.near.privateKey },
+        aptos: { address: keys.aptos.address, pk: keys.aptos.privateKey },
+        sui: { address: keys.sui.address, pk: keys.sui.privateKey },
+        ton: { address: keys.ton.address || keys.ton.rawPubkey, pk: keys.ton.privateKey },
+        btc: { address: keys.btc?.address, pk: keys.btc?.privateKey },
+        ltc: { address: keys.ltc?.address, pk: keys.ltc?.privateKey },
+        starknet: { address: keys.starknet?.address, pk: keys.starknet?.privateKey },
       });
     } catch (e) {
       console.warn("deriveAllChainKeys failed:", e.message);
@@ -1164,35 +1762,121 @@ function App() {
     setVaultRecord(record);
   }
 
-  async function refreshWalletSnapshot(addressOverride = "") {
-    if (isRefreshing) return;
+  async function refreshWalletSnapshot(addressOverride = "", refreshOptions = {}) {
     const targetAddr = (addressOverride || activeAddress || "").trim();
     if (!targetAddr) return;
+    const forceRefresh = !!refreshOptions.force;
+    const fullRefresh = refreshOptions.full !== false;
+    const refreshTokensEnabled = refreshOptions.refreshTokens !== false;
+    const autoDiscoverEnabled = refreshOptions.autoDiscover === true;
+    const refreshKey = `${activeNetworkId}:${targetAddr}`;
+    const now = Date.now();
+    if (!forceRefresh && refreshInFlightRef.current?.key === refreshKey) {
+      return refreshInFlightRef.current.promise;
+    }
+    if (!forceRefresh && lastRefreshRequestRef.current.key === refreshKey && now - lastRefreshRequestRef.current.at < 1200) {
+      return;
+    }
+    if (isRefreshing && !forceRefresh) return;
 
     setIsRefreshing(true);
+    let completeRefresh = () => {};
+    const refreshPromise = new Promise((resolve) => { completeRefresh = resolve; });
+    refreshInFlightRef.current = { key: refreshKey, promise: refreshPromise };
+    setBalanceLoadError("");
+    setNetworkHealth((prev) => ({ ...prev, state: "checking", message: "Checking node" }));
     try {
       const family = currentNetwork.family || 'evm';
+      const nodeCandidates = getNetworkNodeCandidates(currentNetwork);
+      const rpcCandidates = getRpcCandidatesForFamily(currentNetwork, family);
+      const primaryNodeUrl = nodeCandidates[0] || nodeUrl;
+      const primaryRpcUrl = rpcCandidates[0] || primaryNodeUrl;
+      const refreshStartedAt = Date.now();
       const rpcPromises = [
-        // Handle Status
+        // Handle Status — per-family health check
         (async () => {
-          if (family === 'evm') return await nodeStatus(nodeUrl).catch(() => ({ online: false }));
-          // For Non-EVM, a simple post to check if RPC is alive
           try {
-            const res = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "getHealth", params: [] }).catch(() => null);
-            return { online: true }; // If we get any response or it doesn't throw majorly
-          } catch { return { online: false }; }
+            if (family === 'evm') {
+              const isLqd = primaryNodeUrl.includes('lqd') || primaryNodeUrl.includes('192.168') || primaryNodeUrl.includes('railway');
+              if (isLqd) return await tryRpcCandidates(nodeCandidates, (url) => nodeStatus(url), (res) => !!res).then(({ result }) => result || { online: false }).catch(() => ({ online: false }));
+              // External EVM (Sepolia, BSC, etc.): /blockchain doesn't exist, use eth_blockNumber
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, { jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
+              return { online: !!res?.result };
+            }
+            if (family === 'harmony' || family === 'tron') {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, { jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
+              return { online: !!res?.result };
+            }
+            if (family === 'solana') {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, { jsonrpc: "2.0", id: 1, method: "getHealth", params: [] }).catch(() => null), (r) => !!(r?.result === 'ok' || r?.result)).catch(() => ({ result: null }));
+              return { online: !!(res?.result === 'ok' || res?.result) };
+            }
+            if (family === 'near') {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, { jsonrpc: "2.0", id: 1, method: "status", params: [] }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
+              return { online: !!res?.result };
+            }
+            if (family === 'aptos') {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => getJson(`${url}/`).catch(() => null), (r) => !!r?.chain_id).catch(() => ({ result: null }));
+              return { online: !!res?.chain_id };
+            }
+            if (family === 'sui') {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, { jsonrpc: "2.0", id: 1, method: "sui_getChainIdentifier", params: [] }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
+              return { online: !!res?.result };
+            }
+            if (family === 'ton') {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => {
+                const tonBase = url.replace(/\/jsonRPC$/, '').replace(/\/api\/v\d\/jsonRPC$/, '');
+                return getJson(`${tonBase}/getMasterchainInfo`).catch(() => null);
+              }, (r) => !!r?.result).catch(() => ({ result: null }));
+              return { online: !!res?.result };
+            }
+            if (family === 'cosmos' || family === 'cosmos-testnet') {
+              const { result: res } = await tryRpcCandidates(rpcCandidates, async (url) =>
+                await getJson(`${url}/cosmos/base/tendermint/v1beta1/syncing`, { timeoutMs: 8000 }).catch(() => null)
+                || await getJson(`${url}/cosmos/base/tendermint/v1beta1/node_info`, { timeoutMs: 8000 }).catch(() => null)
+              ).catch(() => ({ result: null }));
+              return { online: res !== null };
+            }
+            if (family === 'sei') {
+              const { result: res } = await tryRpcCandidates(rpcCandidates, async (url) =>
+                await getJson(`${url}/cosmos/base/tendermint/v1beta1/syncing`, { timeoutMs: 8000 }).catch(() => null)
+                || await getJson(`${url}/cosmos/base/tendermint/v1beta1/node_info`, { timeoutMs: 8000 }).catch(() => null)
+              ).catch(() => ({ result: null }));
+              return { online: res !== null };
+            }
+            if (family === 'injective') {
+              const { result: res } = await tryRpcCandidates(rpcCandidates, async (url) =>
+                await getJson(`${url}/cosmos/base/tendermint/v1beta1/syncing`, { timeoutMs: 8000 }).catch(() => null)
+                || await getJson(`${url}/cosmos/base/tendermint/v1beta1/node_info`, { timeoutMs: 8000 }).catch(() => null)
+              ).catch(() => ({ result: null }));
+              return { online: res !== null };
+            }
+            if (family === 'starknet') {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, { jsonrpc: "2.0", id: 1, method: "starknet_blockNumber", params: [] }).catch(() => null), (r) => r?.result !== undefined && r?.result !== null).catch(() => ({ result: null }));
+              return { online: res?.result !== undefined && res?.result !== null };
+            }
+            return { online: true };
+          } catch { return { online: true }; }
         })(),
         // Handle Balance
         (async () => {
           if (family === 'evm') {
+            if (currentNetwork.id === 'lqd') {
+              return await tryRpcCandidates(
+                nodeCandidates,
+                (url) => walletBalance(url, targetAddr).catch(() => null),
+                (r) => r && (r.balance !== undefined || r.Balance !== undefined || r.amount !== undefined)
+              ).then(({ result }) => result).catch(() => null);
+            }
+
             // Try standard JSON-RPC first as it's more universal for Sepolia/BSC/etc.
             try {
-              const res = await postJson(nodeUrl, {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, {
                 jsonrpc: "2.0",
                 id: 1,
                 method: "eth_getBalance",
                 params: [targetAddr, "latest"]
-              }).catch(() => null);
+              }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
 
               if (res && res.result) {
                 // Convert hex to decimal string
@@ -1202,22 +1886,22 @@ function App() {
             } catch (e) { /* ignore and try custom */ }
 
             // Fallback to custom LQD API
-            return await walletBalance(nodeUrl, targetAddr).catch(() => null);
+            return await tryRpcCandidates(nodeCandidates, (url) => walletBalance(url, targetAddr).catch(() => null), (r) => !!r).then(({ result }) => result).catch(() => null);
           }
           // Bug fix #1: Harmony uses EVM-compatible JSON-RPC — same as EVM path
           if (family === 'harmony') {
-            const res = await postJson(nodeUrl, {
+            const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, {
               jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [targetAddr, "latest"]
-            }).catch(() => null);
+            }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
             if (res?.result) return { balance: BigInt(res.result).toString() };
-            return await walletBalance(nodeUrl, targetAddr).catch(() => null);
+            return await tryRpcCandidates(nodeCandidates, (url) => walletBalance(url, targetAddr).catch(() => null), (r) => !!r).then(({ result }) => result).catch(() => null);
           }
           if (family === 'solana') {
-            const res = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "getBalance", params: [targetAddr] }).catch(() => null);
+            const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, { jsonrpc: "2.0", id: 1, method: "getBalance", params: [targetAddr] }).catch(() => null), (r) => r?.result?.value !== undefined).catch(() => ({ result: null }));
             return res ? { balance: res?.result?.value || 0 } : null;
           }
           if (family === 'cosmos') {
-            const res = await getJson(`${nodeUrl}/cosmos/bank/v1beta1/balances/${targetAddr}`).catch(() => null);
+            const { result: res } = await tryRpcCandidates(rpcCandidates, (url) => getJson(`${url}/cosmos/bank/v1beta1/balances/${targetAddr}`).catch(() => null), (r) => !!r?.balances).catch(() => ({ result: null }));
             const bal = res?.balances?.find(b => b.denom === 'uatom' || b.denom === 'stake' || b.denom === 'atom');
             return bal ? { balance: bal.amount } : { balance: 0 };
           }
@@ -1235,9 +1919,9 @@ function App() {
           // Bug fix #2: TRON JSON-RPC endpoint uses eth_getBalance, not a REST body
           if (family === 'tron') {
             const evmAddr = tronAddressToEvm(targetAddr) || targetAddr;
-            const res = await postJson(nodeUrl, {
+            const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, {
               jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [evmAddr, "latest"]
-            }).catch(() => null);
+            }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
             if (res?.result) return { balance: BigInt(res.result).toString() };
             return { balance: 0 };
           }
@@ -1245,23 +1929,25 @@ function App() {
             if (!targetAddr) return { balance: 0 };
             // targetAddr is now EQ.../UQ... (v3R2 wallet address from tonV3R2Address)
             // TonCenter jsonRPC: getAddressBalance or getAddressInformation
-            const tonBase = nodeUrl.includes('jsonRPC') ? nodeUrl.replace(/\/jsonRPC$/, '') : nodeUrl;
-            const res = await getJson(`${tonBase}/getAddressInformation?address=${encodeURIComponent(targetAddr)}`).catch(() => null);
+            const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => {
+              const tonBase = url.includes('jsonRPC') ? url.replace(/\/jsonRPC$/, '') : url;
+              return getJson(`${tonBase}/getAddressInformation?address=${encodeURIComponent(targetAddr)}`).catch(() => null);
+            }, (r) => !!r?.result).catch(() => ({ result: null }));
             return { balance: res?.result?.balance || 0 };
           }
           // Bug fix #6b: NEAR — activeAddress is "" for ed25519; use targetAddr param
           if (family === 'near') {
             if (!targetAddr) return { balance: 0 };
-            const res = await postJson(nodeUrl, {
+            const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, {
               jsonrpc: "2.0", id: 1, method: "query",
               params: { request_type: "view_account", finality: "final", account_id: targetAddr }
-            }).catch(() => null);
+            }).catch(() => null), (r) => !!r?.result?.amount).catch(() => ({ result: null }));
             return { balance: res?.result?.amount || 0 };
           }
           // Bug fix #3: Aptos — fetch real APT balance from CoinStore resource
           if (family === 'aptos') {
             if (!targetAddr) return { balance: 0 };
-            const res = await getJson(`${nodeUrl}/accounts/${encodeURIComponent(targetAddr)}/resources`).catch(() => null);
+            const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => getJson(`${url}/accounts/${encodeURIComponent(targetAddr)}/resources`).catch(() => null), (r) => Array.isArray(r)).catch(() => ({ result: null }));
             const store = (Array.isArray(res) ? res : []).find(r =>
               r.type === "0x1::coin::CoinStore<0x1::aptos_coin::AptosCoin>"
             );
@@ -1270,10 +1956,10 @@ function App() {
           // Bug fix #5: SUI — use targetAddr, not stale activeAddress state
           if (family === 'sui') {
             if (!targetAddr) return { balance: 0 };
-            const res = await postJson(nodeUrl, {
+            const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, {
               jsonrpc: "2.0", id: 1, method: "suix_getBalance",
               params: [targetAddr, "0x2::sui::SUI"],
-            }).catch(() => null);
+            }).catch(() => null), (r) => r?.result?.totalBalance !== undefined).catch(() => ({ result: null }));
             return { balance: res?.result?.totalBalance || 0 };
           }
           // SEI/Injective: try Cosmos bank REST, then EVM fallback with correct key
@@ -1281,9 +1967,8 @@ function App() {
             if (!targetAddr) return { balance: 0 };
             const denom = family === 'sei' ? 'usei' : 'inj';
             // SEI nodeUrl is EVM RPC; use cosmosRestUrl for Cosmos bank queries
-            const cosmosUrl = currentNetwork?.cosmosRestUrl || (family === 'injective' ? nodeUrl : null);
-            if (cosmosUrl) {
-              const cosmosRes = await getJson(`${cosmosUrl}/cosmos/bank/v1beta1/balances/${targetAddr}`).catch(() => null);
+            if (rpcCandidates.length) {
+              const { result: cosmosRes } = await tryRpcCandidates(rpcCandidates, (url) => getJson(`${url}/cosmos/bank/v1beta1/balances/${targetAddr}`).catch(() => null), (r) => !!r?.balances).catch(() => ({ result: null }));
               const cosmosbal = cosmosRes?.balances?.find(b => b.denom === denom);
               if (cosmosbal?.amount) return { balance: cosmosbal.amount };
             }
@@ -1292,9 +1977,9 @@ function App() {
               ? (chainKeys?.sei?.evmAddress || chainKeys?.evm?.address)
               : (chainKeys?.injective?.evmAddress || chainKeys?.evm?.address);
             if (evmAddr) {
-              const evmRes = await postJson(nodeUrl, {
+              const { result: evmRes } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, {
                 jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [evmAddr, "latest"],
-              }).catch(() => null);
+              }).catch(() => null), (r) => !!r?.result).catch(() => ({ result: null }));
               if (evmRes?.result && evmRes.result !== "0x0" && evmRes.result !== "0x") {
                 return { balance: BigInt(evmRes.result).toString() };
               }
@@ -1307,10 +1992,10 @@ function App() {
             const ETH_CONTRACT = "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
             const BALANCE_OF_SELECTOR = "0x2e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e";
             try {
-              const res = await postJson(nodeUrl, {
+              const { result: res } = await tryRpcCandidates(nodeCandidates, (url) => postJson(url, {
                 jsonrpc: "2.0", id: 1, method: "starknet_call",
                 params: [{ contract_address: ETH_CONTRACT, entry_point_selector: BALANCE_OF_SELECTOR, calldata: [targetAddr] }, "latest"],
-              }).catch(() => null);
+              }).catch(() => null), (r) => Array.isArray(r?.result) && r.result.length >= 2).catch(() => ({ result: null }));
               // Returns [low, high] uint256
               if (res?.result?.length >= 2) {
                 const low = BigInt(res.result[0] || "0x0");
@@ -1327,15 +2012,23 @@ function App() {
       const [status, native, factory, recent, requests, tokensResp, poolsResp, feeResp] = await Promise.all([
         rpcPromises[0],
         rpcPromises[1],
-        family === 'evm' ? nodeCurrentFactory(nodeUrl).catch(() => null) : Promise.resolve(null),
-        family === 'evm' ? nodeRecentTransactions(nodeUrl).catch(() => []) : Promise.resolve([]),
-        family === 'evm' ? nodeBridgeRequests(nodeUrl).catch(() => []) : Promise.resolve([]),
-        family === 'evm' ? nodeBridgeTokens(nodeUrl).catch(() => []) : Promise.resolve([]),
-        family === 'evm' ? nodeLiquidityPools(nodeUrl).catch(() => null) : Promise.resolve(null),
-        family === 'evm' ? nodeBaseFee(nodeUrl).catch(() => 10) : Promise.resolve(10),
+        family === 'evm' && fullRefresh ? nodeCurrentFactory(nodeUrl).catch(() => null) : Promise.resolve(null),
+        family === 'evm' && fullRefresh ? nodeRecentTransactions(nodeUrl).catch(() => []) : Promise.resolve([]),
+        family === 'evm' && fullRefresh ? nodeBridgeRequests(nodeUrl).catch(() => []) : Promise.resolve([]),
+        family === 'evm' && fullRefresh ? nodeBridgeTokens(nodeUrl).catch(() => []) : Promise.resolve([]),
+        family === 'evm' && fullRefresh ? nodeLiquidityPools(nodeUrl).catch(() => null) : Promise.resolve(null),
+        family === 'evm' && fullRefresh ? nodeBaseFee(nodeUrl).catch(() => 10) : Promise.resolve(10),
       ]);
 
-      setIsNodeOnline(!!status?.online || !!status?.version);
+      const online = !!status?.online || !!status?.version;
+      const latencyMs = Date.now() - refreshStartedAt;
+      setIsNodeOnline(online);
+      setNetworkHealth({
+        state: online ? (latencyMs > 2500 ? "slow" : "online") : "offline",
+        message: online ? (latencyMs > 2500 ? "Node is slow" : "Node online") : "Node unavailable",
+        latencyMs,
+        checkedAt: Date.now(),
+      });
 
       if (family === 'evm' && feeResp) {
         setBridgeBaseFee(Number(feeResp?.base_fee || feeResp || 10));
@@ -1350,6 +2043,8 @@ function App() {
         else if (native.Balance !== undefined && native.Balance !== null) val = String(native.Balance);
         else if (native.amount !== undefined && native.amount !== null) val = String(native.amount);
         setNativeBalance(val);
+      } else {
+        setBalanceLoadError("Balance refresh failed. Keeping the last known balance.");
       }
       if (factory?.address) {
         setFactoryAddress(factory.address);
@@ -1370,16 +2065,34 @@ function App() {
         setBridgeTokens(tokensResp);
       }
 
-      await refreshTokenBalances(watchlist, activeAddress);
-      await autoDiscoverTokens({
-        recent: Array.isArray(recent) ? recent : [],
-        bridgeTokens: Array.isArray(tokensResp) ? tokensResp : [],
-        factory,
-        pools: poolsResp,
-      }, activeAddress);
+      setLastWalletRefresh(Date.now());
+      if (refreshTokensEnabled || autoDiscoverEnabled) {
+        const backgroundTasks = [];
+        if (refreshTokensEnabled) backgroundTasks.push(refreshTokenBalances(watchlist, targetAddr));
+        if (autoDiscoverEnabled) {
+          backgroundTasks.push(autoDiscoverTokens({
+            recent: Array.isArray(recent) ? recent : [],
+            bridgeTokens: Array.isArray(tokensResp) ? tokensResp : [],
+            factory,
+            pools: poolsResp,
+          }, targetAddr));
+        }
+        Promise.allSettled(backgroundTasks).catch((error) => {
+          recordError("wallet_background_refresh", error, { network: activeNetworkId }).catch(() => {});
+        });
+      }
     } catch (e) {
       console.warn("Refresh failed:", e.message);
+      setBalanceLoadError(e.message || "Refresh failed");
+      setNetworkHealth({
+        state: "offline",
+        message: e.message || "Node unavailable",
+        checkedAt: Date.now(),
+      });
     } finally {
+      lastRefreshRequestRef.current = { key: refreshKey, at: Date.now() };
+      if (refreshInFlightRef.current?.key === refreshKey) refreshInFlightRef.current = null;
+      completeRefresh();
       setIsRefreshing(false);
     }
   }
@@ -1437,11 +2150,11 @@ function App() {
       const resp = await nodeBridgeFamilies(lqdNode);
       const list = Array.isArray(resp) ? resp.filter(Boolean) : [];
       setBridgeFamilies(list);
-      
+
       // Also update bridgeChains for the flat list
       const chains = list.flatMap(f => f.Chains || f.chains || []);
       if (chains.length > 0) setBridgeChains(chains);
-      
+
       return list;
     } catch {
       setBridgeFamilies([]);
@@ -1475,7 +2188,7 @@ function App() {
     if (!chainId) return;
     const nextFamily = String(cfg?.family || "evm").toLowerCase();
     setBridgeChainId(chainId);
-    
+
     // Switch direction based on which side was clicked
     if (bridgeTargetSide === "source") {
       setBridgeDirection("external_to_lqd");
@@ -1516,19 +2229,21 @@ function App() {
   async function importDetectedTokens(candidates, addressOverride = "", source = "activity") {
     const activeAddress = addressOverride || wallet?.address;
     if (!activeAddress) return 0;
-    const existing = new Set((watchlist || []).map((item) => normalizeAddress(item.address || item.contract)).filter(Boolean));
+    const family = String(currentNetwork.family || "evm").toLowerCase();
+    const existing = new Set((watchlist || []).map((item) => tokenKey(item)).filter(Boolean));
     const unique = [...new Set((candidates || []).map(normalizeAddress).filter(Boolean))]
-      .filter((address) => !existing.has(address));
+      .filter((address) => !existing.has(`${activeNetworkId}:${address}`));
     if (!unique.length) return 0;
 
     const detected = [];
+    const rpcUrls = getRpcCandidatesForFamily(currentNetwork, family);
     for (const address of unique) {
       try {
-        const meta = await resolveTokenMeta(nodeUrl, address, activeAddress);
-        const hasRealMeta = Boolean(meta?.symbol && meta.symbol !== "TOKEN") || Boolean(meta?.name && meta.name !== "Token");
+        const meta = await resolveTokenMetaMultichain(rpcUrls, address, activeAddress, family);
+        const hasRealMeta = !isGenericTokenMeta(meta);
         if (!hasRealMeta) continue;
-        const balance = await resolveTokenBalance(nodeUrl, walletUrl, address, activeAddress);
-        detected.push({ ...meta, address, balance, detectedFrom: source, networkId: activeNetworkId });
+        const balance = await resolveTokenBalanceMultichain(rpcUrls, walletUrl, address, activeAddress, family);
+        detected.push({ ...meta, address, balance, detectedFrom: source, networkId: activeNetworkId, family, holderAddress: activeAddress });
       } catch {
         // Ignore contracts that are not token-like.
       }
@@ -1631,6 +2346,8 @@ function App() {
   function openFromScan(data) {
     const raw = String(data || "").trim();
     if (!raw) return;
+
+    // ── lqdwallet:// deep link ────────────────────────────────────────────────
     if (/^lqdwallet:\/\//i.test(raw)) {
       try {
         const url = new URL(raw);
@@ -1638,8 +2355,9 @@ function App() {
         const params = Object.fromEntries(url.searchParams.entries());
         if (action === "send") {
           if (params.to) setSendForm((prev) => ({ ...prev, to: params.to, amount: params.amount || prev.amount }));
+          setSendVisible(true);
           setTab("home");
-          setStatus("Send form populated from QR / deep link");
+          setStatus("Send form populated from QR");
           return;
         }
         if (action === "connect") {
@@ -1660,27 +2378,61 @@ function App() {
           setReceiveVisible(true);
           return;
         }
-      } catch {
-        // fallback to address handling below
-      }
+      } catch { /* fallback below */ }
     }
-    if (isLikelyAddress(raw)) {
-      if (scannerTarget === "native") {
-        setSendForm((prev) => ({ ...prev, to: raw }));
-      } else if (scannerTarget === "token") {
-        setTokenSendForm((prev) => ({ ...prev, to: raw }));
-      } else if (scannerTarget === "bridge") {
-        setBridgeForm((prev) => ({ ...prev, toBsc: raw, toLqd: raw }));
-      } else if (scannerTarget === "import") {
-        setTokenImportForm({ address: raw });
-        setTab("tokens");
-      } else {
-        setSendForm((prev) => ({ ...prev, to: raw }));
+
+    // ── Payment URI parsing (BIP21, EIP-681, TON, Solana Pay, etc.) ──────────
+    // Extracts the address from: bitcoin:addr?amount=x  ethereum:addr  ton://transfer/addr  solana:addr
+    let extractedAddr = raw;
+    let extractedAmount = "";
+    try {
+      const uriMatch = raw.match(
+        /^(?:bitcoin|litecoin|ethereum|ton|solana|tron|cosmos|near|aptos|sui|starknet):(?:\/\/(?:transfer\/)?)?([^\/?&#]+)/i
+      );
+      if (uriMatch) {
+        extractedAddr = uriMatch[1].trim();
+        const qIdx = raw.indexOf("?");
+        if (qIdx !== -1) {
+          const qs = new URLSearchParams(raw.slice(qIdx + 1));
+          extractedAmount = qs.get("amount") || qs.get("value") || "";
+        }
       }
-      setStatus("Address scanned");
+    } catch { /* use raw as-is */ }
+
+    // ── Address detection: use current chain family, not just EVM ────────────
+    const family = currentNetwork?.family || "evm";
+    const isAddr = isLikelyAddressForFamily(extractedAddr, family)
+      || isLikelyAddress(extractedAddr); // EVM fallback for universal QRs
+
+    if (isAddr) {
+      if (scannerTarget === "native") {
+        setSendForm((prev) => ({
+          ...prev,
+          to: extractedAddr,
+          amount: extractedAmount || prev.amount,
+        }));
+        setTab("home");
+        setTimeout(() => setSendVisible(true), 100);
+      } else if (scannerTarget === "token") {
+        setTokenSendForm((prev) => ({
+          ...prev,
+          to: extractedAddr,
+          amount: extractedAmount || prev.amount,
+        }));
+      } else if (scannerTarget === "bridge") {
+        setBridgeForm((prev) => ({ ...prev, toBsc: extractedAddr, toLqd: extractedAddr }));
+      } else {
+        // Scanned from standalone scanner tab — open send modal on home tab
+        setSendForm((prev) => ({ ...prev, to: extractedAddr, amount: extractedAmount || prev.amount }));
+        setTab("home");
+        // Small delay so tab navigation settles before modal opens
+        setTimeout(() => setSendVisible(true), 100);
+      }
+      setStatus(`✓ Address scanned`);
       return;
     }
-    setStatus("QR scanned but format was not recognized");
+
+    setStatus("QR scanned but no valid address found for " + (currentNetwork?.name || "this chain"));
   }
 
   async function respondBrowser(id, ok, result, error = "", method = "") {
@@ -1693,45 +2445,532 @@ function App() {
     `);
   }
 
+  function parseDappQuantity(value, fallback = "0") {
+    if (value === undefined || value === null || value === "") return String(fallback);
+    const raw = String(value).trim();
+    if (!raw) return String(fallback);
+    if (/^0x[0-9a-fA-F]+$/.test(raw)) return BigInt(raw).toString();
+    if (/^\d+$/.test(raw)) return raw;
+    throw new Error(`Invalid numeric value: ${raw}`);
+  }
+
+  function dappActiveEvmKey() {
+    const family = currentNetwork.family || "evm";
+    if (family === "harmony") {
+      return {
+        privateKey: chainKeys?.harmony?.privateKey || chainKeys?.evm?.privateKey || wallet?.privateKey,
+        address: chainKeys?.harmony?.address || chainKeys?.evm?.address || wallet?.address,
+      };
+    }
+    if (family === "tron") {
+      return {
+        privateKey: chainKeys?.tron?.privateKey || wallet?.privateKey,
+        address: chainKeys?.tron?.address || wallet?.address,
+      };
+    }
+    if (family === "sei") {
+      return {
+        privateKey: chainKeys?.sei?.privateKey || wallet?.privateKey,
+        address: chainKeys?.sei?.evmAddress || chainKeys?.evm?.address || wallet?.address,
+      };
+    }
+    return {
+      privateKey: chainKeys?.evm?.privateKey || wallet?.privateKey,
+      address: chainKeys?.evm?.address || wallet?.address,
+    };
+  }
+
+  function dappActiveChainKey(family = currentNetwork.family || "evm") {
+    if (family === "solana") return { privateKey: chainKeys?.solana?.privateKey, address: chainKeys?.solana?.address || activeAddress };
+    if (family === "near") return { privateKey: chainKeys?.near?.privateKey, address: watchAddresses[activeNetworkId] || activeAddress, publicKey: chainKeys?.near?.address };
+    if (family === "aptos") return { privateKey: chainKeys?.aptos?.privateKey, address: chainKeys?.aptos?.address || activeAddress };
+    if (family === "sui") return { privateKey: chainKeys?.sui?.privateKey, address: chainKeys?.sui?.address || activeAddress };
+    if (family === "ton") return { privateKey: chainKeys?.ton?.privateKey, address: chainKeys?.ton?.address || activeAddress, rawPubkey: chainKeys?.ton?.rawPubkey };
+    if (family === "starknet") return { privateKey: chainKeys?.starknet?.privateKey, address: starknetArgentAddress(chainKeys?.starknet?.publicKey || ""), publicKey: chainKeys?.starknet?.publicKey };
+    if (family === "cosmos" || family === "cosmos-testnet") return { privateKey: chainKeys?.cosmos?.privateKey, address: chainKeys?.cosmos?.address || activeAddress };
+    if (family === "injective") return { privateKey: chainKeys?.injective?.privateKey, address: chainKeys?.injective?.address || activeAddress };
+    if (family === "utxo") return { privateKey: chainKeys?.btc?.privateKey, address: chainKeys?.btc?.address || activeAddress };
+    if (family === "litecoin") return { privateKey: chainKeys?.ltc?.privateKey, address: chainKeys?.ltc?.address || activeAddress };
+    return dappActiveEvmKey();
+  }
+
+  function dappAmountRaw(tx, decimals) {
+    const value = tx?.lamports ?? tx?.nanoTon ?? tx?.amountRaw ?? tx?.value;
+    if (value !== undefined && value !== null && value !== "") return parseDappQuantity(value, "0");
+    if (tx?.amount !== undefined && tx?.amount !== null && tx.amount !== "") {
+      return parseUnits(String(tx.amount), decimals || currentNetwork.decimals || 8);
+    }
+    return "0";
+  }
+
+  function dappRecipient(tx) {
+    return String(
+      tx?.to || tx?.recipient || tx?.receiver || tx?.receiverId || tx?.toAddress ||
+      tx?.messages?.[0]?.address || tx?.messages?.[0]?.to || ""
+    ).trim();
+  }
+
+  function normaliseDappMessage(value) {
+    if (value === undefined || value === null) return "";
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return "0x" + value.map((n) => Number(n).toString(16).padStart(2, "0")).join("");
+    if (typeof value === "object") {
+      if (Array.isArray(value.data)) return normaliseDappMessage(value.data);
+      if (Array.isArray(value.message)) return normaliseDappMessage(value.message);
+      if (value.message !== undefined) return normaliseDappMessage(value.message);
+      if (value.bytes !== undefined) return normaliseDappMessage(value.bytes);
+      return JSON.stringify(value);
+    }
+    return String(value);
+  }
+
+  function aptosFullMessage(payload) {
+    const safePayload = payload && typeof payload === "object" ? payload : { message: payload };
+    const lines = ["APTOS"];
+    if (safePayload.address) lines.push(`address: ${safePayload.address}`);
+    if (safePayload.application) lines.push(`application: ${safePayload.application}`);
+    if (safePayload.chainId) lines.push(`chainId: ${safePayload.chainId}`);
+    lines.push(`message: ${normaliseDappMessage(safePayload.message)}`);
+    lines.push(`nonce: ${safePayload.nonce || ""}`);
+    return { payload: safePayload, fullMessage: lines.join("\n") };
+  }
+
+  function assertDappFromMatches(tx, expectedAddress) {
+    const from = String(tx?.from || "").trim();
+    if (!from || !expectedAddress) return;
+    if (from.toLowerCase() !== String(expectedAddress).toLowerCase()) {
+      throw new Error(`Request account mismatch. dApp used ${shortAddress(from)}, active wallet is ${shortAddress(expectedAddress)}.`);
+    }
+  }
+
+  async function approveDappTransaction(item) {
+    if (!wallet?.address || !wallet?.privateKey) throw new Error("Unlock wallet first");
+    const tx = item.data || {};
+    const method = item.method || "";
+
+    if (currentNetwork.id === "lqd" || method === "lqd_contractTx") {
+      assertDappFromMatches(tx, wallet.address);
+      const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
+      const baseFeeValue = baseFee?.base_fee || baseFee?.BaseFee || baseFee?.baseFee || baseFee || 10;
+
+      if (method === "lqd_contractTx") {
+        const contractAddress = tx.contract_address || tx.contractAddress || tx.address || tx.to;
+        const functionName = tx.function || tx.functionName || tx.methodName;
+        if (!contractAddress || !functionName) throw new Error("Contract address and function are required");
+        const res = await walletContractTx(walletUrl, {
+          address: wallet.address,
+          contract_address: contractAddress,
+          function: functionName,
+          args: Array.isArray(tx.args) ? tx.args : [],
+          value: parseDappQuantity(tx.value, "0"),
+          gas: Number(parseDappQuantity(tx.gas || tx.gasLimit, "200000")),
+          gas_price: Number(parseDappQuantity(tx.gas_price || tx.gasPrice, baseFeeValue)),
+          private_key: wallet.privateKey,
+        });
+        const hash = res?.tx_hash || res?.hash || "";
+        if (!hash) throw new Error(res?.error || "Contract transaction failed");
+        return hash;
+      }
+
+      if (!tx.to) throw new Error("Recipient address is required");
+      const res = await walletSend(walletUrl, {
+        from: wallet.address,
+        to: tx.to,
+        value: parseDappQuantity(tx.value, "0"),
+        data: tx.data || "",
+        gas: Number(parseDappQuantity(tx.gas || tx.gasLimit, "21000")),
+        gas_price: Number(parseDappQuantity(tx.gas_price || tx.gasPrice, baseFeeValue)),
+        private_key: wallet.privateKey,
+        node_url: nodeUrl,
+      });
+      const hash = res?.tx_hash || res?.hash || "";
+      if (!hash) throw new Error(res?.error || "Transaction failed");
+      return hash;
+    }
+
+    const family = currentNetwork.family || "evm";
+    if (!(family === "evm" || family === "harmony" || family === "tron" || family === "sei")) {
+      return approveDappNonEvmTransaction(item, family);
+    }
+    const { privateKey, address } = dappActiveEvmKey();
+    if (!privateKey || !address) throw new Error("Unlock EVM-compatible wallet key first");
+    assertDappFromMatches(tx, address);
+    const chainId = currentNetwork.chainId;
+    if (!chainId) throw new Error(`chainId not configured for ${currentNetwork.name}`);
+
+    const value = parseDappQuantity(tx.value, "0");
+    const data = tx.data || "0x";
+    const to = tx.to || "";
+    const [nonceRes, gasPriceRes, gasEstimateRes] = await Promise.all([
+      postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "eth_getTransactionCount", params: [address, "pending"] }).catch(() => null),
+      postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "eth_gasPrice", params: [] }).catch(() => null),
+      tx.gas || tx.gasLimit
+        ? Promise.resolve(null)
+        : postJson(nodeUrl, {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "eth_estimateGas",
+            params: [{ from: address, to: to || undefined, value: "0x" + BigInt(value).toString(16), data }],
+          }).catch(() => null),
+    ]);
+    const nonce = nonceRes?.result ? parseInt(nonceRes.result, 16) : 0;
+    const gasPrice = isZeroFeeNetwork(currentNetwork, family)
+      ? 0n
+      : BigInt(parseDappQuantity(tx.gasPrice || tx.gas_price || gasPriceRes?.result, gasPriceRes?.result ? BigInt(gasPriceRes.result).toString() : String(10e9)));
+    const gasLimit = Number(parseDappQuantity(tx.gas || tx.gasLimit || gasEstimateRes?.result, gasEstimateRes?.result ? BigInt(gasEstimateRes.result).toString() : (data && data !== "0x" ? "150000" : "21000")));
+    const signedTx = signEip155Tx({
+      nonce,
+      gasPrice: gasPrice.toString(),
+      gasLimit,
+      to,
+      value,
+      data,
+      chainId,
+    }, privateKey);
+    const sendRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction", params: [signedTx] });
+    const hash = sendRes?.result || "";
+    if (!hash || hash === "0x") throw new Error(sendRes?.error?.message || "Broadcast failed");
+    return hash;
+  }
+
+  async function approveDappNonEvmTransaction(item, family = currentNetwork.family || "evm") {
+    const tx = item.data || {};
+    const { privateKey, address, publicKey, rawPubkey } = dappActiveChainKey(family);
+    if (!privateKey || !address) throw new Error(`Unlock ${currentNetwork.name} wallet key first`);
+    assertDappFromMatches(tx, address);
+    const recipient = dappRecipient(tx);
+    const decimals = currentNetwork.decimals || 8;
+    const amount = dappAmountRaw(tx, decimals);
+
+    if (family === "cosmos" || family === "cosmos-testnet" || family === "injective") {
+      if (!recipient) throw new Error("Recipient address is required");
+      const restBase = (currentNetwork.cosmosRestUrl || getRpcCandidatesForFamily(currentNetwork, family)[0] || nodeUrl).replace(/\/$/, "");
+      const accRes = await getJson(`${restBase}/cosmos/auth/v1beta1/accounts/${address}`).catch(() => null);
+      const accInfo = accRes?.account;
+      const sequence = parseInt(accInfo?.sequence || "0", 10);
+      const accountNumber = parseInt(accInfo?.account_number || "0", 10);
+      const denom = tx.denom || (family === "injective" ? "inj" : "uatom");
+      const txBody = signCosmosTx({
+        chainId: currentNetwork.cosmosChainId || currentNetwork.id,
+        sequence,
+        accountNumber,
+        fromAddress: address,
+        toAddress: recipient,
+        amount,
+        denom,
+        memo: tx.memo || "",
+        gas: Number(parseDappQuantity(tx.gas, "200000")),
+      }, privateKey);
+      const broadcastRes = await postJson(`${restBase}/cosmos/tx/v1beta1/txs`, { tx: txBody.tx, mode: "BROADCAST_MODE_SYNC" }).catch(() => null);
+      const hash = broadcastRes?.tx_response?.txhash || broadcastRes?.txhash || "";
+      if (!hash) throw new Error(broadcastRes?.tx_response?.raw_log || "Cosmos broadcast failed");
+      return hash;
+    }
+
+    if (family === "solana") {
+      if (!recipient) throw new Error("Recipient public key is required");
+      const blockRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "getLatestBlockhash", params: [{ commitment: "finalized" }] });
+      const blockhash = blockRes?.result?.value?.blockhash;
+      if (!blockhash) throw new Error("Could not get Solana blockhash");
+      const signedTx = signSolanaTransfer({ fromPubkey: address, toPubkey: recipient, lamports: amount, recentBlockhash: blockhash }, privateKey);
+      const sendRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "sendTransaction", params: [signedTx, { encoding: "base58" }] });
+      const hash = sendRes?.result || "";
+      if (!hash) throw new Error(sendRes?.error?.message || "Solana broadcast failed");
+      return hash;
+    }
+
+    if (family === "near") {
+      if (!recipient) throw new Error("Receiver account is required");
+      const pubBase58 = cryptoBase58Encode(hexToBytes(publicKey || ""));
+      const keyRes = await postJson(nodeUrl, {
+        jsonrpc: "2.0", id: 1, method: "query",
+        params: { request_type: "view_access_key", finality: "final", account_id: address, public_key: `ed25519:${pubBase58}` },
+      }).catch(() => null);
+      const nonce = (keyRes?.result?.nonce || 0) + 1;
+      const blockRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "block", params: { finality: "final" } }).catch(() => null);
+      const blockHash = blockRes?.result?.header?.hash;
+      if (!blockHash) throw new Error("Could not fetch NEAR block hash");
+      const signedTx = signNearTransfer({ signerId: address, receiverId: recipient, amount, nonce, blockHash }, privateKey);
+      const sendRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "broadcast_tx_commit", params: [signedTx] });
+      const hash = sendRes?.result?.transaction?.hash || sendRes?.result?.transaction_outcome?.id || "";
+      if (!hash && sendRes?.error) throw new Error(sendRes.error.data || sendRes.error.message || "NEAR broadcast failed");
+      return hash || "pending";
+    }
+
+    if (family === "aptos") {
+      const payload = tx.payload || {
+        type: "entry_function_payload",
+        function: tx.function || "0x1::aptos_coin::transfer",
+        type_arguments: tx.type_arguments || [],
+        arguments: tx.arguments || [recipient, String(amount)],
+      };
+      const accRes = await getJson(`${nodeUrl}/accounts/${address}`).catch(() => null);
+      const encBody = {
+        sender: address,
+        sequence_number: tx.sequence_number || accRes?.sequence_number || "0",
+        max_gas_amount: String(tx.max_gas_amount || tx.maxGasAmount || "2000"),
+        gas_unit_price: String(tx.gas_unit_price || tx.gasUnitPrice || "100"),
+        expiration_timestamp_secs: String(tx.expiration_timestamp_secs || Math.floor(Date.now() / 1000) + 120),
+        payload,
+      };
+      const signingHex = await postJson(`${nodeUrl}/transactions/encode_submission`, encBody);
+      if (!signingHex || typeof signingHex !== "string") throw new Error("Aptos encode_submission failed");
+      const { publicKey: aptPub, signature: aptSig } = signAptosEntry(signingHex, privateKey);
+      const submitRes = await postJson(`${nodeUrl}/transactions`, { ...encBody, signature: { type: "ed25519_signature", public_key: aptPub, signature: aptSig } });
+      const hash = submitRes?.hash || "";
+      if (!hash) throw new Error(submitRes?.message || submitRes?.error_code || "Aptos transaction failed");
+      return hash;
+    }
+
+    if (family === "sui") {
+      if (tx.txBytes || tx.transactionBlock) {
+        const txBytes = tx.txBytes || tx.transactionBlock?.txBytes || tx.transactionBlock;
+        if (typeof txBytes !== "string") throw new Error("SUI raw transactionBlock must be serialized txBytes");
+        const suiSig = signSuiTx(txBytes, privateKey);
+        const execRes = await postJson(nodeUrl, {
+          jsonrpc: "2.0", id: 1, method: "sui_executeTransactionBlock",
+          params: [txBytes, [suiSig], { showEffects: true }, "WaitForLocalExecution"],
+        });
+        const hash = execRes?.result?.digest || "";
+        if (!hash) throw new Error(execRes?.error?.message || "SUI execution failed");
+        return hash;
+      }
+      if (!recipient) throw new Error("Recipient SUI address is required");
+      const coinsRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "suix_getCoins", params: [address, "0x2::sui::SUI", null, 1] }).catch(() => null);
+      const coinObjectId = coinsRes?.result?.data?.[0]?.coinObjectId;
+      if (!coinObjectId) throw new Error("No SUI coin object found in wallet");
+      const buildRes = await postJson(nodeUrl, {
+        jsonrpc: "2.0", id: 1, method: "unsafe_transferSui",
+        params: [address, coinObjectId, String(tx.gasBudget || "10000000"), recipient, String(amount)],
+      }).catch(() => null);
+      const txBytes = buildRes?.result?.txBytes;
+      if (!txBytes) throw new Error(buildRes?.error?.message || "SUI tx build failed");
+      const suiSig = signSuiTx(txBytes, privateKey);
+      const execRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "sui_executeTransactionBlock", params: [txBytes, [suiSig], { showEffects: true }, "WaitForLocalExecution"] });
+      const hash = execRes?.result?.digest || "";
+      if (!hash) throw new Error(execRes?.error?.message || "SUI execution failed");
+      return hash;
+    }
+
+    if (family === "ton") {
+      const msg = tx.messages?.[0] || tx;
+      const toAddress = dappRecipient(msg);
+      if (!toAddress) throw new Error("TON recipient is required");
+      const walletAddress = address || rawPubkey;
+      if (!walletAddress || !walletAddress.startsWith("EQ")) throw new Error("TON wallet address not available");
+      const seqno = await getTonSeqno(nodeUrl, walletAddress);
+      const nanoTon = dappAmountRaw({ value: msg.amount ?? msg.value ?? tx.value, amount: msg.displayAmount || tx.amount }, 9);
+      const bocBase64 = buildTonTransferBoc({ walletAddress, toAddress, nanoTon, seqno, memo: msg.payload || tx.memo || "", bounce: msg.bounce !== false }, privateKey);
+      return broadcastTonBoc(nodeUrl, bocBase64);
+    }
+
+    if (family === "starknet") {
+      if (!recipient) throw new Error("Starknet recipient is required");
+      return broadcastStarknetTransfer({ senderAddress: address, toAddress: recipient, amountWei: String(amount), maxFee: tx.maxFee, nodeUrl }, privateKey);
+    }
+
+    throw new Error(`${currentNetwork.name} dApp transaction signing is not supported in browser yet`);
+  }
+
+  function browserConnectResult(method) {
+    const address = activeAddress || wallet?.address || "";
+    if (method === "solana_connect") {
+      const key = dappActiveChainKey("solana");
+      return { publicKey: key.address || address };
+    }
+    if (method === "aptos_connect" || method === "aptos_account") {
+      const key = dappActiveChainKey("aptos");
+      return { address: key.address || address, publicKey: key.privateKey ? ed25519PublicKey(key.privateKey) : "" };
+    }
+    if (method === "sui_requestPermissions") return [{ parentCapability: "viewAccount" }, { parentCapability: "suggestTransactions" }];
+    if (method === "sui_getAccounts") return [dappActiveChainKey("sui").address || address];
+    if (method === "ton_connect" || method === "ton_account") {
+      const key = dappActiveChainKey("ton");
+      return { address: key.address || address, network: currentNetwork.id, publicKey: key.privateKey ? ed25519PublicKey(key.privateKey, "hex").replace(/^0x/, "") : (key.rawPubkey || "") };
+    }
+    if (method === "starknet_enable") return [dappActiveChainKey("starknet").address || address];
+    if (method === "starknet_account") return { address: dappActiveChainKey("starknet").address || address };
+    if (method === "keplr_getKey") {
+      const key = dappActiveChainKey(currentNetwork.family);
+      return {
+        name: "LQD Mobile",
+        algo: "secp256k1",
+        bech32Address: key.address || address,
+        address: key.address || address,
+        pubKey: key.privateKey ? secp256k1CompressedPublicKey(key.privateKey, "base64") : "",
+        isNanoLedger: false,
+      };
+    }
+    return [address];
+  }
+
+  async function approveDappSign(item) {
+    if (!wallet?.privateKey) throw new Error("Unlock wallet first");
+    const params = Array.isArray(item.data?.params) ? item.data.params : [];
+    const method = item.method || "";
+    const first = typeof params[0] === "string" ? params[0] : "";
+    const second = String(params[1] || "");
+    const firstIsAddress = /^0x[0-9a-fA-F]{40}$/.test(first);
+    const secondIsAddress = /^0x[0-9a-fA-F]{40}$/.test(second);
+    const message = item.data?.message ?? (firstIsAddress && second ? second : params[0]);
+    const requestedAddress = secondIsAddress ? second : (firstIsAddress ? first : "");
+    const { privateKey, address } = dappActiveEvmKey();
+    if (requestedAddress && /^0x[0-9a-fA-F]{40}$/.test(requestedAddress)) {
+      assertDappFromMatches({ from: requestedAddress }, address || wallet.address);
+    }
+    const family = currentNetwork.family || "evm";
+    if (method === "keplr_signAmino") {
+      const key = dappActiveChainKey(family);
+      if (!key.privateKey) throw new Error(`Unlock ${currentNetwork.name} wallet key first`);
+      return signCosmosAminoDoc(params[2] || {}, key.privateKey);
+    }
+    if (method === "aptos_signMessage") {
+      const key = dappActiveChainKey("aptos");
+      if (!key.privateKey) throw new Error("Unlock Aptos wallet key first");
+      const { payload, fullMessage } = aptosFullMessage(params[0] || {});
+      const sig = signEd25519Message(fullMessage, key.privateKey);
+      return {
+        address: key.address,
+        application: payload.application || item.origin || "",
+        chainId: payload.chainId || currentNetwork.id,
+        fullMessage,
+        message: normaliseDappMessage(payload.message),
+        nonce: payload.nonce || "",
+        prefix: "APTOS",
+        signature: sig.signature,
+      };
+    }
+    if (method === "sui_signPersonalMessage") {
+      const key = dappActiveChainKey("sui");
+      if (!key.privateKey) throw new Error("Unlock SUI wallet key first");
+      const payload = params[0] || {};
+      const bytes = normaliseDappMessage(payload.message || payload.bytes || message);
+      const sig = signEd25519Message(bytes, key.privateKey);
+      return { bytes, signature: sig.signature, signatureScheme: "ED25519" };
+    }
+    if (method === "solana_signMessage") {
+      const key = dappActiveChainKey("solana");
+      if (!key.privateKey) throw new Error("Unlock Solana wallet key first");
+      const sig = signEd25519Message(normaliseDappMessage(message), key.privateKey);
+      return {
+        publicKey: key.address,
+        signature: sig.signature,
+        signatureBase58: cryptoBase58Encode(hexToBytes(sig.signature)),
+      };
+    }
+    if (method === "ton_signData") {
+      const key = dappActiveChainKey("ton");
+      if (!key.privateKey) throw new Error("Unlock TON wallet key first");
+      const sig = signEd25519Message(normaliseDappMessage(message), key.privateKey);
+      return {
+        address: key.address,
+        publicKey: key.privateKey ? ed25519PublicKey(key.privateKey, "hex").replace(/^0x/, "") : (key.rawPubkey || ""),
+        signature: sig.signature,
+      };
+    }
+    if (method === "starknet_signMessage") {
+      const key = dappActiveChainKey("starknet");
+      if (!key.privateKey) throw new Error("Unlock Starknet wallet key first");
+      const digest = CryptoJS.SHA256(normaliseDappMessage(message)).toString();
+      return starkSign(digest, key.privateKey);
+    }
+    if (family === "near") {
+      const key = dappActiveChainKey(family);
+      if (!key.privateKey) throw new Error(`Unlock ${currentNetwork.name} wallet key first`);
+      return signEd25519Message(normaliseDappMessage(message), key.privateKey);
+    }
+    if (family === "cosmos" || family === "cosmos-testnet" || family === "injective" || family === "utxo" || family === "litecoin") {
+      const key = dappActiveChainKey(family);
+      if (!key.privateKey) throw new Error(`Unlock ${currentNetwork.name} wallet key first`);
+      return signSecp256k1Message(normaliseDappMessage(message), key.privateKey);
+    }
+    return signPersonalMessage(normaliseDappMessage(message), privateKey || wallet.privateKey);
+  }
+
   async function handleBrowserRequest(req) {
-    if (!wallet) return respondBrowser(req.id, false, "Wallet locked");
+    if (!wallet) return respondBrowser(req.id, false, null, "Wallet locked", req.method);
     const { method, params, origin, name } = req;
     try {
-      if (method === "lqd_requestAccounts" || method === "eth_requestAccounts" || method === "lqd_connect") {
+      if (!isAllowedBrowserOrigin(origin)) {
+        return respondBrowser(req.id, false, null, "Untrusted or insecure dApp origin", method);
+      }
+
+      if (method === "eth_chainId" || method === "lqd_chainId") {
+        return respondBrowser(req.id, true, currentNetwork?.chainId || "0x8b", "", method);
+      }
+
+      if (method === "net_version") {
+        const parsed = parseInt(currentNetwork?.chainId || "0x8b", 16);
+        return respondBrowser(req.id, true, Number.isFinite(parsed) ? String(parsed) : "139", "", method);
+      }
+
+      if (method === "eth_accounts" || method === "lqd_accounts") {
+        return respondBrowser(req.id, true, trustedOrigins.includes(origin) ? [activeAddress || wallet.address] : [], "", method);
+      }
+
+      if (method === "aptos_account" || method === "sui_getAccounts" || method === "ton_account" || method === "starknet_account" || method === "keplr_getKey") {
+        return respondBrowser(req.id, true, trustedOrigins.includes(origin) ? browserConnectResult(method) : (method === "sui_getAccounts" ? [] : null), "", method);
+      }
+
+      if (method === "wallet_getPermissions") {
+        return respondBrowser(req.id, true, trustedOrigins.includes(origin) ? [{ parentCapability: "eth_accounts" }] : [], "", method);
+      }
+
+      if (method === "lqd_supportedChains") {
+        return respondBrowser(req.id, true, NETWORKS.map((n) => ({ id: n.id, name: n.name, family: n.family, chainId: n.chainId || n.cosmosChainId || n.id })), "", method);
+      }
+
+      const connectMethods = [
+        "lqd_requestAccounts", "eth_requestAccounts", "lqd_connect", "wallet_requestPermissions",
+        "solana_connect", "aptos_connect", "sui_requestPermissions", "ton_connect", "starknet_enable", "keplr_enable",
+      ];
+      if (connectMethods.includes(method)) {
         if (trustedOrigins.includes(origin)) {
-          return respondBrowser(req.id, true, [wallet.address]);
+          return respondBrowser(req.id, true, browserConnectResult(method), "", method);
         }
         queueApprovalRequest({
           id: req.id,
           type: "connect",
           origin,
           name,
+          method,
           data: { message: "This dApp wants to see your wallet address and activity." }
         });
         setTab("approvals");
         return;
       }
 
-      if (method === "lqd_sendTransaction" || method === "eth_sendTransaction" || method === "lqd_contractTx") {
+      const transactionMethods = [
+        "lqd_sendTransaction", "eth_sendTransaction", "lqd_contractTx",
+        "solana_signAndSendTransaction", "aptos_signAndSubmitTransaction", "sui_signAndExecuteTransactionBlock",
+        "ton_sendTransaction", "starknet_execute", "keplr_sendTx",
+      ];
+      if (transactionMethods.includes(method)) {
         const tx = params[0] || {};
         queueApprovalRequest({
           id: req.id,
           type: "transaction",
           origin,
           name,
+          method,
           data: tx
         });
         setTab("approvals");
         return;
       }
 
-      if (method === "lqd_sign" || method === "personal_sign") {
+      const signMethods = [
+        "lqd_sign", "personal_sign", "solana_signMessage", "aptos_signMessage", "sui_signPersonalMessage",
+        "ton_signData", "starknet_signMessage", "keplr_signAmino",
+      ];
+      if (signMethods.includes(method)) {
         queueApprovalRequest({
           id: req.id,
           type: "sign",
           origin,
           name,
-          data: { message: params[0] || params[1] || "" }
+          method,
+          data: { message: params[0] || params[1] || "", params }
         });
         setTab("approvals");
         return;
@@ -1755,7 +2994,8 @@ function App() {
     let alive = true;
     (async () => {
       try {
-        const [vault, savedNetworks, savedNetworkId, savedEndpoints, savedWatchlist, savedActivity, savedFactory, savedBridgeChainId, savedSettings, savedApprovals, savedTrustedOrigins, savedWatchAddresses] = await Promise.all([
+        await runWalletMigrations();
+        const [vault, savedNetworks, savedNetworkId, savedEndpoints, savedWatchlist, savedActivity, savedFactory, savedBridgeChainId, savedSettings, savedApprovals, savedTrustedOrigins, savedWatchAddresses, savedHiddenTokens, savedRemovedTokens, savedLegalRiskAccepted, savedTrackedTxs] = await Promise.all([
           loadJSON(STORAGE_KEYS.vault, null),
           loadJSON(STORAGE_KEYS.networks, null),
           loadJSON(STORAGE_KEYS.activeNetworkId, null),
@@ -1768,11 +3008,15 @@ function App() {
           loadJSON(STORAGE_KEYS.approvals, []),
           loadJSON(STORAGE_KEYS.trustedOrigins, []),
           loadJSON(STORAGE_KEYS.watchAddresses, {}),
+          loadJSON(STORAGE_KEYS.hiddenTokens, []),
+          loadJSON(STORAGE_KEYS.removedTokens, []),
+          loadJSON(STORAGE_KEYS.legalRiskAccepted, false),
+          loadJSON(STORAGE_KEYS.pendingTransactions, []),
         ]);
 
         if (!alive) return;
         if (savedNetworks?.length) setNetworks(savedNetworks);
-        if (savedNetworkId) setActiveNetworkId(savedNetworkId);
+        if (savedNetworkId) setActiveNetworkId(migrateNetworkId(savedNetworkId));
         if (savedEndpoints) {
           setEndpoints((prev) => ({
             ...prev,
@@ -1789,12 +3033,19 @@ function App() {
         if (savedSettings && typeof savedSettings === "object") {
           setSettingsAutoRefresh(savedSettings.autoRefresh !== false);
           setBiometricEnabled(savedSettings.biometricEnabled !== false);
+          setSettingsTelemetryEnabled(Boolean(savedSettings.telemetryEnabled));
+          setSettingsTxTrackingEnabled(savedSettings.txTrackingEnabled !== false);
         }
         if (Array.isArray(savedApprovals)) setPendingApprovals(savedApprovals);
         if (Array.isArray(savedTrustedOrigins)) setTrustedOrigins(savedTrustedOrigins);
         if (savedWatchAddresses && typeof savedWatchAddresses === "object") setWatchAddresses(savedWatchAddresses);
+        if (Array.isArray(savedHiddenTokens)) setHiddenTokens(savedHiddenTokens);
+        if (Array.isArray(savedRemovedTokens)) setRemovedTokens(savedRemovedTokens);
+        setLegalRiskAccepted(Boolean(savedLegalRiskAccepted));
+        if (Array.isArray(savedTrackedTxs)) setTrackedTxs(savedTrackedTxs);
         setVaultRecord(vault || null);
       } catch (e) {
+        recordError("boot", e).catch(() => {});
         setStatus(e.message || "Failed to load wallet state");
       } finally {
         if (alive) setBooting(false);
@@ -1813,7 +3064,6 @@ function App() {
 
   useEffect(() => {
     if (wallet && activeAddress) {
-      setNativeBalance("0");
       refreshWalletSnapshot(activeAddress);
     }
   }, [activeNetworkId, activeAddress]);
@@ -1825,6 +3075,14 @@ function App() {
   useEffect(() => {
     saveJSON(STORAGE_KEYS.watchlist, watchlist).catch(() => { });
   }, [watchlist]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.hiddenTokens, hiddenTokens).catch(() => { });
+  }, [hiddenTokens]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.removedTokens, removedTokens).catch(() => { });
+  }, [removedTokens]);
 
   useEffect(() => {
     saveJSON(STORAGE_KEYS.activity, activity).catch(() => { });
@@ -1839,8 +3097,21 @@ function App() {
   }, [bridgeChainId]);
 
   useEffect(() => {
-    saveJSON(STORAGE_KEYS.settings, { autoRefresh: settingsAutoRefresh, biometricEnabled }).catch(() => { });
-  }, [settingsAutoRefresh, biometricEnabled]);
+    saveJSON(STORAGE_KEYS.settings, {
+      autoRefresh: settingsAutoRefresh,
+      biometricEnabled,
+      telemetryEnabled: settingsTelemetryEnabled,
+      txTrackingEnabled: settingsTxTrackingEnabled,
+    }).catch(() => { });
+  }, [settingsAutoRefresh, biometricEnabled, settingsTelemetryEnabled, settingsTxTrackingEnabled]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.legalRiskAccepted, legalRiskAccepted).catch(() => { });
+  }, [legalRiskAccepted]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.pendingTransactions, trackedTxs).catch(() => { });
+  }, [trackedTxs]);
 
   useEffect(() => {
     saveJSON(STORAGE_KEYS.approvals, pendingApprovals).catch(() => { });
@@ -1870,14 +3141,103 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    return installGlobalErrorReporter({ app: "lqd-mobile-wallet", version: "1.2.0" });
+  }, []);
+
+  useEffect(() => {
+    if (!settingsTxTrackingEnabled || !trackedTxs.some((tx) => tx.status === "pending")) return;
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const next = await refreshTrackedTransactions(trackedTxs, { getJson, postJson });
+        if (cancelled) return;
+        const confirmed = next.find((tx) => tx.status === "confirmed" && trackedTxs.find((old) => old.id === tx.id && old.status === "pending"));
+        const failed = next.find((tx) => tx.status === "failed" && trackedTxs.find((old) => old.id === tx.id && old.status === "pending"));
+        setTrackedTxs(next);
+        if (confirmed) showToast(`${confirmed.symbol || "Transaction"} confirmed`, "success");
+        if (failed) showToast(`${failed.symbol || "Transaction"} failed`, "error");
+      } catch (error) {
+        recordError("tx_tracking", error, { network: activeNetworkId }).catch(() => {});
+      }
+    };
+
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") refresh();
+    });
+    const timer = setInterval(refresh, 30000);
+    refresh();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      subscription?.remove?.();
+    };
+  }, [settingsTxTrackingEnabled, trackedTxs, activeNetworkId]);
+
   async function approveRequest(item) {
     setPendingApprovals((prev) => prev.filter((x) => x.id !== item.id));
-    setTrustedOrigins((prev) => (prev.includes(item.origin) ? prev : [...prev, item.origin]));
-    setStatus(`Approved ${item.name}`);
-    if (item.origin) {
-      respondBrowser(item.id, true, [wallet.address], "", item.method);
+    try {
+      if (item.type === "connect") {
+        setTrustedOrigins((prev) => (prev.includes(item.origin) ? prev : [...prev, item.origin]));
+        setStatus(`Approved ${item.name}`);
+        if (item.origin) {
+          respondBrowser(item.id, true, browserConnectResult(item.method), "", item.method);
+        }
+        recordTelemetry("dapp_connect_approved", { origin: item.origin, network: activeNetworkId }).catch(() => {});
+      } else if (item.type === "transaction") {
+        setBusy(true);
+        setBusyAction("dappTransaction");
+        setProcessingMessage("Review approved. Broadcasting dApp transaction...");
+        setTrustedOrigins((prev) => (prev.includes(item.origin) ? prev : [...prev, item.origin]));
+        const hash = await approveDappTransaction(item);
+        respondBrowser(item.id, true, hash, "", item.method);
+        setStatus(`Transaction approved for ${item.name}`);
+        showToast(`dApp transaction sent: ${shortAddress(hash, 8, 6)}`, "success");
+        addTrackedTx({
+          hash,
+          type: "dapp_transaction",
+          symbol: currentNetwork.symbol,
+          to: item.data?.to || item.data?.contract_address || item.data?.contractAddress || "",
+          family: currentNetwork.id === "lqd" ? "lqd" : currentNetwork.family,
+        });
+        rememberActivity({
+          type: "dapp",
+          From: activeAddress,
+          To: item.data?.to || item.data?.contract_address || item.data?.contractAddress || "",
+          TxHash: hash,
+          Timestamp: Math.floor(Date.now() / 1000),
+          Status: "success",
+          Value: parseDappQuantity(item.data?.value, "0"),
+        });
+        recordTelemetry("dapp_transaction_approved", { origin: item.origin, method: item.method, network: activeNetworkId, hash }).catch(() => {});
+      } else if (item.type === "sign") {
+        setBusy(true);
+        setBusyAction("dappSign");
+        setProcessingMessage("Signing dApp message...");
+        setTrustedOrigins((prev) => (prev.includes(item.origin) ? prev : [...prev, item.origin]));
+        const signature = await approveDappSign(item);
+        respondBrowser(item.id, true, signature, "", item.method);
+        setStatus(`Signature approved for ${item.name}`);
+        showToast("dApp message signed", "success");
+        recordTelemetry("dapp_sign_approved", { origin: item.origin, method: item.method, network: activeNetworkId }).catch(() => {});
+      }
+    } catch (error) {
+      respondBrowser(item.id, false, null, error.message || "Request failed", item.method);
+      setStatusModal({
+        visible: true,
+        title: "dApp Request Failed",
+        message: error.message || "Request failed",
+        type: "error",
+        hash: "",
+      });
+      recordError("dapp_approval", error, { origin: item.origin, type: item.type, method: item.method, network: activeNetworkId }).catch(() => {});
+    } finally {
+      setBusy(false);
+      setBusyAction("");
+      setProcessingMessage("");
+      setTab("browser");
     }
-    setTab("browser");
   }
 
   function builtinInitArgs() {
@@ -1935,6 +3295,7 @@ function App() {
     if (item.origin) {
       respondBrowser(item.id, false, null, "User rejected request", item.method);
     }
+    recordTelemetry("dapp_request_rejected", { origin: item.origin, type: item.type, network: activeNetworkId }).catch(() => {});
     setTab("browser");
   }
 
@@ -1975,7 +3336,7 @@ function App() {
       setWallet(vault);
       setWalletVisible(true);
       setStatus(`Unlocked ${shortAddress(vault.address)}`);
-      applyChainKeys(vault.mnemonic).catch(() => {});
+      applyChainKeys(vault.mnemonic).catch(() => { });
       await refreshWalletSnapshot(vault.address);
     } catch (e) {
       setStatus(e.message || "Failed to unlock");
@@ -2015,7 +3376,7 @@ function App() {
       setWallet(vault);
       setWalletVisible(true);
       setStatus(`Unlocked ${shortAddress(vault.address)} with biometrics`);
-      applyChainKeys(vault.mnemonic).catch(() => {});
+      applyChainKeys(vault.mnemonic).catch(() => { });
       await refreshWalletSnapshot(vault.address);
     } catch (e) {
       setStatus(e.message || "Biometric unlock failed");
@@ -2050,7 +3411,7 @@ function App() {
       setCreateForm(initialCreateForm);
       setStatus(`Created wallet ${shortAddress(vault.address)}`);
       Alert.alert("Wallet created", `Address: ${vault.address}`);
-      applyChainKeys(vault.mnemonic).catch(() => {});
+      applyChainKeys(vault.mnemonic).catch(() => { });
       await refreshWalletSnapshot(vault.address);
     } catch (e) {
       const message = e.message || "Failed to create wallet";
@@ -2087,7 +3448,7 @@ function App() {
       setImportMnemonicForm(initialImportMnemonicForm);
       setStatus(`Imported wallet ${shortAddress(vault.address)}`);
       Alert.alert("Wallet imported", `Address: ${vault.address}`);
-      applyChainKeys(vault.mnemonic).catch(() => {});
+      applyChainKeys(vault.mnemonic).catch(() => { });
       await refreshWalletSnapshot(vault.address);
     } catch (e) {
       const message = e.message || "Failed to import mnemonic";
@@ -2185,11 +3546,24 @@ function App() {
     setBusy(true);
     setBusyAction("faucet");
     try {
-      const res = await nodeFaucet(nodeUrl, wallet.address);
+      const targetAddress = activeAddress || wallet.address;
+      const res = await nodeFaucet(nodeUrl, targetAddress);
       const credited = res?.credited || res?.amount || "";
       setStatus(credited ? `Faucet credited ${formatUnits(credited, 8, 6)} LQD` : "Faucet credited");
-      setTimeout(() => refreshWalletSnapshot(), 1000);
-      setTimeout(() => refreshWalletSnapshot(), 5000);
+
+      // Directly fetch balance — bypasses isRefreshing guard so we always get fresh value
+      const fetchBalance = async () => {
+        try {
+          const native = await walletBalance(nodeUrl, targetAddress);
+          if (native) {
+            const val = String(native.balance ?? native.Balance ?? native.amount ?? "0");
+            if (val !== "0") setNativeBalance(val);
+          }
+        } catch { /* ignore */ }
+      };
+      await fetchBalance();
+      setTimeout(fetchBalance, 2000);
+      setTimeout(() => refreshWalletSnapshot(), 3000);
     } catch (e) {
       setStatus(e.message || "Faucet claim failed");
     } finally {
@@ -2207,19 +3581,39 @@ function App() {
           try {
             const holder = t.holderAddress || address;
             const fam = t.family || "evm";
-            // SEI/INJ tokens need Cosmos REST URL, not EVM RPC
             const tokenNet = NETWORKS.find(n => n.id === (t.networkId || activeNetworkId)) || currentNetwork;
-            const tokenUrl = (fam === "sei" || fam === "injective" || fam === "cosmos-testnet")
-              ? (tokenNet.cosmosRestUrl || nodeUrl)
-              : nodeUrl;
-            const balance = await resolveTokenBalanceMultichain(tokenUrl, walletUrl, t.address, holder, fam);
+            const tokenUrls = getRpcCandidatesForFamily(tokenNet, fam);
+            const tokenUrl = tokenUrls[0] || nodeUrl;
+
+            // TON Jetton: query per-user balance instead of total supply
+            if (fam === "ton") {
+              const tonAddr = chainKeys?.ton?.address || chainKeys?.ton?.rawPubkey || holder;
+              const balance = await getTonJettonBalance(tokenUrl, tonAddr, t.address);
+              return { ...t, balance };
+            }
+
+            // Starknet: use correct address
+            if (fam === "starknet" && chainKeys?.starknet?.publicKey) {
+              const sAddr = starknetArgentAddress(chainKeys.starknet.publicKey);
+              const balance = await resolveTokenBalanceMultichain(tokenUrls, walletUrl, t.address, sAddr, fam);
+              return { ...t, balance };
+            }
+
+            const balance = await resolveTokenBalanceMultichain(tokenUrls, walletUrl, t.address, holder, fam);
             return { ...t, balance };
           } catch {
             return t;
           }
         })
       );
-      setWatchlist(results);
+      // Merge balances into existing state — never replace, to avoid losing tokens added concurrently
+      setWatchlist(prev => {
+        const balMap = new Map(results.map(r => [tokenKey(r), r.balance]));
+        return prev.map(t => {
+          const key = tokenKey(t);
+          return balMap.has(key) ? { ...t, balance: balMap.get(key) } : t;
+        });
+      });
     } catch { }
   }
 
@@ -2249,20 +3643,23 @@ function App() {
       // ── LQD: use WalletServer (custom LQD signing) ────────────────────────
       if (currentNetwork.id === "lqd") {
         const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
+        const baseFeeValue = baseFee?.base_fee || baseFee?.BaseFee || baseFee?.baseFee || baseFee || 10;
+        const gasLimit = Number(nativeFeeInfo.gasLimit || 21000);
+        const gasPrice = Number(nativeFeeInfo.gasPrice || baseFeeValue || 10);
         const res = await walletSend(walletUrl, {
           from: wallet.address,
           to: recipient,
           value: amount,
           data: "",
-          gas: 21000,
-          gas_price: Number(baseFee || 10),
+          gas: gasLimit,
+          gas_price: gasPrice,
           private_key: wallet.privateKey,
           node_url: nodeUrl,
         });
         hash = res?.tx_hash || res?.hash || "";
         if (!hash) throw new Error(res?.error || "Transaction failed");
 
-      // ── EVM / Harmony / Tron / SEI-EVM: client-side EIP-155 signing ───────
+        // ── EVM / Harmony / Tron / SEI-EVM: client-side EIP-155 signing ───────
       } else if (family === "evm" || family === "harmony" || family === "tron" || family === "sei") {
         let privKey, fromAddr;
         if (family === "harmony") {
@@ -2286,12 +3683,15 @@ function App() {
           postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "eth_gasPrice", params: [] }).catch(() => null),
         ]);
         const nonce = noncRes?.result ? parseInt(noncRes.result, 16) : 0;
-        const gasPrice = gasPriceRes?.result ? BigInt(gasPriceRes.result) : BigInt(10e9);
+        const gasPrice = isZeroFeeNetwork(currentNetwork, family)
+          ? 0n
+          : (nativeFeeInfo.gasPrice ? BigInt(nativeFeeInfo.gasPrice) : (gasPriceRes?.result ? BigInt(gasPriceRes.result) : BigInt(10e9)));
+        const gasLimit = nativeFeeInfo.gasLimit ? Number(nativeFeeInfo.gasLimit) : 21000;
 
         const signedTx = signEip155Tx({
           nonce,
           gasPrice: gasPrice.toString(),
-          gasLimit: 21000,
+          gasLimit,
           to: recipient,
           value: amount,
           data: "",
@@ -2304,7 +3704,7 @@ function App() {
         hash = sendRes?.result || "";
         if (!hash || hash === "0x") throw new Error(sendRes?.error?.message || "Broadcast failed");
 
-      // ── Cosmos / Injective: amino + REST broadcast ─────────────────────────
+        // ── Cosmos / Injective: amino + REST broadcast ─────────────────────────
       } else if (family === "cosmos" || family === "injective") {
         const privKey = family === "cosmos"
           ? (chainKeys?.cosmos?.privateKey || wallet.privateKey)
@@ -2341,7 +3741,7 @@ function App() {
         hash = broadcastRes?.tx_response?.txhash || broadcastRes?.txhash || "";
         if (!hash) throw new Error(broadcastRes?.tx_response?.raw_log || "Cosmos broadcast failed");
 
-      // ── Solana: client-side ed25519 signing ───────────────────────────────
+        // ── Solana: client-side ed25519 signing ───────────────────────────────
       } else if (family === "solana") {
         if (!chainKeys?.solana) throw new Error("Unlock wallet with mnemonic to sign Solana transactions");
         const privKey = chainKeys.solana.privateKey;
@@ -2368,7 +3768,7 @@ function App() {
         hash = sendRes?.result || "";
         if (!hash) throw new Error(sendRes?.error?.message || "Solana broadcast failed");
 
-      // ── NEAR: borsh-encode + ed25519 sign ─────────────────────────────────
+        // ── NEAR: borsh-encode + ed25519 sign ─────────────────────────────────
       } else if (family === "near") {
         if (!chainKeys?.near) throw new Error("Unlock wallet with mnemonic to sign NEAR transactions");
         const privKey = chainKeys.near.privateKey;
@@ -2398,7 +3798,7 @@ function App() {
         if (!hash && sendRes?.error) throw new Error(sendRes.error.data || sendRes.error.message || "NEAR broadcast failed");
         if (!hash) hash = sendRes?.result?.transaction?.hash || "pending";
 
-      // ── Aptos: encode_submission → ed25519 sign → submit ──────────────────
+        // ── Aptos: encode_submission → ed25519 sign → submit ──────────────────
       } else if (family === "aptos") {
         if (!chainKeys?.aptos) throw new Error("Unlock wallet with mnemonic to sign Aptos transactions");
         const privKey = chainKeys.aptos.privateKey;
@@ -2432,7 +3832,7 @@ function App() {
         hash = submitRes?.hash || "";
         if (!hash) throw new Error(submitRes?.message || submitRes?.error_code || "Aptos transaction failed");
 
-      // ── SUI: unsafe_transferSui → blake2b + ed25519 sign → execute ────────
+        // ── SUI: unsafe_transferSui → blake2b + ed25519 sign → execute ────────
       } else if (family === "sui") {
         if (!chainKeys?.sui) throw new Error("Unlock wallet with mnemonic to sign SUI transactions");
         const privKey = chainKeys.sui.privateKey;
@@ -2462,7 +3862,7 @@ function App() {
         hash = execRes?.result?.digest || "";
         if (!hash) throw new Error(execRes?.error?.message || "SUI execution failed");
 
-      // ── BTC (P2WPKH, SegWit, BIP143) ─────────────────────────────────────
+        // ── BTC (P2WPKH, SegWit, BIP143) ─────────────────────────────────────
       } else if (family === "utxo") {
         if (!chainKeys?.btc) throw new Error("Unlock wallet with mnemonic to sign BTC transactions");
         const privKey = chainKeys.btc.privateKey;
@@ -2497,7 +3897,7 @@ function App() {
         if (!broadcastRes.ok) throw new Error(`BTC broadcast failed: ${txid}`);
         hash = txid.trim();
 
-      // ── LTC (P2WPKH, BlockCypher API) ─────────────────────────────────────
+        // ── LTC (P2WPKH, BlockCypher API) ─────────────────────────────────────
       } else if (family === "litecoin") {
         if (!chainKeys?.ltc) throw new Error("Unlock wallet with mnemonic to sign LTC transactions");
         const privKey = chainKeys.ltc.privateKey;
@@ -2527,13 +3927,41 @@ function App() {
         hash = broadRes?.tx?.hash || "";
         if (!hash) throw new Error(broadRes?.error || "LTC broadcast failed");
 
-      // ── TON: requires wallet contract cells — export key to Tonkeeper ──────
+        // ── TON: wallet v3R2 BOC send ────────────────────────────────────────
       } else if (family === "ton") {
-        throw new Error("TON transactions require cell serialization. Export your TON key in Settings → Export All Chain Keys and import into Tonkeeper or MyTonWallet.");
+        if (!chainKeys?.ton) throw new Error("Unlock wallet with mnemonic to sign TON transactions");
+        const tonWalletAddr = chainKeys.ton.address || chainKeys.ton.rawPubkey || "";
+        if (!tonWalletAddr || !tonWalletAddr.startsWith("EQ")) {
+          throw new Error("TON wallet address not available. Re-import your mnemonic.");
+        }
+        setProcessingMessage("Fetching TON seqno...");
+        const seqno = await getTonSeqno(nodeUrl, tonWalletAddr);
+        const nanoTon = String(parseUnits(sendForm.amount, 9));
+        setProcessingMessage("Building & signing TON BOC...");
+        const bocBase64 = buildTonTransferBoc(
+          {
+            walletAddress: tonWalletAddr,
+            toAddress: recipient,
+            nanoTon,
+            seqno,
+            memo: sendForm.memo || "",
+            bounce: true,
+          },
+          chainKeys.ton.privateKey
+        );
+        setProcessingMessage("Broadcasting to TON network...");
+        hash = await broadcastTonBoc(nodeUrl, bocBase64);
 
-      // ── Starknet: requires Starknet.js for invoke transactions ────────────
+        // ── Starknet: invoke v1 with STARK ECDSA + Pedersen hash ─────────────
       } else if (family === "starknet") {
-        throw new Error("Starknet transactions require the starknet.js SDK. Your address and key are available in Settings → Export All Chain Keys.");
+        if (!chainKeys?.starknet) throw new Error("Unlock wallet with mnemonic to sign Starknet transactions");
+        const starkAddr = starknetArgentAddress(chainKeys.starknet.publicKey);
+        const amtWei = String(parseUnits(sendForm.amount, 18));
+        setProcessingMessage("Signing Starknet invoke transaction...");
+        hash = await broadcastStarknetTransfer(
+          { senderAddress: starkAddr, toAddress: recipient, amountWei: amtWei, nodeUrl },
+          chainKeys.starknet.privateKey
+        );
 
       } else {
         throw new Error(`Send not yet supported for ${currentNetwork.name} (${family})`);
@@ -2547,6 +3975,8 @@ function App() {
         type: "success",
         hash,
       });
+      addTrackedTx({ hash, type: "native_send", symbol: currentNetwork.symbol, to: recipient, family });
+      recordTelemetry("native_send_success", { network: activeNetworkId, family, hash }).catch(() => {});
       rememberActivity({
         type: "send",
         From: activeAddress,
@@ -2564,6 +3994,7 @@ function App() {
       setTimeout(() => refreshWalletSnapshot(), 10000);
     } catch (e) {
       setProcessingMessage("");
+      recordError("native_send", e, { network: activeNetworkId, family }).catch(() => {});
       setStatusModal({
         visible: true,
         title: "Failed",
@@ -2616,51 +4047,68 @@ function App() {
       showToast(`Enter a valid ${family.toUpperCase()} address (e.g. ${familyUi.placeholder})`, "error");
       return;
     }
+    const hasManualMeta = !!(tokenImportForm.symbol?.trim() && tokenImportForm.name?.trim() && tokenImportForm.decimals?.trim());
+    const hasVerifiedPreview = !!(tokenPreviewMeta?.verified && tokenPreviewMeta?.symbol && tokenPreviewMeta?.name);
+    if (!hasVerifiedPreview && !hasManualMeta) {
+      showToast("Token metadata could not be verified. Fill symbol, name and decimals manually before import.", "error");
+      return;
+    }
     setBusy(true);
     setBusyAction("addToken");
     setProcessingMessage("Importing Token...");
     // Use the chain-specific active address as the holder (e.g. cosmos1... for Cosmos, 0x... for EVM)
     const holderAddr = activeAddress || wallet.address;
-    // SEI nodeUrl is EVM RPC; use cosmosRestUrl for Cosmos REST calls
-    const effectiveNodeUrl = (family === "sei" || family === "cosmos-testnet" || family === "injective")
-      ? (currentNetwork.cosmosRestUrl || nodeUrl)
-      : nodeUrl;
+    const effectiveNodeUrls = getRpcCandidatesForFamily(currentNetwork, family);
     try {
-      // Auto-fetch metadata for all families; fall back to form values if fetch fails
-      let meta;
-      try {
-        setProcessingMessage("Fetching token metadata…");
-        meta = await resolveTokenMetaMultichain(effectiveNodeUrl, address, holderAddr, family);
-      } catch { meta = null; }
-
-      // Override with user-provided values if the fetch returned defaults or failed
-      const userSymbol = tokenImportForm.symbol?.trim();
-      const userName   = tokenImportForm.name?.trim();
-      const userDec    = tokenImportForm.decimals?.trim();
-      if (!meta || meta.symbol === "TOKEN" || meta.symbol === "SPL") {
-        meta = {
-          address,
-          symbol:   userSymbol || meta?.symbol   || "TOKEN",
-          name:     userName   || meta?.name     || userSymbol || "Token",
-          decimals: userDec    ? parseInt(userDec, 10) : (meta?.decimals ?? getDefaultDecimalsForFamily(family)),
-        };
+      // Use already-fetched preview meta if available; otherwise fetch now
+      let meta = tokenPreviewMeta;
+      if (!meta) {
+        try {
+          setProcessingMessage("Fetching token metadata…");
+          meta = await resolveTokenMetaMultichain(effectiveNodeUrls, address, holderAddr, family);
+        } catch { meta = null; }
       }
 
-      setProcessingMessage("Fetching balance…");
-      const balance = await resolveTokenBalanceMultichain(effectiveNodeUrl, walletUrl, address, holderAddr, family).catch(() => "0");
-
-      const next = mergeUniqueByKey(watchlist, [{
+      // Always prefer user-provided override values over auto-fetched
+      const userSymbol = tokenImportForm.symbol?.trim();
+      const userName = tokenImportForm.name?.trim();
+      const userDec = tokenImportForm.decimals?.trim();
+      const FALLBACK_SYMBOLS = new Set(["TOKEN", "SPL", "FT", "Jetton", "TRC20", "CW20", "IBC"]);
+      const fetchedSymbolIsReal = meta?.symbol && !FALLBACK_SYMBOLS.has(meta.symbol);
+      meta = {
         address,
-        name:         meta.name,
-        symbol:       meta.symbol,
-        decimals:     meta.decimals,
+        symbol: userSymbol || (fetchedSymbolIsReal ? meta?.symbol : null) || meta?.symbol || "TOKEN",
+        name: userName || (fetchedSymbolIsReal ? meta?.name : null) || meta?.name || userSymbol || "Token",
+        decimals: userDec ? parseInt(userDec, 10) : (meta?.decimals ?? getDefaultDecimalsForFamily(family)),
+        verified: meta?.verified || !!(userSymbol && userName),
+      };
+
+      setProcessingMessage("Fetching balance…");
+      const balance = await resolveTokenBalanceMultichain(effectiveNodeUrls, walletUrl, address, holderAddr, family).catch(() => "0");
+
+      // If this token was previously removed, clear it from the blacklist so it shows again
+      const addrKey = String(address).toLowerCase();
+      setRemovedTokens(prev => prev.filter(r => !(r.address && String(r.address).toLowerCase() === addrKey && r.networkId === activeNetworkId)));
+      setHiddenTokens(prev => prev.filter(h => !(h.address && String(h.address).toLowerCase() === addrKey && h.networkId === activeNetworkId)));
+
+      const importedToken = {
+        address,
+        name: meta.name,
+        symbol: meta.symbol,
+        decimals: meta.decimals,
         balance,
-        networkId:    activeNetworkId,
+        networkId: activeNetworkId,
         family,
-        holderAddress: holderAddr,  // store so future refreshes use the correct chain address
-      }], "address");
-      setWatchlist(next);
+        holderAddress: holderAddr,
+      };
+      setWatchlist(prev => {
+        const nextKey = tokenKey(importedToken);
+        const withoutOld = (prev || []).filter(item => tokenKey(item) !== nextKey);
+        return [importedToken, ...withoutOld];
+      });
       setTokenImportForm(initialTokenImportForm);
+      setTokenPreviewMeta(null);
+      setTokenImportVisible(false);
       showToast(`Imported ${meta.symbol}`, "success");
     } catch (e) {
       showToast(e.message || "Token import failed", "error");
@@ -2675,19 +4123,15 @@ function App() {
   // Fetches metadata, skips already-watchlisted tokens, and stores holderAddress.
   async function importMultichainDiscovery(items, holderAddress, family) {
     if (!items?.length) return 0;
-    const existingSet = new Set(
-      (watchlist || []).map(t => String(t.address || "").toLowerCase()).filter(Boolean)
-    );
-    const novel = items.filter(item => item?.address && !existingSet.has(String(item.address).toLowerCase()));
+    const existingSet = new Set((watchlist || []).map(t => tokenKey(t)).filter(Boolean));
+    const novel = items.filter(item => item?.address && !existingSet.has(`${activeNetworkId}:${String(item.address).toLowerCase()}`));
     if (!novel.length) return 0;
 
-    const discoveryNodeUrl = (family === "sei" || family === "injective" || family === "cosmos-testnet")
-      ? (currentNetwork?.cosmosRestUrl || nodeUrl)
-      : nodeUrl;
+    const discoveryNodeUrls = getRpcCandidatesForFamily(currentNetwork, family);
     const resolved = [];
     for (const item of novel) {
       try {
-        const meta = await resolveTokenMetaMultichain(discoveryNodeUrl, item.address, holderAddress, family)
+        const meta = await resolveTokenMetaMultichain(discoveryNodeUrls, item.address, holderAddress, family)
           .catch(() => null);
         // Skip tokens with no real metadata and zero balance
         if (!meta && !item.balance) continue;
@@ -2696,17 +4140,20 @@ function App() {
         resolved.push({
           address: item.address,
           symbol,
-          name:         meta?.name     || symbol,
-          decimals:     meta?.decimals ?? 6,
-          balance:      item.balance   || "0",
+          name: meta?.name || symbol,
+          decimals: meta?.decimals ?? 6,
+          balance: item.balance || "0",
           family,
-          networkId:    activeNetworkId,
+          networkId: activeNetworkId,
           holderAddress,
         });
       } catch { /* skip unresolvable entries */ }
     }
     if (!resolved.length) return 0;
-    setWatchlist(prev => mergeUniqueByKey(prev, resolved, "address"));
+    setWatchlist(prev => {
+      const incoming = new Set(resolved.map(token => tokenKey(token)));
+      return [...resolved, ...(prev || []).filter(token => !incoming.has(tokenKey(token)))];
+    });
     return resolved.length;
   }
 
@@ -2717,7 +4164,7 @@ function App() {
     try {
       const family = String(currentNetwork.family || "evm").toLowerCase();
       const holder = activeAddress || wallet.address;
-      const isLqdNode = nodeUrl.includes("lqd") || nodeUrl.includes("192.168");
+      const isLqdNode = isLqdNetworkUrl(nodeUrl);
 
       // ── EVM (LQD or external) ──
       if (family === "evm") {
@@ -2809,18 +4256,58 @@ function App() {
   async function autoDiscoverErc20(address) {
     const ERC20_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
     const padded = "0x000000000000000000000000" + address.replace("0x", "").toLowerCase();
+    const rpcUrls = getNetworkNodeCandidates(currentNetwork);
     const [sentRes, recvRes] = await Promise.all([
-      postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "eth_getLogs",
-        params: [{ topics: [ERC20_TRANSFER, padded], fromBlock: "earliest", toBlock: "latest" }] }).catch(() => null),
-      postJson(nodeUrl, { jsonrpc: "2.0", id: 2, method: "eth_getLogs",
-        params: [{ topics: [ERC20_TRANSFER, null, padded], fromBlock: "earliest", toBlock: "latest" }] }).catch(() => null),
+      tryRpcCandidates(rpcUrls, (url) => postJson(url, {
+        jsonrpc: "2.0", id: 1, method: "eth_getLogs",
+        params: [{ topics: [ERC20_TRANSFER, padded], fromBlock: "earliest", toBlock: "latest" }]
+      }).catch(() => null), (r) => Array.isArray(r?.result)).then(({ result }) => result).catch(() => null),
+      tryRpcCandidates(rpcUrls, (url) => postJson(url, {
+        jsonrpc: "2.0", id: 2, method: "eth_getLogs",
+        params: [{ topics: [ERC20_TRANSFER, null, padded], fromBlock: "earliest", toBlock: "latest" }]
+      }).catch(() => null), (r) => Array.isArray(r?.result)).then(({ result }) => result).catch(() => null),
     ]);
     const contracts = new Set([
       ...((sentRes?.result || []).map(l => String(l.address || "").toLowerCase())),
-      ...((recvRes?.result  || []).map(l => String(l.address || "").toLowerCase())),
+      ...((recvRes?.result || []).map(l => String(l.address || "").toLowerCase())),
     ].filter(Boolean));
     if (!contracts.size) return 0;
     return importDetectedTokens(Array.from(contracts), address, "auto");
+  }
+
+  function removeToken(token) {
+    if (!token?.address) return;
+    const netId = token.networkId || activeNetworkId;
+    const key = String(token.address).toLowerCase();
+    setRemovedTokens(prev => {
+      const alreadyIn = prev.some(r => r.address && String(r.address).toLowerCase() === key && r.networkId === netId);
+      if (alreadyIn) return prev;
+      return [...prev, { address: token.address, networkId: netId }];
+    });
+    setHiddenTokens(prev => prev.filter(h => !(h.address && String(h.address).toLowerCase() === key && h.networkId === netId)));
+    setTokenActionTarget(null);
+    showToast(`${token.symbol} removed`, "info");
+  }
+
+  function hideToken(token) {
+    if (!token?.address) return;
+    const netId = token.networkId || activeNetworkId;
+    const key = String(token.address).toLowerCase();
+    setHiddenTokens(prev => {
+      const already = prev.some(h => h.address && String(h.address).toLowerCase() === key && h.networkId === netId);
+      if (already) return prev;
+      return [...prev, { address: token.address, networkId: netId }];
+    });
+    setTokenActionTarget(null);
+    showToast(`${token.symbol} hidden`, "info");
+  }
+
+  function unhideToken(token) {
+    if (!token?.address) return;
+    const netId = token.networkId || activeNetworkId;
+    const key = String(token.address).toLowerCase();
+    setHiddenTokens(prev => prev.filter(h => !(h.address && String(h.address).toLowerCase() === key && h.networkId === netId)));
+    showToast(`${token.symbol} visible again`, "success");
   }
 
   async function refreshSingleToken(address) {
@@ -2828,25 +4315,281 @@ function App() {
     try {
       const existing = watchlist.find(t => String(t.address).toLowerCase() === String(address).toLowerCase());
       const fam = existing?.family || "evm";
-      // Use the token's stored holder address so non-EVM balance queries use the right chain address
       const holder = existing?.holderAddress || activeAddress || wallet.address;
-      // SEI/Injective: resolve REST URL from stored networkId
       const tokenNetwork = NETWORKS.find(n => n.id === (existing?.networkId || activeNetworkId)) || currentNetwork;
-      const tokenNodeUrl = (fam === "sei" || fam === "injective" || fam === "cosmos-testnet")
-        ? (tokenNetwork.cosmosRestUrl || nodeUrl)
-        : nodeUrl;
-      const [meta, balance] = await Promise.all([
-        resolveTokenMetaMultichain(tokenNodeUrl, address, holder, fam).catch(() => existing || { address }),
-        resolveTokenBalanceMultichain(tokenNodeUrl, walletUrl, address, holder, fam).catch(() => existing?.balance || "0"),
-      ]);
+      const tokenNodeUrls = getRpcCandidatesForFamily(tokenNetwork, fam);
+      const tokenNodeUrl = tokenNodeUrls[0] || nodeUrl;
+
+      const meta = await resolveTokenMetaMultichain(tokenNodeUrls, address, holder, fam).catch(() => existing || { address });
+
+      let balance = existing?.balance || "0";
+      if (fam === "ton") {
+        const tonAddr = chainKeys?.ton?.address || chainKeys?.ton?.rawPubkey || holder;
+        balance = await getTonJettonBalance(tokenNodeUrl, tonAddr, address).catch(() => "0");
+      } else if (fam === "starknet" && chainKeys?.starknet?.publicKey) {
+        const sAddr = starknetArgentAddress(chainKeys.starknet.publicKey);
+        balance = await resolveTokenBalanceMultichain(tokenNodeUrls, walletUrl, address, sAddr, fam).catch(() => "0");
+      } else {
+        balance = await resolveTokenBalanceMultichain(tokenNodeUrls, walletUrl, address, holder, fam).catch(() => existing?.balance || "0");
+      }
+
       setWatchlist((prev) => mergeUniqueByKey(prev, [{ ...(existing || {}), ...meta, balance }], "address"));
     } catch (e) {
       setStatus(e.message || "Token refresh failed");
     }
   }
 
-  async function removeToken(address) {
-    setWatchlist((prev) => prev.filter((item) => String(item.address).toLowerCase() !== String(address).toLowerCase()));
+  function bridgeTokenExternalAddress(token = bridgeSelectedToken) {
+    return String(token?.source_token || token?.SourceToken || token?.bsc_token || token?.BscToken || token?.address || "").trim();
+  }
+
+  function bridgeTokenLqdAddress(token = bridgeSelectedToken) {
+    return String(token?.lqd_token || token?.LqdToken || token?.target_token || token?.TargetToken || token?.address || "").trim();
+  }
+
+  function bridgeTokenDecimals(token = bridgeSelectedToken) {
+    const parsed = Number(token?.decimals || token?.Decimals || 8);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 8;
+  }
+
+  function bridgeFamilySupportsWalletSigning(family) {
+    return bridgeWalletSignedFamilies.includes(String(family || "evm").toLowerCase());
+  }
+
+  function bridgeNeedsExternalProof(family = currentBridgeFamily) {
+    return bridgeDirection === "external_to_lqd" && !bridgeFamilySupportsWalletSigning(family);
+  }
+
+  function bridgeProofLabel(family = currentBridgeFamily) {
+    const fam = String(family || "").toLowerCase();
+    if (fam === "solana") return "Solana signature";
+    if (fam === "ton") return "TON transaction hash";
+    if (fam === "near") return "NEAR receipt / transaction hash";
+    if (fam === "aptos") return "Aptos version / transaction hash";
+    if (fam === "sui") return "Sui digest";
+    if (fam === "starknet") return "Starknet transaction hash";
+    if (fam === "tron") return "Tron transaction hash";
+    if (fam === "cosmos" || fam === "cosmos-testnet" || fam === "sei" || fam === "injective") return "Cosmos tx hash";
+    if (fam === "utxo" || fam === "bitcoin" || fam === "btc" || fam === "litecoin") return "UTXO txid";
+    return "Source transaction hash";
+  }
+
+  function bridgeProofAddressLabel(family = currentBridgeFamily) {
+    const fam = String(family || "").toLowerCase();
+    if (fam === "utxo" || fam === "bitcoin" || fam === "btc" || fam === "litecoin") return "Sender / input address";
+    return "Source sender address";
+  }
+
+  function bridgeProofReady(family = currentBridgeFamily) {
+    if (!bridgeNeedsExternalProof(family)) return true;
+    const fam = String(family || "").toLowerCase();
+    if (!(bridgeForm.sourceTxHash.trim() && bridgeForm.sourceAddress.trim())) return false;
+    if (["cosmos", "cosmos-testnet", "sei", "injective"].includes(fam)) {
+      return !!bridgeForm.sourceMemo.trim();
+    }
+    if (["utxo", "bitcoin", "btc", "litecoin", "dogecoin", "cardano"].includes(fam)) {
+      return !!bridgeForm.sourceOutput.trim();
+    }
+    if (["solana", "substrate", "xrpl", "ton", "near", "aptos", "sui", "starknet", "tron"].includes(fam)) {
+      return !!bridgeForm.sourceSequence.trim();
+    }
+    return true;
+  }
+
+  function bridgeChainIsEnabled(chain = currentBridgeChain) {
+    if (!chain) return true;
+    return chain.enabled !== false && chain.Enabled !== false;
+  }
+
+  function bridgeExternalPrivateKey(family) {
+    const fam = String(family || "evm").toLowerCase();
+    if (fam === "harmony") return chainKeys?.harmony?.privateKey || chainKeys?.evm?.privateKey || wallet?.privateKey || "";
+    if (fam === "tron") return chainKeys?.tron?.privateKey || wallet?.privateKey || "";
+    if (fam === "sei") return chainKeys?.sei?.privateKey || chainKeys?.evm?.privateKey || wallet?.privateKey || "";
+    return chainKeys?.evm?.privateKey || wallet?.privateKey || "";
+  }
+
+  function bridgeRequestHash(item = {}) {
+    return String(item.tx_hash || item.TxHash || item.lqd_tx_hash || item.LqdTxHash || item.bsc_tx_hash || item.BscTxHash || item.source_tx_hash || item.SourceTxHash || "").trim();
+  }
+
+  function bridgeRequestMatches(item, tx) {
+    const needle = String(tx?.tx_hash || tx?.hash || "").toLowerCase();
+    if (!needle) return false;
+    return [
+      item?.tx_hash,
+      item?.TxHash,
+      item?.lqd_tx_hash,
+      item?.LqdTxHash,
+      item?.bsc_tx_hash,
+      item?.BscTxHash,
+      item?.source_tx_hash,
+      item?.SourceTxHash,
+      item?.id,
+      item?.ID,
+    ].some((value) => String(value || "").toLowerCase() === needle);
+  }
+
+  async function refreshBridgeTracking(tx = activeBridgeTx) {
+    if (!tx) return null;
+    const requests = await nodeBridgeRequests(nodeUrl).catch(() => []);
+    if (Array.isArray(requests)) {
+      setBridgeRequests(requests);
+      const matched = requests.find((item) => bridgeRequestMatches(item, tx));
+      if (matched) {
+        const status = String(matched.status || matched.Status || tx.status || "pending").toLowerCase();
+        setActiveBridgeTx((prev) => prev ? { ...prev, ...matched, tx_hash: bridgeRequestHash(matched) || prev.tx_hash, status } : prev);
+        return matched;
+      }
+    }
+    return null;
+  }
+
+  async function submitBridgeAction() {
+    if (!wallet?.address || !wallet?.privateKey) return showToast("Unlock wallet first", "error");
+    if (!bridgeForm.amount) return showToast("Enter amount", "error");
+
+    const chain = currentBridgeChain || {};
+    const family = String(chain.family || "evm").toLowerCase();
+    const adapter = String(chain.adapter || family || "evm").toLowerCase();
+    const recipient = (bridgeDirection === "lqd_to_external" ? bridgeForm.toBsc : bridgeForm.toLqd).trim();
+    if (!recipient) return showToast("Enter recipient address", "error");
+    if (!bridgeChainIsEnabled(chain)) return showToast(`${chain.name || bridgeChainId} bridge route is not active in registry yet`, "error");
+
+    const hasBridgeToken = !!bridgeSelectedToken;
+    const tokenAddress = bridgeDirection === "lqd_to_external"
+      ? bridgeTokenLqdAddress()
+      : bridgeTokenExternalAddress();
+    if (hasBridgeToken && !tokenAddress) return showToast("Selected bridge token is missing mapping", "error");
+
+    const decimals = hasBridgeToken ? bridgeTokenDecimals() : (bridgeDirection === "lqd_to_external" ? 8 : Number(chain.decimals || chain.native_decimals || 8));
+    const amount = parseUnits(bridgeForm.amount, decimals || 8);
+    if (BigInt(amount) <= 0n) return showToast("Enter a valid amount", "error");
+
+    const metadata = {
+      chain_id: bridgeChainId,
+      family,
+      adapter,
+      source_tx_hash: bridgeForm.sourceTxHash.trim(),
+      source_address: bridgeForm.sourceAddress.trim(),
+      source_memo: bridgeForm.sourceMemo.trim(),
+      source_sequence: bridgeForm.sourceSequence.trim(),
+      source_output: bridgeForm.sourceOutput.trim(),
+      mode: bridgeMode,
+    };
+    const needsExternalProof = bridgeNeedsExternalProof(family);
+    if (needsExternalProof && !bridgeProofReady(family)) {
+      return showToast(`${bridgeProofLabel(family)} and source address are required for ${String(chain.name || family).toUpperCase()} bridge proof`, "error");
+    }
+
+    setBusy(true);
+    setBusyAction("bridge");
+    setProcessingMessage(bridgeDirection === "lqd_to_external" ? "Creating LQD bridge request..." : "Creating external bridge request...");
+    try {
+      let res;
+      if (bridgeDirection === "lqd_to_external") {
+        if (hasBridgeToken) {
+          const payload = {
+            ...metadata,
+            private_key: wallet.privateKey,
+            token: tokenAddress,
+            amount,
+            to_bsc: recipient,
+          };
+          res = bridgeMode === "private"
+            ? await walletBridgePrivateBurnLqdToken(walletUrl, payload)
+            : await walletBridgeBurnLqdToken(walletUrl, payload);
+        } else {
+          const baseFee = await nodeBaseFee(nodeUrl).catch(() => bridgeBaseFee || 10);
+          const payload = {
+            from: wallet.address,
+            to_bsc: recipient,
+            amount,
+            chain_id: bridgeChainId,
+            gas: 200000,
+            gas_price: Number(baseFee?.base_fee || baseFee?.BaseFee || baseFee?.baseFee || baseFee || bridgeBaseFee || 10),
+            private_key: wallet.privateKey,
+            mode: bridgeMode,
+          };
+          res = bridgeMode === "private"
+            ? await walletBridgePrivateLock(walletUrl, payload)
+            : await walletBridgeLock(walletUrl, payload);
+        }
+      } else {
+        if (needsExternalProof) {
+          const payload = {
+            ...metadata,
+            tx_hash: metadata.source_tx_hash,
+            token: tokenAddress || `native:${bridgeChainId}`,
+            from: metadata.source_address,
+            to_lqd: recipient,
+            amount,
+          };
+          res = await postJson(`${normalizeUrl(nodeUrl)}/bridge/lock_chain`, payload);
+        } else if (hasBridgeToken) {
+          const payload = {
+            ...metadata,
+            private_key: bridgeExternalPrivateKey(family),
+            token: tokenAddress,
+            amount,
+            to_lqd: recipient,
+          };
+          if (!payload.private_key) throw new Error(`Unlock ${String(family).toUpperCase()} key before bridging from external chain`);
+          res = bridgeMode === "private"
+            ? await walletBridgePrivateLockBscToken(walletUrl, payload)
+            : await walletBridgeLockBscToken(walletUrl, payload);
+        } else {
+          const payload = {
+            private_key: bridgeExternalPrivateKey(family),
+            amount,
+            to_lqd: recipient,
+            chain_id: bridgeChainId,
+            mode: bridgeMode,
+          };
+          if (!payload.private_key) throw new Error(`Unlock ${String(family).toUpperCase()} key before bridging from external chain`);
+          res = bridgeMode === "private"
+            ? await walletBridgePrivateBurn(walletUrl, payload)
+            : await walletBridgeBurn(walletUrl, payload);
+        }
+      }
+
+      const txHash = res?.tx_hash || res?.hash || res?.TxHash || metadata.source_tx_hash || "";
+      const newTx = {
+        tx_hash: txHash,
+        type: "bridge",
+        status: String(res?.status || "pending").toLowerCase(),
+        mode: bridgeMode,
+        family,
+        direction: bridgeDirection,
+        from: bridgeDirection === "lqd_to_external" ? wallet.address : (metadata.source_address || chainKeys?.evm?.address || wallet.address),
+        to: recipient,
+        amount: bridgeForm.amount,
+        token: hasBridgeToken ? (bridgeSelectedToken?.symbol || "TOKEN") : "LQD",
+        timestamp: Date.now() / 1000,
+      };
+      setActiveBridgeTx(newTx);
+      rememberActivity({
+        type: "bridge",
+        TxHash: txHash,
+        From: newTx.from,
+        To: recipient,
+        Status: newTx.status,
+        Value: bridgeForm.amount,
+        token: newTx.token,
+        direction: bridgeDirection,
+        Timestamp: Math.floor(Date.now() / 1000),
+      });
+      setBridgeForm((prev) => ({ ...prev, amount: "" }));
+      showToast(`Bridge initiated: ${shortAddress(txHash || "pending", 8, 6)}`, "success");
+      setTimeout(() => refreshBridgeTracking(newTx), 2500);
+      setTimeout(() => refreshWalletSnapshot(), 3000);
+    } catch (e) {
+      showToast(e.message || "Bridge failed", "error");
+    } finally {
+      setBusy(false);
+      setBusyAction("");
+      setProcessingMessage("");
+    }
   }
 
   async function sendTokenAction(token) {
@@ -2874,19 +4617,20 @@ function App() {
       // ── LQD: WalletServer ────────────────────────────────────────────────
       if (currentNetwork.id === "lqd") {
         const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
+        const baseFeeValue = baseFee?.base_fee || baseFee?.BaseFee || baseFee?.baseFee || baseFee || 10;
         const res = await walletContractTx(walletUrl, {
           address: wallet.address,
           contract_address: token.address,
           function: "Transfer",
           args: [recipient, amount],
           value: "0",
-          gas: 50000,
-          gas_price: baseFee || 10,
+          gas: Number(tokenFeeInfo.gasLimit || 50000),
+          gas_price: Number(tokenFeeInfo.gasPrice || baseFeeValue || 10),
           private_key: wallet.privateKey,
         });
         hash = res?.tx_hash || res?.hash || "";
 
-      // ── EVM / Harmony / Tron / SEI: ERC-20 EIP-155 ──────────────────────
+        // ── EVM / Harmony / Tron / SEI: ERC-20 EIP-155 ──────────────────────
       } else if (family === "evm" || family === "harmony" || family === "tron" || family === "sei") {
         let privKey, fromAddr;
         if (family === "harmony") {
@@ -2910,15 +4654,18 @@ function App() {
           postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "eth_gasPrice", params: [] }).catch(() => null),
         ]);
         const nonce = noncRes?.result ? parseInt(noncRes.result, 16) : 0;
-        const gasPrice = gasPriceRes?.result ? BigInt(gasPriceRes.result) : BigInt(10e9);
+        const gasPrice = isZeroFeeNetwork(currentNetwork, family)
+          ? 0n
+          : (tokenFeeInfo.gasPrice ? BigInt(tokenFeeInfo.gasPrice) : (gasPriceRes?.result ? BigInt(gasPriceRes.result) : BigInt(10e9)));
+        const gasLimit = tokenFeeInfo.gasLimit ? Number(tokenFeeInfo.gasLimit) : 80000;
 
         const callData = encodeErc20Transfer(recipient, amount);
-        const signedTx = signEip155Tx({ nonce, gasPrice: gasPrice.toString(), gasLimit: 80000, to: token.address, value: "0", data: callData, chainId }, privKey);
+        const signedTx = signEip155Tx({ nonce, gasPrice: gasPrice.toString(), gasLimit, to: token.address, value: "0", data: callData, chainId }, privKey);
         const sendRes = await postJson(nodeUrl, { jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction", params: [signedTx] });
         hash = sendRes?.result || "";
         if (!hash || hash === "0x") throw new Error(sendRes?.error?.message || "Broadcast failed");
 
-      // ── Cosmos / SEI / Injective: amino MsgSend with token denom ────────────
+        // ── Cosmos / SEI / Injective: amino MsgSend with token denom ────────────
       } else if (family === "cosmos" || family === "cosmos-testnet" || family === "sei" || family === "injective") {
         if (!chainKeys) throw new Error("Unlock wallet with mnemonic to sign Cosmos token transfers");
         let privKey, fromAddr;
@@ -2949,7 +4696,7 @@ function App() {
         hash = broadcastRes?.tx_response?.txhash || "";
         if (!hash) throw new Error(broadcastRes?.tx_response?.raw_log || "Cosmos token broadcast failed");
 
-      // ── NEAR: NEP-141 ft_transfer function call ───────────────────────────
+        // ── NEAR: NEP-141 ft_transfer function call ───────────────────────────
       } else if (family === "near") {
         if (!chainKeys?.near) throw new Error("Unlock wallet with mnemonic to sign NEAR token transfers");
         const privKey = chainKeys.near.privateKey;
@@ -2969,7 +4716,7 @@ function App() {
         if (!hash && sendRes?.error) throw new Error(sendRes.error.data || sendRes.error.message || "NEAR ft_transfer failed");
         if (!hash) hash = sendRes?.result?.transaction?.hash || "pending";
 
-      // ── Aptos: coin::transfer entry function ─────────────────────────────
+        // ── Aptos: coin::transfer entry function ─────────────────────────────
       } else if (family === "aptos") {
         if (!chainKeys?.aptos) throw new Error("Unlock wallet with mnemonic to sign Aptos token transfers");
         const privKey = chainKeys.aptos.privateKey;
@@ -2994,7 +4741,7 @@ function App() {
         hash = submitRes?.hash || "";
         if (!hash) throw new Error(submitRes?.message || "Aptos token transfer failed");
 
-      // ── SUI: coin::transfer via unsafe_pay ───────────────────────────────
+        // ── SUI: coin::transfer via unsafe_pay ───────────────────────────────
       } else if (family === "sui") {
         if (!chainKeys?.sui) throw new Error("Unlock wallet with mnemonic to sign SUI token transfers");
         const privKey = chainKeys.sui.privateKey;
@@ -3021,7 +4768,7 @@ function App() {
         hash = execRes?.result?.digest || "";
         if (!hash) throw new Error(execRes?.error?.message || "SUI token transfer failed");
 
-      // ── Solana: SPL token transfer via Token Program ─────────────────────
+        // ── Solana: SPL token transfer via Token Program ─────────────────────
       } else if (family === "solana") {
         if (!chainKeys?.solana) throw new Error("Unlock wallet with mnemonic to sign Solana token transfers");
         const privKey = chainKeys.solana.privateKey;
@@ -3046,9 +4793,49 @@ function App() {
         hash = sendRes?.result || "";
         if (!hash) throw new Error(sendRes?.error?.message || "Solana SPL broadcast failed");
 
-      // ── TON: Jetton transfer requires TonWeb SDK ─────────────────────────
+        // ── TON: Jetton transfer via wallet v3R2 BOC ─────────────────────────
       } else if (family === "ton") {
-        throw new Error("TON Jetton token transfer requires the TON SDK. Export your key from Settings → Export All Chain Keys and use Tonkeeper or MyTonWallet.");
+        if (!chainKeys?.ton) throw new Error("Unlock wallet with mnemonic to sign TON Jetton transfers");
+        const tonWalletAddr = chainKeys.ton.address || chainKeys.ton.rawPubkey || "";
+        if (!tonWalletAddr || !tonWalletAddr.startsWith("EQ")) {
+          throw new Error("TON wallet address not available. Re-import your mnemonic.");
+        }
+        setProcessingMessage("Fetching Jetton wallet address...");
+        const jettonWalletAddr = await getTonJettonWalletAddress(nodeUrl, tonWalletAddr, token.address);
+        if (!jettonWalletAddr) throw new Error("Could not find your Jetton wallet. Ensure you hold this token.");
+        setProcessingMessage("Fetching TON seqno...");
+        const seqno = await getTonSeqno(nodeUrl, tonWalletAddr);
+        const jettonAmount = String(parseUnits(tokenSendForm.amount, token.decimals || 9));
+        setProcessingMessage("Building & signing Jetton transfer BOC...");
+        const bocBase64 = buildJettonTransferBoc(
+          {
+            walletAddress: tonWalletAddr,
+            jettonWalletAddress: jettonWalletAddr,
+            toAddress: tokenSendForm.to.trim(),
+            jettonAmount,
+            seqno,
+          },
+          chainKeys.ton.privateKey
+        );
+        setProcessingMessage("Broadcasting Jetton transfer...");
+        hash = await broadcastTonBoc(nodeUrl, bocBase64);
+
+        // ── Starknet: ERC-20 invoke via STARK ECDSA ────────────────────────────
+      } else if (family === "starknet") {
+        if (!chainKeys?.starknet) throw new Error("Unlock wallet with mnemonic to sign Starknet token transfers");
+        const starkAddr = starknetArgentAddress(chainKeys.starknet.publicKey);
+        const amtWei = String(parseUnits(tokenSendForm.amount, token.decimals || 18));
+        setProcessingMessage("Signing Starknet token transfer...");
+        hash = await broadcastStarknetTokenTransfer(
+          {
+            senderAddress: starkAddr,
+            toAddress: tokenSendForm.to.trim(),
+            tokenContract: token.address,
+            amountWei: amtWei,
+            nodeUrl,
+          },
+          chainKeys.starknet.privateKey
+        );
 
       } else {
         throw new Error(`Token send not yet supported for ${currentNetwork.name} (${family})`);
@@ -3064,6 +4851,8 @@ function App() {
         hash: hash
       });
 
+      addTrackedTx({ hash, type: "token_send", symbol: token.symbol, to: tokenSendForm.to.trim(), network: NETWORKS.find((n) => n.id === (token.networkId || activeNetworkId)) || currentNetwork, family });
+      recordTelemetry("token_send_success", { network: token.networkId || activeNetworkId, family, hash, token: token.address }).catch(() => {});
       showToast(`${token.symbol} Sent Successfully`, "success");
       rememberActivity({
         type: "token_send",
@@ -3085,6 +4874,7 @@ function App() {
       setTimeout(() => refreshWalletSnapshot(), 10000);
     } catch (e) {
       setProcessingMessage("");
+      recordError("token_send", e, { network: token.networkId || activeNetworkId, family, token: token.address }).catch(() => {});
       setStatusModal({
         visible: true,
         title: "Failed",
@@ -3617,21 +5407,7 @@ function App() {
     }
   }
 
-  async function openFromScan(data) {
-    try {
-      const clean = data.trim();
-      if (isLikelyAddress(clean)) {
-        // If it looks like a contract/token address, auto-import it
-        setStatusModal({ visible: true, title: "Scan", message: "Address detected, importing...", type: "info", hash: clean });
-        await importDetectedTokens([{ address: clean }], wallet.address, "scan");
-        setTab("tokens");
-        return;
-      }
-      setStatus(`Scanned: ${clean}`);
-    } catch (e) {
-      setStatus("Scan handle failed");
-    }
-  }
+  // NOTE: openFromScan is defined earlier (single definition) — handles send, token, bridge, import flows.
 
   async function addNetworkAction() {
     if (!networkForm.name.trim() || !networkForm.chainId.trim() || !networkForm.nodeUrl.trim() || !networkForm.walletUrl.trim()) {
@@ -3758,8 +5534,9 @@ function App() {
 
   useEffect(() => {
     if (!wallet?.address) return;
+    setNetworkHealth((prev) => ({ ...prev, state: "checking", message: `Checking ${currentNetwork.name}` }));
     refreshWalletSnapshot().catch(() => { });
-  }, [wallet?.address, activeNetworkId]);
+  }, [wallet?.address, activeNetworkId, currentNetwork.name]);
 
   useEffect(() => {
     if (!wallet?.address) return;
@@ -3768,8 +5545,50 @@ function App() {
   }, [wallet?.address, nodeUrl]);
 
   const currentTokens = useMemo(() => {
-    return (watchlist || []).filter(t => t.networkId === activeNetworkId);
-  }, [watchlist, activeNetworkId]);
+    const base = (watchlist || []).filter(t => t.networkId === activeNetworkId);
+    if (!removedTokens.length) return base;
+    const removedSet = new Set(
+      removedTokens
+        .filter(r => r.networkId === activeNetworkId && r.address)
+        .map(r => String(r.address).toLowerCase())
+    );
+    return base.filter(t => !t.address || !removedSet.has(String(t.address).toLowerCase()));
+  }, [watchlist, activeNetworkId, removedTokens]);
+
+  const visibleTokens = useMemo(() => {
+    if (showHiddenTokens) return currentTokens;
+    if (!hiddenTokens.length) return currentTokens;
+    const hiddenSet = new Set(
+      hiddenTokens
+        .filter(h => h.networkId === activeNetworkId && h.address)
+        .map(h => String(h.address).toLowerCase())
+    );
+    return currentTokens.filter(t => !t.address || !hiddenSet.has(String(t.address).toLowerCase()));
+  }, [currentTokens, hiddenTokens, showHiddenTokens, activeNetworkId]);
+
+  const hiddenCurrentTokens = useMemo(() => {
+    if (!hiddenTokens.length) return [];
+    const hiddenSet = new Set(
+      hiddenTokens
+        .filter(h => h.networkId === activeNetworkId && h.address)
+        .map(h => String(h.address).toLowerCase())
+    );
+    return currentTokens.filter(t => t.address && hiddenSet.has(String(t.address).toLowerCase()));
+  }, [currentTokens, hiddenTokens, activeNetworkId]);
+
+  const currentActivity = useMemo(() => {
+    const holder = activeAddress || wallet?.address || "";
+    if (!holder) return [];
+    return (activity || []).filter((item) => txTouchesAddress(item, holder));
+  }, [activity, activeAddress, wallet?.address]);
+
+  const lastRefreshLabel = useMemo(() => {
+    if (!lastWalletRefresh) return "Not refreshed yet";
+    const seconds = Math.max(1, Math.floor((Date.now() - lastWalletRefresh) / 1000));
+    if (seconds < 60) return `Updated ${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    return `Updated ${minutes}m ago`;
+  }, [lastWalletRefresh, isRefreshing]);
 
   if (booting) {
     return (
@@ -3871,6 +5690,23 @@ function App() {
         </Modal>
       )}
 
+      {!legalRiskAccepted && (
+        <Modal transparent animationType="fade" visible={!legalRiskAccepted}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.94)', justifyContent: 'center', alignItems: 'center', padding: scale(20) }}>
+            <View style={{ width: '100%', backgroundColor: '#161b33', borderRadius: scale(26), padding: scale(24), borderWidth: 1, borderColor: '#273152' }}>
+              <Text style={{ color: '#f4f7ff', fontSize: scale(22), fontWeight: '900', marginBottom: scale(10) }}>Testnet Wallet Notice</Text>
+              <Text style={{ color: '#a8b3d8', fontSize: scale(14), lineHeight: scale(21), marginBottom: scale(16) }}>
+                This app is for testnet use. Do not store mainnet funds until final legal review, public security audit, app-store review, and mainnet release notes are complete.
+              </Text>
+              <Text style={{ color: '#fbbf24', fontSize: scale(13), lineHeight: scale(19), marginBottom: scale(18) }}>
+                Always verify addresses, token contracts, dApp origins, and transaction details before approving.
+              </Text>
+              <Button label="I Understand" onPress={() => setLegalRiskAccepted(true)} />
+            </View>
+          </View>
+        </Modal>
+      )}
+
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <Modal visible={receiveVisible} transparent animationType="fade" onRequestClose={() => setReceiveVisible(false)}>
           <View style={styles.modalBackdrop}>
@@ -3924,6 +5760,37 @@ function App() {
           </View>
         </Modal>
 
+        {/* Scan Choice Modal — pick what to scan for */}
+        <Modal visible={scanChoiceVisible} transparent animationType="slide" onRequestClose={() => setScanChoiceVisible(false)}>
+          <TouchableOpacity activeOpacity={1} onPress={() => setScanChoiceVisible(false)} style={{ flex: 1, backgroundColor: 'rgba(7,10,21,0.9)', justifyContent: 'flex-end' }}>
+            <View style={{ backgroundColor: '#161b33', borderTopLeftRadius: scale(32), borderTopRightRadius: scale(32), padding: scale(24), paddingBottom: scale(40), borderWidth: 1, borderColor: '#273152' }}>
+              <View style={{ width: scale(40), height: scale(4), backgroundColor: '#273152', borderRadius: 2, alignSelf: 'center', marginBottom: scale(20) }} />
+              <Text style={{ color: '#f4f7ff', fontSize: scale(18), fontWeight: '800', textAlign: 'center', marginBottom: scale(6) }}>Scan QR Code</Text>
+              <Text style={{ color: '#8899cc', fontSize: scale(13), textAlign: 'center', marginBottom: scale(24) }}>What would you like to scan?</Text>
+              {[
+                { label: `Send ${currentNetwork?.symbol || 'Coin'}`, sub: 'Fill the native send address', target: 'native', icon: '📤' },
+                { label: 'Send Token', sub: 'Fill the token send address', target: 'token', icon: '💎' },
+              ].map(({ label, sub, target, icon }) => (
+                <TouchableOpacity
+                  key={target}
+                  onPress={() => { setScanChoiceVisible(false); setTimeout(() => scanWithCamera(target), 200); }}
+                  style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e2540', borderRadius: scale(14), padding: scale(14), marginBottom: scale(10), borderWidth: 1, borderColor: '#273152' }}
+                >
+                  <Text style={{ fontSize: scale(22), marginRight: scale(12) }}>{icon}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: '#f4f7ff', fontSize: scale(15), fontWeight: '700' }}>{label}</Text>
+                    <Text style={{ color: '#8899cc', fontSize: scale(12), marginTop: scale(2) }}>{sub}</Text>
+                  </View>
+                  <Text style={{ color: '#8a78ff', fontSize: scale(18) }}>›</Text>
+                </TouchableOpacity>
+              ))}
+              <TouchableOpacity onPress={() => setScanChoiceVisible(false)} style={{ marginTop: scale(8), padding: scale(12), alignItems: 'center' }}>
+                <Text style={{ color: '#8899cc', fontSize: scale(14) }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
+
         <Modal visible={scannerVisible} transparent animationType="slide" onRequestClose={() => setScannerVisible(false)}>
           <View style={styles.scannerBackdrop}>
             <View style={styles.scannerHeader}>
@@ -3942,7 +5809,9 @@ function App() {
                   onBarcodeScanned={({ data }) => {
                     if (!data) return;
                     setScannerVisible(false);
-                    setTimeout(() => openFromScan(data), 250);
+                    // Use ref (not closure) so we always call the freshest openFromScan
+                    const handler = scanHandlerRef.current;
+                    setTimeout(() => handler?.(data), 300);
                   }}
                 />
               ) : (
@@ -4019,14 +5888,14 @@ function App() {
                 <TouchableOpacity onPress={() => setReceiveVisible(true)} style={styles.topActionPill}>
                   <Text style={styles.topActionPillText}>Receive</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => setScannerVisible(true)} style={styles.topActionPill}>
+                <TouchableOpacity onPress={() => setScanChoiceVisible(true)} style={styles.topActionPill}>
                   <Text style={styles.topActionPillText}>Scan</Text>
                 </TouchableOpacity>
               </View>
 
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: scale(12), flex: 1, justifyContent: 'flex-end' }}>
-                <TouchableOpacity onPress={() => refreshWalletSnapshot()} style={styles.topRefreshBtn}>
-                  <Text style={{ color: '#fff', fontSize: scale(12), fontWeight: '700' }}>Refresh</Text>
+                <TouchableOpacity onPress={() => refreshWalletSnapshot()} style={[styles.topRefreshBtn, isRefreshing && { opacity: 0.7 }]} disabled={isRefreshing}>
+                  <Text style={{ color: '#fff', fontSize: scale(12), fontWeight: '700' }}>{isRefreshing ? "Refreshing" : "Refresh"}</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -4079,9 +5948,13 @@ function App() {
         <Modal visible={isMainMenuVisible} transparent animationType="fade" onRequestClose={() => setIsMainMenuVisible(false)}>
           <TouchableOpacity activeOpacity={1} onPress={() => setIsMainMenuVisible(false)} style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.8)' }}>
             <View style={{ position: 'absolute', top: scale(300), right: scale(16), backgroundColor: '#161b33', borderRadius: scale(16), width: scale(200), padding: scale(8), borderWidth: 1, borderColor: '#273152', shadowColor: "#000", shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.3, shadowRadius: 20, elevation: 10 }}>
-              <TouchableOpacity onPress={() => { setIsMainMenuVisible(false); setFaucetVisible(true); }} style={styles.menuItem}>
+              <TouchableOpacity
+                onPress={() => { if (currentNetwork.id?.startsWith("lqd")) { setIsMainMenuVisible(false); setFaucetVisible(true); } }}
+                style={[styles.menuItem, !currentNetwork.id?.startsWith("lqd") && { opacity: 0.35 }]}
+                disabled={!currentNetwork.id?.startsWith("lqd")}
+              >
                 <Text style={styles.menuItemIcon}>🚰</Text>
-                <Text style={styles.menuItemText}>Faucet</Text>
+                <Text style={styles.menuItemText}>Faucet{!currentNetwork.id?.startsWith("lqd") ? " (LQD only)" : ""}</Text>
               </TouchableOpacity>
               <TouchableOpacity onPress={() => { setIsMainMenuVisible(false); setTokenImportVisible(true); }} style={styles.menuItem}>
                 <Text style={styles.menuItemIcon}>➕</Text>
@@ -4091,7 +5964,7 @@ function App() {
                 <Text style={styles.menuItemIcon}>🖼️</Text>
                 <Text style={styles.menuItemText}>Import NFT</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => { setIsMainMenuVisible(false); refreshWalletSnapshot(); }} style={[styles.menuItem, { borderBottomWidth: 0 }]}>
+              <TouchableOpacity onPress={() => { setIsMainMenuVisible(false); autoDiscoverTokensAction(); }} style={[styles.menuItem, { borderBottomWidth: 0 }]}>
                 <Text style={styles.menuItemIcon}>🔄</Text>
                 <Text style={styles.menuItemText}>Auto Detect</Text>
               </TouchableOpacity>
@@ -4110,24 +5983,16 @@ function App() {
               {/* Network Selector Moved Here */}
               <TouchableOpacity
                 onPress={() => setNetworkModalVisible(true)}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  backgroundColor: 'rgba(39, 49, 82, 0.4)',
-                  paddingHorizontal: scale(16),
-                  paddingVertical: scale(10),
-                  borderRadius: scale(24),
-                  borderWidth: 1,
-                  borderColor: 'rgba(138, 120, 255, 0.3)',
-                  marginBottom: scale(16),
-                  alignSelf: 'center'
-                }}
+                style={styles.walletNetworkPill}
               >
-                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isNodeOnline ? '#10b981' : '#ef4444', marginRight: scale(10) }} />
+                <View style={[styles.walletHealthDot, { backgroundColor: healthDotColor() }]} />
                 <Text style={{ color: '#fff', fontSize: scale(15), fontWeight: '800' }}>{currentNetwork.name}</Text>
                 <Text style={{ color: '#8a78ff', marginLeft: scale(8), fontSize: scale(12) }}>▼</Text>
               </TouchableOpacity>
+              <Text style={styles.walletHealthText}>
+                {isRefreshing ? "Refreshing wallet..." : networkHealth.message}
+                {networkHealth.latencyMs ? ` · ${networkHealth.latencyMs}ms` : ""}
+              </Text>
 
               {/* Account Overview */}
               <View style={styles.mmAccountCard}>
@@ -4139,23 +6004,27 @@ function App() {
                     <Text style={styles.mmAddressText}>{shortAddress(activeAddress)}</Text>
                     <Text style={{ color: '#8a78ff', marginLeft: scale(6), fontSize: scale(10) }}>▼</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={() => setScannerVisible(true)} style={styles.mmHeaderIcon}>
+                  <TouchableOpacity onPress={() => setScanChoiceVisible(true)} style={styles.mmHeaderIcon}>
                     <Text style={{ fontSize: scale(18) }}>📷</Text>
                   </TouchableOpacity>
                 </View>
 
                 <View style={styles.mmBalanceContainer}>
                   <Text style={styles.mmBalanceValue}>{formatUnits(nativeBalance, currentNetwork.decimals || 8, 4)} {currentNetwork.symbol}</Text>
-                  <Text style={styles.mmBalanceFiat}>$0.00 USD</Text>
+                  <Text style={styles.mmBalanceFiat}>Price unavailable</Text>
+                  <Text style={styles.walletRefreshMeta}>{lastRefreshLabel}</Text>
+                  {!!balanceLoadError && <Text style={styles.walletWarningText}>{balanceLoadError}</Text>}
                 </View>
 
                 <View style={styles.mmActionRow}>
                   <MMActionBtn label="Receive" icon="📥" onPress={() => setReceiveVisible(true)} />
                   <MMActionBtn label="Send" icon="📤" onPress={() => setSendVisible(true)} />
-                  <MMActionBtn label="Swap" icon="⇄" onPress={() => setTab("browser")} />
-                  <MMActionBtn label="Buy" icon="💳" onPress={() => { }} />
+                  <MMActionBtn label="Refresh" icon="↻" onPress={() => refreshWalletSnapshot()} />
+                  <MMActionBtn label="Tokens" icon="💎" onPress={() => setTokenImportVisible(true)} />
                 </View>
               </View>
+
+              <LPRewardTierGuide />
 
               {/* Sub Tabs: Tokens / Activity */}
               <View style={[styles.mmSubTabRow, { alignItems: 'center' }]}>
@@ -4181,36 +6050,57 @@ function App() {
                         <Text style={{ fontSize: scale(16) }}>🪙</Text>
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.mmTokenName}>{currentNetwork.name} Native</Text>
+                        <Text style={styles.mmTokenName}>{currentNetwork.name}</Text>
                         <Text style={styles.mmTokenSymbol}>{formatUnits(nativeBalance, currentNetwork.decimals || 8, 4)} {currentNetwork.symbol}</Text>
                       </View>
                       <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={styles.mmTokenFiat}>$0.00</Text>
+                        <Text style={styles.walletTokenBadge}>Native</Text>
                       </View>
                     </View>
                     {/* Custom Tokens */}
-                    {currentTokens.map((token, i) => (
-                      <TouchableOpacity key={i} onPress={() => setSelectedTokenForSend(token)} style={styles.mmTokenRow}>
+                    {visibleTokens.map((token, i) => (
+                      <TouchableOpacity
+                        key={i}
+                        onPress={() => setSelectedTokenForSend(token)}
+                        onLongPress={() => setTokenActionTarget(token)}
+                        delayLongPress={400}
+                        style={styles.mmTokenRow}
+                      >
                         <View style={styles.mmTokenIcon}>
-                          <Text style={{ fontSize: scale(16) }}>💎</Text>
+                          <Text style={{ fontSize: scale(16) }}>{isGenericTokenMeta(token) ? "?" : "💎"}</Text>
                         </View>
                         <View style={{ flex: 1 }}>
-                          <Text style={styles.mmTokenName}>{token.name}</Text>
+                          <Text style={styles.mmTokenName}>{isGenericTokenMeta(token) ? "Unknown Token" : token.name}</Text>
                           <Text style={styles.mmTokenSymbol}>{formatUnits(token.balance, token.decimals || 8, 2)} {token.symbol}</Text>
+                          <Text style={styles.walletTokenMeta}>
+                            {shortAddress(token.address)} · {token.networkId === activeNetworkId ? currentNetwork.name : token.networkId}
+                          </Text>
+                          {isGenericTokenMeta(token) && (
+                            <Text style={styles.walletWarningText}>Metadata incomplete. Re-import with symbol/decimals if needed.</Text>
+                          )}
                         </View>
+                        <Text style={{ color: '#8a78ff', fontSize: scale(18), paddingHorizontal: scale(4) }}>⋮</Text>
                       </TouchableOpacity>
                     ))}
 
-                    {/* Token Management Section (Moved to Menu) */}
+                    {/* Hidden tokens toggle */}
+                    {hiddenCurrentTokens.length > 0 && (
+                      <TouchableOpacity
+                        onPress={() => setShowHiddenTokens(v => !v)}
+                        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: scale(10), paddingHorizontal: scale(4) }}
+                      >
+                        <Text style={{ color: '#717da4', fontSize: scale(12) }}>
+                          {showHiddenTokens ? '▲ Hide hidden tokens' : `▼ Show ${hiddenCurrentTokens.length} hidden token${hiddenCurrentTokens.length > 1 ? 's' : ''}`}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 ) : (
                   <View style={styles.activityList}>
-                    {!activity.length ? (
+                    {!currentActivity.length ? (
                       <Text style={styles.mmEmptyText}>No transactions yet</Text>
                     ) : (
-                      activity
-                        .filter((item) => txTouchesAddress(item, wallet.address))
-                        .map((item, idx) => <ActivityRow key={idx} item={item} onPress={setSelectedTxStory} />)
+                      currentActivity.map((item, idx) => <ActivityRow key={idx} item={item} onPress={setSelectedTxStory} />)
                     )}
                   </View>
                 )}
@@ -4221,8 +6111,10 @@ function App() {
           {/* Native Send Modal — network-aware */}
           <Modal visible={sendVisible} transparent animationType="slide" onRequestClose={() => setSendVisible(false)}>
             {(() => {
-              const sendFam = currentNetwork.family || "evm";
-              const isEvmSend = sendFam === "evm" || sendFam === "harmony";
+              const sendFam = currentNetwork.id === "lqd" ? "lqd" : (currentNetwork.family || "evm");
+              const isLqdSend = sendFam === "lqd";
+              const isEvmSend = !isLqdSend && (sendFam === "evm" || sendFam === "harmony");
+              const canSignSend = isLqdSend || isEvmSend;
               const addrPlaceholder = SEND_ADDR_PLACEHOLDER[sendFam] || "...";
               return (
                 <View style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.95)', justifyContent: 'flex-end' }}>
@@ -4232,14 +6124,14 @@ function App() {
                     {/* Header with network badge */}
                     <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: scale(6) }}>
                       <Text style={{ color: '#f4f7ff', fontSize: scale(20), fontWeight: '800', flex: 1 }}>Send {currentNetwork.symbol}</Text>
-                      <View style={{ backgroundColor: isEvmSend ? 'rgba(16,185,129,0.1)' : 'rgba(251,191,36,0.1)', borderRadius: scale(10), paddingHorizontal: scale(8), paddingVertical: scale(3), borderWidth: 1, borderColor: isEvmSend ? 'rgba(16,185,129,0.3)' : 'rgba(251,191,36,0.3)' }}>
-                        <Text style={{ color: isEvmSend ? '#10b981' : '#fbbf24', fontSize: scale(10), fontWeight: '800' }}>{isEvmSend ? '✓ EVM' : String(sendFam).toUpperCase()}</Text>
+                      <View style={{ backgroundColor: canSignSend ? 'rgba(16,185,129,0.1)' : 'rgba(251,191,36,0.1)', borderRadius: scale(10), paddingHorizontal: scale(8), paddingVertical: scale(3), borderWidth: 1, borderColor: canSignSend ? 'rgba(16,185,129,0.3)' : 'rgba(251,191,36,0.3)' }}>
+                        <Text style={{ color: canSignSend ? '#10b981' : '#fbbf24', fontSize: scale(10), fontWeight: '800' }}>{isLqdSend ? '✓ LQD' : (isEvmSend ? '✓ EVM' : String(sendFam).toUpperCase())}</Text>
                       </View>
                     </View>
                     <Text style={{ color: '#717da4', fontSize: scale(13), marginBottom: scale(16) }}>{currentNetwork.name} · {currentNetwork.symbol}</Text>
 
                     {/* Non-EVM warning banner */}
-                    {!isEvmSend && (
+                    {!canSignSend && (
                       <View style={{ backgroundColor: 'rgba(251,191,36,0.08)', borderRadius: scale(12), padding: scale(12), marginBottom: scale(16), borderWidth: 1, borderColor: 'rgba(251,191,36,0.25)' }}>
                         <Text style={{ color: '#fbbf24', fontSize: scale(12), fontWeight: '700', marginBottom: scale(4) }}>⚠️ Signing not supported</Text>
                         <Text style={{ color: '#9aa5ca', fontSize: scale(11), lineHeight: scale(17) }}>
@@ -4272,16 +6164,16 @@ function App() {
                         <Text style={{ color: '#717da4', fontSize: scale(12) }}>Balance</Text>
                         <Text style={{ color: '#f4f7ff', fontSize: scale(12), fontWeight: '700' }}>{formatUnits(nativeBalance, currentNetwork.decimals || 8, 4)} {currentNetwork.symbol}</Text>
                       </View>
-                      {isEvmSend && (
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                          <Text style={{ color: '#717da4', fontSize: scale(12) }}>Network Fee</Text>
-                          <Text style={{ color: '#10b981', fontSize: scale(12), fontWeight: '700' }}>~{estimatedFee} {currentNetwork.symbol}</Text>
-                        </View>
-                      )}
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                        <Text style={{ color: '#717da4', fontSize: scale(12) }}>Network Fee</Text>
+                        <Text style={{ color: nativeFeeInfo.error ? '#f59e0b' : '#10b981', fontSize: scale(12), fontWeight: '700' }}>
+                          {nativeFeeInfo.loading ? "Estimating..." : nativeFeeInfo.display}
+                        </Text>
+                      </View>
                     </View>
 
                     <Button
-                      label={busyAction === "sendNative" ? "Sending..." : (isEvmSend ? "Confirm Send" : "Validate Address")}
+                      label={busyAction === "sendNative" ? "Sending..." : (canSignSend ? "Confirm Send" : "Validate Address")}
                       onPress={sendAction}
                       disabled={busy}
                     />
@@ -4294,7 +6186,7 @@ function App() {
           </Modal>
 
           {/* Token Import Modal — network-aware */}
-          <Modal visible={tokenImportVisible} transparent animationType="slide" onRequestClose={() => setTokenImportVisible(false)}>
+          <Modal visible={tokenImportVisible} transparent animationType="slide" onRequestClose={() => { setTokenImportVisible(false); setTokenImportForm(initialTokenImportForm); setTokenPreviewMeta(null); }}>
             {(() => {
               const fam = currentNetwork.family || "evm";
               const ui = FAMILY_TOKEN_UI[fam] || DEFAULT_FAMILY_UI;
@@ -4325,54 +6217,91 @@ function App() {
                       </View>
                     ) : (
                       <View style={{ marginTop: scale(12) }}>
-                        {/* Hint pill */}
-                        <View style={{ backgroundColor: 'rgba(138,120,255,0.08)', borderRadius: scale(10), paddingHorizontal: scale(12), paddingVertical: scale(8), marginBottom: scale(14), borderWidth: 1, borderColor: 'rgba(138,120,255,0.15)' }}>
-                          <Text style={{ color: '#9aa5ca', fontSize: scale(12) }}>ℹ️  {ui.hint}</Text>
+                        {/* Step 1: Contract address input */}
+                        <View style={{ backgroundColor: 'rgba(138,120,255,0.06)', borderRadius: scale(10), paddingHorizontal: scale(12), paddingVertical: scale(7), marginBottom: scale(12), borderWidth: 1, borderColor: 'rgba(138,120,255,0.12)' }}>
+                          <Text style={{ color: '#9aa5ca', fontSize: scale(12) }}>📋  Paste the token contract address — name & symbol will auto-detect.</Text>
                         </View>
 
-                        {/* Address / Mint / Denom field */}
                         <Field
                           label={ui.label}
                           value={tokenImportForm.address}
-                          onChangeText={(v) => setTokenImportForm(p => ({ ...p, address: v }))}
+                          onChangeText={(v) => { setTokenImportForm(p => ({ ...p, address: v })); setTokenPreviewMeta(null); }}
                           placeholder={ui.placeholder}
                         />
 
-                        {/* EVM: auto-fetches name/symbol — no manual fields needed */}
-                        {/* Non-EVM: manual Symbol, Name, Decimals */}
-                        {!isEvm && (
-                          <>
-                            <Field
-                              label="Symbol"
-                              value={tokenImportForm.symbol}
-                              onChangeText={(v) => setTokenImportForm(p => ({ ...p, symbol: v }))}
-                              placeholder="e.g. USDT"
-                            />
-                            <Field
-                              label="Token Name"
-                              value={tokenImportForm.name}
-                              onChangeText={(v) => setTokenImportForm(p => ({ ...p, name: v }))}
-                              placeholder="e.g. Tether USD"
-                            />
-                            <Field
-                              label={`Decimals (default: ${getDefaultDecimalsForFamily(fam)})`}
-                              value={tokenImportForm.decimals}
-                              onChangeText={(v) => setTokenImportForm(p => ({ ...p, decimals: v }))}
-                              keyboardType="numeric"
-                              placeholder={String(getDefaultDecimalsForFamily(fam))}
-                            />
-                            <View style={{ backgroundColor: 'rgba(16,185,129,0.07)', borderRadius: scale(10), paddingHorizontal: scale(12), paddingVertical: scale(8), marginBottom: scale(8), borderWidth: 1, borderColor: 'rgba(16,185,129,0.15)' }}>
-                              <Text style={{ color: '#10b981', fontSize: scale(11) }}>✓  Metadata & balance will be auto-fetched from {currentNetwork.name}. Fill fields only to override.</Text>
+                        {/* Loading indicator while fetching */}
+                        {tokenPreviewLoading && (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: scale(10), paddingHorizontal: scale(4) }}>
+                            <ActivityIndicator size="small" color="#8a78ff" />
+                            <Text style={{ color: '#8a78ff', fontSize: scale(13), marginLeft: scale(8) }}>Fetching token info…</Text>
+                          </View>
+                        )}
+
+                        {/* Step 2: Token preview card (Trust Wallet style) */}
+                        {tokenPreviewMeta && !tokenPreviewLoading && (() => {
+                          const FALLBACK_SYMBOLS = new Set(["TOKEN", "SPL", "FT", "Jetton", "TRC20", "CW20", "IBC"]);
+                          const isRealSymbol = tokenPreviewMeta.symbol && !FALLBACK_SYMBOLS.has(tokenPreviewMeta.symbol);
+                          const previewVerified = !!(tokenPreviewMeta.verified && isRealSymbol && tokenPreviewMeta.name);
+                          return (
+                            <View style={{ backgroundColor: previewVerified ? 'rgba(16,185,129,0.07)' : 'rgba(245,158,11,0.08)', borderRadius: scale(16), padding: scale(16), marginBottom: scale(12), borderWidth: 1, borderColor: previewVerified ? 'rgba(16,185,129,0.2)' : 'rgba(245,158,11,0.22)' }}>
+                              <Text style={{ color: previewVerified ? '#10b981' : '#f59e0b', fontSize: scale(12), fontWeight: '700', marginBottom: scale(10), letterSpacing: 0.5 }}>
+                                {previewVerified ? '✓  TOKEN VERIFIED' : '⚠  TOKEN DETECTED, VERIFY DETAILS'}
+                              </Text>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: scale(8) }}>
+                                <View style={{ width: scale(44), height: scale(44), borderRadius: scale(22), backgroundColor: previewVerified ? 'rgba(138,120,255,0.15)' : 'rgba(245,158,11,0.12)', alignItems: 'center', justifyContent: 'center', marginRight: scale(14) }}>
+                                  <Text style={{ color: '#8a78ff', fontSize: scale(18), fontWeight: '800' }}>{isRealSymbol ? tokenPreviewMeta.symbol.slice(0, 2).toUpperCase() : icon}</Text>
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={{ color: '#f4f7ff', fontSize: scale(18), fontWeight: '800' }}>{isRealSymbol ? tokenPreviewMeta.symbol : 'Manual check needed'}</Text>
+                                  <Text style={{ color: '#9aa5ca', fontSize: scale(13), marginTop: scale(2) }}>{tokenPreviewMeta.name || 'Metadata incomplete on this RPC'}</Text>
+                                </View>
+                              </View>
+                              <View style={{ flexDirection: 'row', gap: scale(8) }}>
+                                <View style={{ flex: 1, backgroundColor: 'rgba(7,10,21,0.4)', borderRadius: scale(10), padding: scale(10) }}>
+                                  <Text style={{ color: '#717da4', fontSize: scale(11), marginBottom: scale(2) }}>DECIMALS</Text>
+                                  <Text style={{ color: '#f4f7ff', fontSize: scale(15), fontWeight: '700' }}>{tokenPreviewMeta.decimals ?? '—'}</Text>
+                                </View>
+                                <View style={{ flex: 1, backgroundColor: 'rgba(7,10,21,0.4)', borderRadius: scale(10), padding: scale(10) }}>
+                                  <Text style={{ color: '#717da4', fontSize: scale(11), marginBottom: scale(2) }}>NETWORK</Text>
+                                  <Text style={{ color: '#f4f7ff', fontSize: scale(15), fontWeight: '700' }}>{String(fam).toUpperCase()}</Text>
+                                </View>
+                              </View>
+                              {!previewVerified && (
+                                <Text style={{ color: '#f5c26b', fontSize: scale(12), marginTop: scale(10), lineHeight: scale(18) }}>
+                                  Auto-preview could not verify full metadata from the active RPC set. Review and fill the fields below before importing.
+                                </Text>
+                              )}
+                              {(previewVerified ? !isEvm : true) && (
+                                <View style={{ marginTop: scale(10) }}>
+                                  <Text style={{ color: '#717da4', fontSize: scale(11), marginBottom: scale(6) }}>Override (optional):</Text>
+                                  <Field label="Symbol" value={tokenImportForm.symbol} onChangeText={(v) => setTokenImportForm(p => ({ ...p, symbol: v }))} placeholder={tokenPreviewMeta.symbol || "e.g. USDT"} />
+                                  <Field label="Token Name" value={tokenImportForm.name} onChangeText={(v) => setTokenImportForm(p => ({ ...p, name: v }))} placeholder={tokenPreviewMeta.name || "e.g. Tether USD"} />
+                                  <Field label="Decimals" value={tokenImportForm.decimals} onChangeText={(v) => setTokenImportForm(p => ({ ...p, decimals: v }))} keyboardType="numeric" placeholder={String(tokenPreviewMeta.decimals ?? getDefaultDecimalsForFamily(fam))} />
+                                </View>
+                              )}
                             </View>
+                          );
+                        })()}
+
+                        {/* If preview could not be verified, allow manual metadata entry */}
+                        {!tokenPreviewMeta && !tokenPreviewLoading && tokenImportForm.address.trim() !== "" && (
+                          <>
+                            <Field label="Symbol" value={tokenImportForm.symbol} onChangeText={(v) => setTokenImportForm(p => ({ ...p, symbol: v }))} placeholder="e.g. USDT" />
+                            <Field label="Token Name" value={tokenImportForm.name} onChangeText={(v) => setTokenImportForm(p => ({ ...p, name: v }))} placeholder="e.g. Tether USD" />
+                            <Field label={`Decimals (default: ${getDefaultDecimalsForFamily(fam)})`} value={tokenImportForm.decimals} onChangeText={(v) => setTokenImportForm(p => ({ ...p, decimals: v }))} keyboardType="numeric" placeholder={String(getDefaultDecimalsForFamily(fam))} />
                           </>
                         )}
 
                         <View style={{ flexDirection: 'row', gap: scale(10), marginTop: scale(4) }}>
                           <View style={{ flex: 1 }}>
-                            <Button label={busyAction === "addToken" ? "Importing…" : "Import Token"} onPress={addTokenAction} disabled={busy} />
+                            <Button
+                              label={busyAction === "addToken" ? "Importing…" : "Import Token"}
+                              onPress={addTokenAction}
+                              disabled={busy || tokenPreviewLoading || !tokenImportForm.address.trim()}
+                            />
                           </View>
                           <View style={{ flex: 1 }}>
-                            <Button label="Cancel" onPress={() => { setTokenImportVisible(false); setTokenImportForm(initialTokenImportForm); }} secondary />
+                            <Button label="Cancel" onPress={() => { setTokenImportVisible(false); setTokenImportForm(initialTokenImportForm); setTokenPreviewMeta(null); }} secondary />
                           </View>
                         </View>
                       </View>
@@ -4387,6 +6316,78 @@ function App() {
                 </View>
               );
             })()}
+          </Modal>
+
+          {/* Token Action Sheet — long-press on token */}
+          <Modal visible={!!tokenActionTarget} transparent animationType="slide" onRequestClose={() => setTokenActionTarget(null)}>
+            <View style={{ flex: 1, backgroundColor: 'rgba(7,10,21,0.7)', justifyContent: 'flex-end' }}>
+              {/* Backdrop tap closes sheet */}
+              <TouchableOpacity
+                style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+                activeOpacity={1}
+                onPress={() => setTokenActionTarget(null)}
+              />
+              <View style={{ backgroundColor: '#161b33', borderTopLeftRadius: scale(24), borderTopRightRadius: scale(24), padding: scale(20), borderWidth: 1, borderColor: '#273152' }}>
+                {tokenActionTarget && (
+                  <>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: scale(20) }}>
+                      <View style={{ width: scale(44), height: scale(44), borderRadius: scale(22), backgroundColor: 'rgba(138,120,255,0.15)', alignItems: 'center', justifyContent: 'center', marginRight: scale(14) }}>
+                        <Text style={{ color: '#8a78ff', fontSize: scale(18), fontWeight: '800' }}>{String(tokenActionTarget.symbol || '?').slice(0, 2).toUpperCase()}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#f4f7ff', fontSize: scale(17), fontWeight: '800' }}>{tokenActionTarget.symbol}</Text>
+                        <Text style={{ color: '#9aa5ca', fontSize: scale(13) }}>{tokenActionTarget.name}</Text>
+                      </View>
+                    </View>
+
+                    {/* Hide / Unhide */}
+                    {hiddenTokens.some(h => h?.address && tokenActionTarget?.address && String(h.address).toLowerCase() === String(tokenActionTarget.address).toLowerCase() && h.networkId === tokenActionTarget.networkId) ? (
+                      <TouchableOpacity
+                        onPress={() => unhideToken(tokenActionTarget)}
+                        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: scale(14), borderTopWidth: 1, borderTopColor: '#273152' }}
+                      >
+                        <Text style={{ fontSize: scale(20), marginRight: scale(14) }}>👁️</Text>
+                        <View>
+                          <Text style={{ color: '#f4f7ff', fontSize: scale(15), fontWeight: '600' }}>Unhide Token</Text>
+                          <Text style={{ color: '#717da4', fontSize: scale(12) }}>Show this token in your list again</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        onPress={() => hideToken(tokenActionTarget)}
+                        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: scale(14), borderTopWidth: 1, borderTopColor: '#273152' }}
+                      >
+                        <Text style={{ fontSize: scale(20), marginRight: scale(14) }}>🙈</Text>
+                        <View>
+                          <Text style={{ color: '#f4f7ff', fontSize: scale(15), fontWeight: '600' }}>Hide Token</Text>
+                          <Text style={{ color: '#717da4', fontSize: scale(12) }}>Keep in wallet but hide from list</Text>
+                        </View>
+                      </TouchableOpacity>
+                    )}
+
+                    {/* Remove */}
+                    <TouchableOpacity
+                      onPress={() => removeToken(tokenActionTarget)}
+                      style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: scale(14), borderTopWidth: 1, borderTopColor: '#273152' }}
+                    >
+                      <Text style={{ fontSize: scale(20), marginRight: scale(14) }}>🗑️</Text>
+                      <View>
+                        <Text style={{ color: '#ef4444', fontSize: scale(15), fontWeight: '600' }}>Remove Token</Text>
+                        <Text style={{ color: '#717da4', fontSize: scale(12) }}>Permanently delete from your wallet</Text>
+                      </View>
+                    </TouchableOpacity>
+
+                    {/* Cancel */}
+                    <TouchableOpacity
+                      onPress={() => setTokenActionTarget(null)}
+                      style={{ marginTop: scale(8), paddingVertical: scale(14), alignItems: 'center', borderTopWidth: 1, borderTopColor: '#273152' }}
+                    >
+                      <Text style={{ color: '#9aa5ca', fontSize: scale(15), fontWeight: '600' }}>Cancel</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            </View>
           </Modal>
 
           {/* NFT Import Modal */}
@@ -4438,6 +6439,12 @@ function App() {
                 <View style={styles.inlineButtons}>
                   <Button label="Scan Recipient" onPress={() => scanWithCamera("token")} compact secondary />
                   <Button label="Paste" onPress={() => pasteClipboardTo((value) => setTokenSendForm((p) => ({ ...p, to: value })))} compact />
+                </View>
+                <View style={{ marginVertical: scale(12), padding: scale(12), backgroundColor: '#0f152a', borderRadius: scale(12), flexDirection: 'row', justifyContent: 'space-between' }}>
+                  <Text style={{ color: '#717da4', fontSize: scale(12) }}>Network Fee</Text>
+                  <Text style={{ color: tokenFeeInfo.error ? '#f59e0b' : '#10b981', fontSize: scale(12), fontWeight: '700' }}>
+                    {tokenFeeInfo.loading ? "Estimating..." : tokenFeeInfo.display}
+                  </Text>
                 </View>
                 <Button label={busyAction === "sendToken" ? "Sending…" : "Send Token"} onPress={() => sendTokenAction(selectedTokenForSend)} disabled={busy} />
                 <Button label="Close" onPress={() => setSelectedTokenForSend(null)} secondary />
@@ -4730,7 +6737,7 @@ function App() {
                         <Text style={{ color: '#8a78ff', fontSize: scale(11), fontWeight: 'bold' }}>{bridgeDirection === 'lqd_to_external' ? 'LQD Mainnet' : (currentBridgeChain?.name || 'Select Source')} ▾</Text>
                       </TouchableOpacity>
                     </View>
-                    
+
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                       <TextInput
                         style={{ flex: 1, color: '#fff', fontSize: scale(24), fontWeight: 'bold', padding: 0 }}
@@ -4745,7 +6752,7 @@ function App() {
                         style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e293b', paddingHorizontal: scale(12), paddingVertical: scale(8), borderRadius: scale(20), borderWidth: 1, borderColor: '#273152' }}
                       >
                         <Text style={{ fontSize: scale(18), marginRight: scale(6) }}>💎</Text>
-                        <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: scale(14) }}>{bridgeDirection === 'lqd_to_external' ? 'LQD' : (bridgeSelectedToken?.symbol || 'LQD')}</Text>
+                        <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: scale(14) }}>{bridgeSelectedToken?.symbol || 'LQD'}</Text>
                         <Text style={{ color: '#717da4', marginLeft: scale(4), fontSize: scale(10) }}>▼</Text>
                       </TouchableOpacity>
                     </View>
@@ -4808,14 +6815,83 @@ function App() {
                     />
                   </View>
 
+                  {bridgeNeedsExternalProof() && (
+                    <View style={{ marginTop: scale(16), padding: scale(14), backgroundColor: '#0f152a', borderRadius: scale(16), borderWidth: 1, borderColor: bridgeProofReady() ? 'rgba(16, 185, 129, 0.35)' : 'rgba(245, 158, 11, 0.35)' }}>
+                      <Text style={{ color: '#f4f7ff', fontSize: scale(13), fontWeight: '800', marginBottom: scale(4) }}>External chain proof</Text>
+                      <Text style={{ color: '#94a3b8', fontSize: scale(11), lineHeight: scale(16), marginBottom: scale(12) }}>
+                        Complete the source-chain transfer first, then paste the proof so the LQD relayer can verify and mint/release on LQD.
+                      </Text>
+
+                      <Text style={{ color: '#717da4', fontSize: scale(11), marginBottom: scale(8), fontWeight: '700' }}>{bridgeProofLabel().toUpperCase()}</Text>
+                      <TextInput
+                        style={{ backgroundColor: '#111936', color: '#fff', borderRadius: scale(12), padding: scale(14), borderWidth: 1, borderColor: '#1b2342', fontSize: scale(12), marginBottom: scale(12) }}
+                        value={bridgeForm.sourceTxHash}
+                        onChangeText={(v) => setBridgeForm((p) => ({ ...p, sourceTxHash: v }))}
+                        placeholder="Paste source transaction hash..."
+                        placeholderTextColor="#3b4568"
+                        autoCapitalize="none"
+                      />
+
+                      <Text style={{ color: '#717da4', fontSize: scale(11), marginBottom: scale(8), fontWeight: '700' }}>{bridgeProofAddressLabel().toUpperCase()}</Text>
+                      <TextInput
+                        style={{ backgroundColor: '#111936', color: '#fff', borderRadius: scale(12), padding: scale(14), borderWidth: 1, borderColor: '#1b2342', fontSize: scale(12), marginBottom: scale(12) }}
+                        value={bridgeForm.sourceAddress}
+                        onChangeText={(v) => setBridgeForm((p) => ({ ...p, sourceAddress: v }))}
+                        placeholder="Paste source sender address..."
+                        placeholderTextColor="#3b4568"
+                        autoCapitalize="none"
+                      />
+
+                      <View style={{ flexDirection: 'row', gap: scale(8) }}>
+                        <TextInput
+                          style={{ flex: 1, backgroundColor: '#111936', color: '#fff', borderRadius: scale(12), padding: scale(12), borderWidth: 1, borderColor: '#1b2342', fontSize: scale(11) }}
+                          value={bridgeForm.sourceMemo}
+                          onChangeText={(v) => setBridgeForm((p) => ({ ...p, sourceMemo: v }))}
+                          placeholder="Memo optional"
+                          placeholderTextColor="#3b4568"
+                          autoCapitalize="none"
+                        />
+                        <TextInput
+                          style={{ flex: 1, backgroundColor: '#111936', color: '#fff', borderRadius: scale(12), padding: scale(12), borderWidth: 1, borderColor: '#1b2342', fontSize: scale(11) }}
+                          value={bridgeForm.sourceSequence}
+                          onChangeText={(v) => setBridgeForm((p) => ({ ...p, sourceSequence: v }))}
+                          placeholder="Seq / block optional"
+                          placeholderTextColor="#3b4568"
+                          autoCapitalize="none"
+                        />
+                      </View>
+
+                      <View style={{ flexDirection: 'row', gap: scale(8), marginTop: scale(8) }}>
+                        <TextInput
+                          style={{ flex: 1, backgroundColor: '#111936', color: '#fff', borderRadius: scale(12), padding: scale(12), borderWidth: 1, borderColor: '#1b2342', fontSize: scale(11) }}
+                          value={bridgeForm.sourceOutput}
+                          onChangeText={(v) => setBridgeForm((p) => ({ ...p, sourceOutput: v }))}
+                          placeholder="Output optional"
+                          placeholderTextColor="#3b4568"
+                          autoCapitalize="none"
+                        />
+                        <View style={{ flex: 1 }} />
+                      </View>
+                    </View>
+                  )}
+
+                  {!bridgeChainIsEnabled() && (
+                    <View style={{ marginTop: scale(16), padding: scale(12), backgroundColor: 'rgba(245, 158, 11, 0.08)', borderRadius: scale(14), borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.25)' }}>
+                      <Text style={{ color: '#fbbf24', fontSize: scale(12), fontWeight: '800' }}>Route inactive</Text>
+                      <Text style={{ color: '#94a3b8', fontSize: scale(11), marginTop: scale(4), lineHeight: scale(16) }}>
+                        This chain is listed in the bridge registry but not enabled yet. Enable its registry config and token mapping before production bridging.
+                      </Text>
+                    </View>
+                  )}
+
                   <View style={{ gap: scale(8), marginVertical: scale(20), padding: scale(16), backgroundColor: 'rgba(138, 120, 255, 0.05)', borderRadius: scale(16), borderWidth: 1, borderColor: 'rgba(138, 120, 255, 0.1)' }}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                       <Text style={{ color: '#717da4', fontSize: scale(12) }}>Source Chain Fee</Text>
-                      <Text style={{ color: '#f4f7ff', fontSize: scale(12) }}>{bridgeDirection === 'lqd_to_external' ? 5 : 10} LQD</Text>
+                      <Text style={{ color: '#f4f7ff', fontSize: scale(12) }}>{bridgeSourceFee.toFixed(4)} {bridgeDirection === 'lqd_to_external' ? 'LQD' : bridgeNativeSymbol}</Text>
                     </View>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                       <Text style={{ color: '#717da4', fontSize: scale(12) }}>Target Chain Fee</Text>
-                      <Text style={{ color: '#f4f7ff', fontSize: scale(12) }}>{bridgeDirection === 'lqd_to_external' ? bridgeBaseFee : 5} LQD</Text>
+                      <Text style={{ color: '#f4f7ff', fontSize: scale(12) }}>{bridgeTargetFee.toFixed(4)} {bridgeDirection === 'lqd_to_external' ? bridgeNativeSymbol : 'LQD'}</Text>
                     </View>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
                       <Text style={{ color: '#717da4', fontSize: scale(12) }}>Platform Fee (0.5%)</Text>
@@ -4833,46 +6909,9 @@ function App() {
                   </View>
 
                   <Button
-                    label={busy ? "Processing…" : (bridgeMode === 'private' ? `🔒 Private Bridge` : "Initiate Bridge Request")}
-                    onPress={async () => {
-                      if (!wallet) return showToast("Unlock wallet first", "error");
-                      if (!bridgeForm.amount) return showToast("Enter amount", "error");
-
-                      setBusy(true);
-                      try {
-                        const amount = parseUnits(bridgeForm.amount, 8);
-                        const res = await walletBridgeLock(walletUrl, {
-                          from: wallet.address,
-                          to_bsc: (bridgeDirection === 'lqd_to_external' ? bridgeForm.toBsc : bridgeForm.toLqd).trim(),
-                          amount,
-                          chain_id: bridgeChainId,
-                          family: currentBridgeChain?.family || "evm",
-                          gas: 200000,
-                          gas_price: 10,
-                          private_key: wallet.privateKey,
-                          mode: bridgeMode,
-                        });
-
-                        const newTx = {
-                          tx_hash: res?.tx_hash || "",
-                          type: "bridge",
-                          status: "pending",
-                          from: wallet.address,
-                          to: bridgeDirection === 'lqd_to_external' ? bridgeForm.toBsc : bridgeForm.toLqd,
-                          amount: bridgeForm.amount,
-                          timestamp: Date.now() / 1000
-                        };
-
-                        setActiveBridgeTx(newTx); // Start tracking
-                        showToast(`Bridge initiated: ${shortAddress(res?.tx_hash || "", 8, 6)}`, "success");
-                        setTimeout(() => refreshWalletSnapshot(), 1000);
-                      } catch (e) {
-                        showToast(e.message || "Bridge failed", "error");
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                    disabled={busy}
+                    label={busy ? "Processing…" : (bridgeNeedsExternalProof() ? "Submit Verified Proof" : (bridgeMode === 'private' ? `🔒 Private Bridge` : "Initiate Bridge Request"))}
+                    onPress={submitBridgeAction}
+                    disabled={busy || !bridgeProofReady() || !bridgeChainIsEnabled()}
                     primary
                     style={{ borderRadius: scale(16), height: scale(56) }}
                   />
@@ -4908,9 +6947,9 @@ function App() {
                                 <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: scale(14) }}>{cfg.name}</Text>
                                 <Text style={{ color: '#717da4', fontSize: scale(11) }}>{(cfg.family || 'evm').toUpperCase()} · {cfg.symbol || cfg.nativeSymbol}</Text>
                               </View>
-                              {bridgeChainId === cfg.id && (
-                                <Text style={{ color: '#8a78ff', fontSize: scale(16) }}>✓</Text>
-                              )}
+                              <Text style={{ color: bridgeChainIsEnabled(cfg) ? (bridgeChainId === cfg.id ? '#8a78ff' : '#10b981') : '#f59e0b', fontSize: scale(12), fontWeight: '800' }}>
+                                {bridgeChainId === cfg.id ? '✓ ' : ''}{bridgeChainIsEnabled(cfg) ? 'Active' : 'Inactive'}
+                              </Text>
                             </View>
                           </TouchableOpacity>
                         ))}
@@ -4976,17 +7015,14 @@ function App() {
                 <View style={{ marginTop: scale(30), borderTopWidth: 1, borderTopColor: '#1b2342', paddingTop: scale(20) }}>
                   <Text style={{ color: '#fff', fontSize: scale(16), fontWeight: 'bold', marginBottom: scale(12) }}>Bridge History</Text>
                   <View style={{ gap: scale(12) }}>
-                    {activity.filter(a => (a.Type || a.type) === 'bridge' || (a.Type || a.type) === 'lock').length === 0 ? (
+                    {bridgeHistoryItems.length === 0 ? (
                       <View style={{ padding: scale(30), backgroundColor: '#0f152a', borderRadius: scale(16), alignItems: 'center' }}>
                         <Text style={{ color: '#717da4', fontSize: scale(12) }}>No bridge activity found.</Text>
                       </View>
                     ) : (
-                      activity
-                        .filter(a => (a.Type || a.type) === 'bridge' || (a.Type || a.type) === 'lock')
-                        .slice(0, 10)
-                        .map((item, idx) => (
-                          <ActivityRow key={idx} item={item} onPress={setSelectedTxStory} />
-                        ))
+                      bridgeHistoryItems.map((item, idx) => (
+                        <BridgeRow key={`${item.tx_hash || item.id || idx}`} item={item} />
+                      ))
                     )}
                   </View>
                 </View>
@@ -5019,6 +7055,15 @@ function App() {
                     <Text style={styles.settingName}>Biometric Unlock</Text>
                     <Switch value={biometricEnabled} onValueChange={setBiometricEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
                   </View>
+                  <View style={styles.settingRow}>
+                    <Text style={styles.settingName}>Transaction Tracking</Text>
+                    <Switch value={settingsTxTrackingEnabled} onValueChange={setSettingsTxTrackingEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
+                  </View>
+                  <View style={styles.settingRow}>
+                    <Text style={styles.settingName}>Local Error Reporting</Text>
+                    <Switch value={settingsTelemetryEnabled} onValueChange={setSettingsTelemetryEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
+                  </View>
+                  <Text style={styles.helperText}>Diagnostics stay on this device unless you export logs manually.</Text>
                 </View>
 
                 <View style={styles.settingsDivider} />
@@ -5059,57 +7104,133 @@ function App() {
             <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(12), marginBottom: scale(8) }}>
               <TouchableOpacity onPress={() => setBrowserVisible(true)} style={{ flex: 1, height: scale(38), backgroundColor: '#161b33', borderRadius: 10, flexDirection: 'row', alignItems: 'center', paddingHorizontal: scale(12), borderWidth: 1, borderColor: '#273152' }}>
                 <View style={{ width: scale(8), height: scale(8), borderRadius: 4, backgroundColor: '#10b981', marginRight: scale(8) }} />
-                <Text numberOfLines={1} style={{ color: '#9aa5ca', fontSize: scale(12), flex: 1 }}>{browserUrl || "Search or enter URL"}</Text>
+                <Text numberOfLines={1} style={{ color: '#9aa5ca', fontSize: scale(12), flex: 1 }}>{browserUrl && !isDefaultBrowserUrl(browserUrl) ? browserUrl : "Search or enter URL"}</Text>
                 <Text style={{ color: '#8a78ff', fontSize: scale(16), marginLeft: scale(8) }}>🌐</Text>
               </TouchableOpacity>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: scale(10) }}>
-              <TouchableOpacity onPress={() => browserRef.current?.goBack()} disabled={!browserCanGoBack} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center', opacity: browserCanGoBack ? 1 : 0.3 }}>
+              <TouchableOpacity onPress={() => browserRef.current?.goBack()} disabled={!browserUrl || !browserCanGoBack} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center', opacity: browserUrl && browserCanGoBack ? 1 : 0.3 }}>
                 <Text style={{ color: '#fff', fontSize: scale(18), fontWeight: 'bold' }}>‹</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => browserRef.current?.goForward()} disabled={!browserCanGoForward} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center', opacity: browserCanGoForward ? 1 : 0.3 }}>
+              <TouchableOpacity onPress={() => browserRef.current?.goForward()} disabled={!browserUrl || !browserCanGoForward} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center', opacity: browserUrl && browserCanGoForward ? 1 : 0.3 }}>
                 <Text style={{ color: '#fff', fontSize: scale(18), fontWeight: 'bold' }}>›</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => browserRef.current?.reload()} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center' }}>
+              <TouchableOpacity onPress={() => browserUrl ? browserRef.current?.reload() : setBrowserVisible(true)} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center', opacity: browserUrl ? 1 : 0.45 }}>
                 <Text style={{ color: '#fff', fontSize: scale(16) }}>↻</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => { setBrowserUrl(DEFAULT_BROWSER_URL); setBrowserInput(DEFAULT_BROWSER_URL); }} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center' }}>
+              <TouchableOpacity onPress={() => { setBrowserUrl(""); setBrowserInput(""); }} style={{ width: scale(40), height: scale(34), borderRadius: 8, backgroundColor: '#161b33', justifyContent: 'center', alignItems: 'center' }}>
                 <Text style={{ color: '#fff', fontSize: scale(14) }}>🏠</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={async () => { const url = browserUrl || DEFAULT_BROWSER_URL; const canOpen = await Linking.canOpenURL(url); if (canOpen) Linking.openURL(url); else showToast("Cannot open this URL externally", "error"); }} style={{ paddingHorizontal: scale(12), height: scale(34), borderRadius: 8, backgroundColor: '#1e293b', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#273152' }}>
+              <TouchableOpacity onPress={async () => { if (!browserUrl) { setBrowserVisible(true); return; } const canOpen = await Linking.canOpenURL(browserUrl); if (canOpen) Linking.openURL(browserUrl); else showToast("Cannot open this URL externally", "error"); }} style={{ paddingHorizontal: scale(12), height: scale(34), borderRadius: 8, backgroundColor: '#1e293b', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#273152', opacity: browserUrl ? 1 : 0.6 }}>
                 <Text style={{ color: '#9aa5ca', fontSize: scale(11), fontWeight: '700' }}>EXTERNAL</Text>
               </TouchableOpacity>
             </View>
+            {browserHistory.length > 0 && (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: scale(8) }} contentContainerStyle={{ paddingHorizontal: scale(12), gap: scale(8) }}>
+                {browserHistory.slice(0, 5).map((item) => (
+                  <TouchableOpacity
+                    key={item}
+                    onPress={() => {
+                      setBrowserUrl(item);
+                      setBrowserInput("");
+                      rememberBrowserUrl(item);
+                    }}
+                    style={{ maxWidth: scale(180), paddingHorizontal: scale(10), height: scale(30), borderRadius: 999, backgroundColor: '#161b33', borderWidth: 1, borderColor: '#273152', justifyContent: 'center' }}
+                  >
+                    <Text numberOfLines={1} style={{ color: '#9aa5ca', fontSize: scale(11), fontWeight: '700' }}>{item}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
           </View>
 
-          <View style={{ flex: 1 }}>
-            <WebView
-              ref={browserRef}
-              source={{ uri: browserUrl || DEFAULT_BROWSER_URL }}
-              injectedJavaScript={lqdProviderScript}
-              onMessage={handleBrowserProviderMessage}
-              onError={(e) => setStatusModal({ visible: true, title: "Browser Error", message: `Failed to load page: ${e.nativeEvent.description || "Unknown error"}`, type: "error", hash: "" })}
-              onNavigationStateChange={(navState) => {
-                setBrowserUrl(navState.url);
-                setBrowserCanGoBack(navState.canGoBack);
-                setBrowserCanGoForward(navState.canGoForward);
-                setBrowserLoading(navState.loading);
-              }}
-              style={{ flex: 1 }}
-              backgroundColor="#070a15"
-              startInLoadingState={true}
-              renderLoading={() => <View style={[StyleSheet.absoluteFill, { backgroundColor: '#070a15', justifyContent: 'center', alignItems: 'center' }]}><ActivityIndicator color="#8a78ff" /></View>}
-            />
-          </View>
+          {browserUrl ? (
+            <View style={{ flex: 1 }}>
+              <WebView
+                ref={browserRef}
+                source={{ uri: browserUrl }}
+                injectedJavaScript={lqdProviderScript}
+                onMessage={handleBrowserProviderMessage}
+                originWhitelist={["https://*", "http://127.0.0.1:*", "http://localhost:*"]}
+                mixedContentMode="never"
+                javaScriptCanOpenWindowsAutomatically={false}
+                allowFileAccess={false}
+                allowUniversalAccessFromFileURLs={false}
+                onError={(e) => setStatusModal({ visible: true, title: "Browser Error", message: `Failed to load page: ${e.nativeEvent.description || "Unknown error"}`, type: "error", hash: "" })}
+                onNavigationStateChange={(navState) => {
+                  setBrowserUrl(navState.url);
+                  setBrowserCanGoBack(navState.canGoBack);
+                  setBrowserCanGoForward(navState.canGoForward);
+                  setBrowserLoading(navState.loading);
+                }}
+                style={{ flex: 1 }}
+                backgroundColor="#070a15"
+                startInLoadingState={true}
+                renderLoading={() => <View style={[StyleSheet.absoluteFill, { backgroundColor: '#070a15', justifyContent: 'center', alignItems: 'center' }]}><ActivityIndicator color="#8a78ff" /></View>}
+              />
+            </View>
+          ) : (
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: scale(20), paddingBottom: scale(120) }}>
+              <Card title="Browser history" subtitle="Open a trusted dApp or website from your recent searches.">
+                <Button label="Search or enter URL" onPress={() => setBrowserVisible(true)} primary />
+                {browserHistory.length > 0 ? (
+                  <View style={{ marginTop: scale(16) }}>
+                    {browserHistory.map((item) => (
+                      <TouchableOpacity
+                        key={item}
+                        onPress={() => {
+                          setBrowserUrl(item);
+                          setBrowserInput("");
+                          rememberBrowserUrl(item);
+                        }}
+                        style={{ paddingVertical: scale(12), borderTopWidth: 1, borderTopColor: '#273152' }}
+                      >
+                        <Text numberOfLines={1} style={{ color: '#d8def8', fontSize: scale(14), fontWeight: '700' }}>{item}</Text>
+                      </TouchableOpacity>
+                    ))}
+                    <Button label="Clear History" onPress={() => setBrowserHistory([])} secondary />
+                  </View>
+                ) : (
+                  <Text style={{ color: '#9aa5ca', fontSize: scale(14), lineHeight: scale(22), marginTop: scale(16) }}>
+                    No browser history yet. Tap the search box above and enter a dApp link.
+                  </Text>
+                )}
+              </Card>
+            </ScrollView>
+          )}
 
           <Modal visible={browserVisible} transparent animationType="fade" onRequestClose={() => setBrowserVisible(false)}>
             <View style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.9)', justifyContent: 'center', alignItems: 'center', padding: scale(20) }}>
               <View style={{ width: '100%', maxWidth: scale(340) }}>
                 <Card title="Browser" subtitle="Enter a dApp or Website URL.">
                   <Field value={browserInput} onChangeText={setBrowserInput} placeholder="https://..." autoCapitalize="none" autoFocus />
+                  {browserHistory.length > 0 && (
+                    <View style={{ marginTop: scale(12), marginBottom: scale(4) }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: scale(8) }}>
+                        <Text style={{ color: '#9aa5ca', fontSize: scale(12), fontWeight: '800', letterSpacing: 0.6 }}>RECENT SEARCHES</Text>
+                        <TouchableOpacity onPress={() => setBrowserHistory([])}>
+                          <Text style={{ color: '#8a78ff', fontSize: scale(12), fontWeight: '700' }}>Clear</Text>
+                        </TouchableOpacity>
+                      </View>
+                      {browserHistory.map((item) => (
+                        <TouchableOpacity
+                          key={item}
+                          onPress={() => {
+                            setBrowserUrl(item);
+                            setBrowserInput("");
+                            rememberBrowserUrl(item);
+                            setBrowserVisible(false);
+                          }}
+                          style={{ paddingVertical: scale(9), borderTopWidth: 1, borderTopColor: '#273152' }}
+                        >
+                          <Text numberOfLines={1} style={{ color: '#d8def8', fontSize: scale(13) }}>{item}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
                   <View style={styles.inlineButtons}>
-                    <Button label="Go" onPress={() => { setBrowserUrl(coerceBrowserUrl(browserInput)); setBrowserVisible(false); }} primary />
-                    <Button label="Home" onPress={() => { setBrowserUrl(DEFAULT_BROWSER_URL); setBrowserVisible(false); }} secondary />
+                    <Button label="Go" onPress={() => openBrowserUrl(browserInput)} primary />
+                    <Button label="Home" onPress={() => { setBrowserUrl(""); setBrowserInput(""); setBrowserVisible(false); }} secondary />
                     <Button label="Cancel" onPress={() => setBrowserVisible(false)} secondary />
                   </View>
                 </Card>
@@ -5134,25 +7255,47 @@ function App() {
                   const rawVal = req.data?.value || "0";
                   displayVal = rawVal.startsWith("0x") ? BigInt(rawVal).toString() : rawVal;
                 } catch { displayVal = "0"; }
+                const requestTitle = req.type === 'connect'
+                  ? 'Connect Wallet'
+                  : req.type === 'transaction'
+                    ? 'Confirm Transaction'
+                    : 'Sign Message';
+                const requestIcon = req.type === 'connect' ? '🔗' : req.type === 'transaction' ? '🧾' : '✍️';
+                const requestDescription = req.type === 'connect'
+                  ? 'This dApp wants to view your wallet address and request transactions.'
+                  : req.type === 'transaction'
+                    ? 'This dApp wants to submit a transaction. Review every field before approving.'
+                    : 'This dApp wants your wallet signature. Only sign messages from sites you trust.';
+                const messagePreview = String(req.data?.message || req.data?.params?.[0] || "").slice(0, 160);
 
                 return (
                   <View style={{ width: '100%', maxWidth: scale(340), backgroundColor: '#161b33', borderRadius: scale(24), padding: scale(24), borderWidth: 1, borderColor: '#273152', shadowColor: "#000", shadowOffset: { width: 0, height: 20 }, shadowOpacity: 0.5, shadowRadius: 30, elevation: 20 }}>
                     <View style={{ alignItems: 'center', marginBottom: scale(20) }}>
                       <View style={{ width: scale(60), height: scale(60), borderRadius: scale(30), backgroundColor: '#1e293b', justifyContent: 'center', alignItems: 'center', marginBottom: scale(12) }}>
-                        <Text style={{ fontSize: scale(30) }}>{req.type === 'connect' ? '🔗' : '✍️'}</Text>
+                        <Text style={{ fontSize: scale(30) }}>{requestIcon}</Text>
                       </View>
-                      <Text style={{ color: '#fff', fontSize: scale(20), fontWeight: 'bold', textAlign: 'center' }}>{req.type === 'connect' ? 'Connect Wallet' : 'Sign Request'}</Text>
+                      <Text style={{ color: '#fff', fontSize: scale(20), fontWeight: 'bold', textAlign: 'center' }}>{requestTitle}</Text>
                       <Text style={{ color: '#8a78ff', fontSize: scale(13), marginTop: scale(4), textAlign: 'center' }}>{req.name || 'dApp'} ({req.origin})</Text>
                     </View>
 
                     <View style={{ padding: scale(16), backgroundColor: '#0f152a', borderRadius: scale(16), marginBottom: scale(24) }}>
                       <Text style={{ color: '#f4f7ff', fontSize: scale(14), lineHeight: scale(20), textAlign: 'center' }}>
-                        {req.type === 'connect' ? 'This dApp wants to view your wallet address and request transactions.' : 'This dApp is requesting a signature or transaction approval.'}
+                        {requestDescription}
                       </Text>
+                      <Text style={{ color: '#717da4', fontSize: scale(11), marginTop: scale(10), textAlign: 'center' }}>Method: {req.method || 'wallet_request'}</Text>
                       {req.type === 'transaction' && (
                         <View style={{ marginTop: scale(12), borderTopWidth: 1, borderTopColor: '#1b2342', paddingTop: scale(12) }}>
-                          <Text style={{ color: '#9aa5ca', fontSize: scale(12) }}>To: <Text style={{ color: '#8a78ff' }}>{shortAddress(req.data?.to || "")}</Text></Text>
-                          <Text style={{ color: '#9aa5ca', fontSize: scale(12), marginTop: scale(4) }}>Value: <Text style={{ color: '#fff', fontWeight: 'bold' }}>{formatUnits(displayVal, currentNetwork.decimals || 8, 4)} LQD</Text></Text>
+                          <Text style={{ color: '#9aa5ca', fontSize: scale(12) }}>To: <Text style={{ color: '#8a78ff' }}>{shortAddress(req.data?.to || req.data?.contract_address || req.data?.contractAddress || "")}</Text></Text>
+                          <Text style={{ color: '#9aa5ca', fontSize: scale(12), marginTop: scale(4) }}>Value: <Text style={{ color: '#fff', fontWeight: 'bold' }}>{formatUnits(displayVal, currentNetwork.decimals || 8, 4)} {currentNetwork.symbol}</Text></Text>
+                          {!!req.data?.data && req.data.data !== "0x" && (
+                            <Text style={{ color: '#9aa5ca', fontSize: scale(12), marginTop: scale(4) }}>Data: <Text style={{ color: '#f59e0b' }}>{String(req.data.data).slice(0, 34)}...</Text></Text>
+                          )}
+                        </View>
+                      )}
+                      {req.type === 'sign' && !!messagePreview && (
+                        <View style={{ marginTop: scale(12), borderTopWidth: 1, borderTopColor: '#1b2342', paddingTop: scale(12) }}>
+                          <Text style={{ color: '#9aa5ca', fontSize: scale(12) }}>Message:</Text>
+                          <Text style={{ color: '#f4f7ff', fontSize: scale(12), marginTop: scale(4) }}>{messagePreview}{messagePreview.length >= 160 ? "..." : ""}</Text>
                         </View>
                       )}
                     </View>
@@ -5178,12 +7321,81 @@ function App() {
           ))}
         </View>
       </KeyboardAvoidingView>
+
+      {/* ── Premium Toast Notification ────────────────────────────────────────── */}
+      {toast.visible && (
+        <View pointerEvents="none" style={{
+          position: 'absolute', bottom: scale(90), left: scale(16), right: scale(16),
+          zIndex: 9999999, alignItems: 'center',
+        }}>
+          <View style={{
+            flexDirection: 'row', alignItems: 'center',
+            paddingVertical: scale(13), paddingHorizontal: scale(18),
+            borderRadius: scale(16), maxWidth: scale(340),
+            backgroundColor: toast.type === 'success' ? '#0d2318'
+              : toast.type === 'error' ? '#1f0e0e'
+              : '#0e1528',
+            borderWidth: 1,
+            borderColor: toast.type === 'success' ? '#16a34a'
+              : toast.type === 'error' ? '#dc2626'
+              : '#334070',
+            shadowColor: toast.type === 'success' ? '#16a34a'
+              : toast.type === 'error' ? '#dc2626'
+              : '#8a78ff',
+            shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 16, elevation: 16,
+          }}>
+            {/* Icon dot */}
+            <View style={{
+              width: scale(8), height: scale(8), borderRadius: scale(4), marginRight: scale(12),
+              backgroundColor: toast.type === 'success' ? '#22c55e'
+                : toast.type === 'error' ? '#ef4444'
+                : '#8a78ff',
+            }} />
+            <Text style={{
+              flex: 1, fontSize: scale(13), fontWeight: '700', lineHeight: scale(18),
+              color: toast.type === 'success' ? '#bbf7d0'
+                : toast.type === 'error' ? '#fecaca'
+                : '#c7d2fe',
+              letterSpacing: 0.2,
+            }}>
+              {toast.message}
+            </Text>
+          </View>
+        </View>
+      )}
+
       {!!processingMessage && (
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(7, 10, 21, 0.98)', zIndex: 999999, justifyContent: 'center', alignItems: 'center', padding: scale(40) }]}>
-          <View style={{ backgroundColor: '#161b33', padding: scale(30), borderRadius: scale(24), alignItems: 'center', borderWidth: 1, borderColor: '#273152', shadowColor: "#000", shadowOffset: { width: 0, height: 20 }, shadowOpacity: 0.5, shadowRadius: 30, elevation: 20 }}>
-            <ActivityIndicator size="large" color="#8a78ff" />
-            <Text style={{ color: '#f4f7ff', marginTop: scale(20), fontSize: scale(18), fontWeight: '800', textAlign: 'center' }}>{processingMessage}</Text>
-            <Text style={{ color: '#9aa5ca', marginTop: scale(10), fontSize: scale(13), textAlign: 'center', lineHeight: scale(18) }}>Broadcasting to the LQD network. Please wait...</Text>
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(5, 8, 18, 0.96)', zIndex: 999999, justifyContent: 'center', alignItems: 'center', padding: scale(40) }]}>
+          <View style={{ backgroundColor: '#0f1428', padding: scale(36), borderRadius: scale(28), alignItems: 'center', borderWidth: 1, borderColor: '#1e2d52', shadowColor: '#8a78ff', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.25, shadowRadius: 40, elevation: 24, minWidth: scale(240) }}>
+
+            {/* Premium triple-ring spinner */}
+            <View style={{ width: scale(88), height: scale(88), justifyContent: 'center', alignItems: 'center', marginBottom: scale(28) }}>
+              {/* Outer static track */}
+              <View style={{ position: 'absolute', width: scale(88), height: scale(88), borderRadius: scale(44), borderWidth: 2, borderColor: '#1e2d52' }} />
+              {/* Outer spinning arc — purple */}
+              <Animated.View style={{ position: 'absolute', width: scale(88), height: scale(88), borderRadius: scale(44), borderWidth: 2.5, borderTopColor: '#8a78ff', borderRightColor: '#6d5ce6', borderBottomColor: 'transparent', borderLeftColor: 'transparent', transform: [{ rotate: _rotateDeg }] }} />
+              {/* Middle static track */}
+              <View style={{ position: 'absolute', width: scale(68), height: scale(68), borderRadius: scale(34), borderWidth: 1.5, borderColor: '#1a2545' }} />
+              {/* Middle spinning arc — indigo counter-clockwise */}
+              <Animated.View style={{ position: 'absolute', width: scale(68), height: scale(68), borderRadius: scale(34), borderWidth: 2, borderTopColor: 'transparent', borderRightColor: 'transparent', borderBottomColor: '#5b8af5', borderLeftColor: '#3b6fd4', transform: [{ rotate: _rotateDeg2 }] }} />
+              {/* Inner glowing core */}
+              <View style={{ width: scale(44), height: scale(44), borderRadius: scale(22), backgroundColor: '#141c38', borderWidth: 1, borderColor: '#2a3a64', justifyContent: 'center', alignItems: 'center' }}>
+                <View style={{ width: scale(16), height: scale(16), borderRadius: scale(8), backgroundColor: '#8a78ff', opacity: 0.9 }} />
+              </View>
+            </View>
+
+            {/* Message */}
+            <Text style={{ color: '#f0f4ff', fontSize: scale(16), fontWeight: '800', textAlign: 'center', letterSpacing: 0.3, marginBottom: scale(8) }}>
+              {processingMessage}
+            </Text>
+            <Text style={{ color: '#5a6a94', fontSize: scale(12), textAlign: 'center', lineHeight: scale(17), letterSpacing: 0.2 }}>
+              Please wait, do not close the app
+            </Text>
+
+            {/* Bottom shimmer bar */}
+            <View style={{ marginTop: scale(24), width: '70%', height: 2, borderRadius: 1, backgroundColor: '#1e2d52', overflow: 'hidden' }}>
+              <Animated.View style={{ height: '100%', width: '50%', borderRadius: 1, backgroundColor: '#8a78ff', opacity: 0.6, transform: [{ translateX: _spinAnim.interpolate({ inputRange: [0, 1], outputRange: [scale(-60), scale(120)] }) }] }} />
+            </View>
           </View>
         </View>
       )}
@@ -5290,24 +7502,30 @@ function App() {
 
             <View style={{ marginBottom: scale(30) }}>
               {/* Timeline Steps */}
-              {[
-                { label: "Initiated", desc: "Lock request sent to LQD network", status: "completed" },
-                { label: "Validation", desc: "Cross-chain nodes verifying transfer", status: "processing" },
-                { label: "Completion", desc: "Assets minting on target chain", status: "pending" }
-              ].map((step, i) => (
+              {(() => {
+                const status = String(activeBridgeTx?.status || "pending").toLowerCase();
+                const failed = status.includes("fail") || status.includes("error") || status.includes("reject");
+                const complete = status.includes("mint") || status.includes("unlock") || status.includes("complete") || status.includes("success") || status.includes("confirmed");
+                const processing = !failed && !complete && (status.includes("process") || status.includes("queue") || status.includes("lock") || status.includes("burn") || status.includes("pending"));
+                return [
+                  { label: "Initiated", desc: "Bridge request accepted", status: failed ? "completed" : "completed" },
+                  { label: "Validation", desc: "Relayer validating cross-chain state", status: failed ? "failed" : (complete ? "completed" : (processing ? "processing" : "pending")) },
+                  { label: "Completion", desc: "Assets finalizing on target chain", status: failed ? "failed" : (complete ? "completed" : "pending") }
+                ];
+              })().map((step, i) => (
                 <View key={i} style={{ flexDirection: 'row', marginBottom: scale(20) }}>
                   <View style={{ alignItems: 'center', marginRight: scale(16) }}>
                     <View style={{
                       width: scale(24),
                       height: scale(24),
                       borderRadius: 12,
-                      backgroundColor: step.status === 'completed' ? '#4ade80' : (step.status === 'processing' ? '#8a78ff' : '#0f152a'),
+                      backgroundColor: step.status === 'completed' ? '#4ade80' : (step.status === 'processing' ? '#8a78ff' : (step.status === 'failed' ? '#f87171' : '#0f152a')),
                       justifyContent: 'center',
                       alignItems: 'center',
                       borderWidth: 2,
                       borderColor: step.status === 'pending' ? '#273152' : 'transparent'
                     }}>
-                      {step.status === 'completed' ? <Text style={{ fontSize: scale(12) }}>✓</Text> : (step.status === 'processing' ? <ActivityIndicator size="small" color="#fff" /> : null)}
+                      {step.status === 'completed' ? <Text style={{ fontSize: scale(12) }}>✓</Text> : (step.status === 'processing' ? <ActivityIndicator size="small" color="#fff" /> : (step.status === 'failed' ? <Text style={{ color: "#fff", fontSize: scale(12) }}>!</Text> : null))}
                     </View>
                     {i < 2 && <View style={{ width: 2, height: scale(20), backgroundColor: '#273152', marginTop: 4 }} />}
                   </View>
@@ -6018,6 +8236,126 @@ const styles = StyleSheet.create({
   // MetaMask Style Extensions
   mmHome: {
     flex: 1,
+  },
+  walletNetworkPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(39, 49, 82, 0.55)',
+    paddingHorizontal: scale(16),
+    paddingVertical: scale(10),
+    borderRadius: scale(24),
+    borderWidth: 1,
+    borderColor: 'rgba(138, 120, 255, 0.35)',
+    marginBottom: scale(6),
+    alignSelf: 'center',
+  },
+  walletHealthDot: {
+    width: scale(8),
+    height: scale(8),
+    borderRadius: scale(4),
+    marginRight: scale(10),
+  },
+  walletHealthText: {
+    color: '#8792bb',
+    fontSize: scale(11),
+    textAlign: 'center',
+    marginBottom: scale(14),
+    fontWeight: '700',
+  },
+  walletRefreshMeta: {
+    color: '#657096',
+    fontSize: scale(11),
+    marginTop: scale(6),
+    fontWeight: '700',
+  },
+  walletWarningText: {
+    color: '#f59e0b',
+    fontSize: scale(10),
+    marginTop: scale(4),
+    lineHeight: scale(14),
+    fontWeight: '700',
+  },
+  walletTokenBadge: {
+    color: '#91f7bf',
+    fontSize: scale(11),
+    fontWeight: '800',
+    backgroundColor: 'rgba(16,185,129,0.12)',
+    borderRadius: scale(10),
+    paddingHorizontal: scale(8),
+    paddingVertical: scale(4),
+    overflow: 'hidden',
+  },
+  walletTokenMeta: {
+    color: '#5f6a91',
+    fontSize: scale(10),
+    marginTop: scale(3),
+    fontWeight: '700',
+  },
+  walletEmptyCard: {
+    borderWidth: 1,
+    borderColor: '#273152',
+    backgroundColor: 'rgba(27,35,66,0.45)',
+    borderRadius: scale(18),
+    padding: scale(16),
+    marginTop: scale(12),
+    gap: scale(10),
+  },
+  walletEmptyTitle: {
+    color: '#f4f7ff',
+    fontSize: scale(15),
+    fontWeight: '800',
+  },
+  walletEmptyBody: {
+    color: '#8f9bc1',
+    fontSize: scale(12),
+    lineHeight: scale(18),
+  },
+  lpTierList: {
+    gap: scale(10),
+  },
+  lpTierRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: scale(10),
+    backgroundColor: 'rgba(15,21,42,0.68)',
+    borderWidth: 1,
+    borderRadius: scale(16),
+    padding: scale(12),
+  },
+  lpTierDot: {
+    width: scale(9),
+    height: scale(9),
+    borderRadius: scale(5),
+    marginTop: scale(4),
+  },
+  lpTierKicker: {
+    color: '#9aa5ca',
+    fontSize: scale(10),
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  lpTierPairs: {
+    color: '#f4f7ff',
+    fontSize: scale(13),
+    fontWeight: '800',
+    marginTop: scale(3),
+  },
+  lpTierDetail: {
+    color: '#8f9bc1',
+    fontSize: scale(11),
+    lineHeight: scale(16),
+    marginTop: scale(3),
+  },
+  lpTierWeight: {
+    fontSize: scale(11),
+    fontWeight: '900',
+    paddingHorizontal: scale(8),
+    paddingVertical: scale(4),
+    backgroundColor: 'rgba(7,10,21,0.62)',
+    borderRadius: scale(999),
+    overflow: 'hidden',
   },
   mmAccountCard: {
     backgroundColor: '#1b2342',
