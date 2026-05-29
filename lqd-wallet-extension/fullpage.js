@@ -790,7 +790,7 @@ function renderPoolCards() {
   const used = new Set();
   const renderRealCard = (card, idx, extraClass = "") => {
     const active = String(card.address).toLowerCase() === selected ? " active" : "";
-    return `<button class="lp-pool-card${active} ${extraClass}" data-pool-idx="${idx}" type="button">
+    return `<div class="lp-pool-card${active} ${extraClass}" data-pool-idx="${idx}" role="button" tabindex="0">
       <div>
         <div class="lp-pool-pair">${escapeHtml(card.pair)}</div>
         <div class="lp-pool-meta">${escapeHtml(card.tierLabel)} · Weight ${escapeHtml(card.weightLabel)} · ${escapeHtml(shortAddr(card.address))}</div>
@@ -801,7 +801,12 @@ function renderPoolCards() {
         <span class="lp-pool-small">${escapeHtml(formatPercentFromParts(card.dex.lpBalance, card.dex.totalLP))} share</span>
         <span class="lp-pool-small">${escapeHtml(formatUnlockTime(card.dex.lockUntil))}</span>
       </div>
-    </button>`;
+      <div class="lp-pool-actions">
+        <button class="btn btn-primary btn-xs" data-pool-action="lock" data-pool-idx="${idx}" type="button">Stake / Lock</button>
+        <button class="btn btn-secondary btn-xs" data-pool-action="register" data-pool-idx="${idx}" type="button">Register</button>
+        <button class="btn btn-danger btn-xs" data-pool-action="unlock" data-pool-idx="${idx}" type="button">Unstake / Unlock</button>
+      </div>
+    </div>`;
   };
   const canonicalCards = LP_CANONICAL_POOL_SLOTS.map((slot) => {
     const idx = cards.findIndex(card => card.slotId === slot.id && !used.has(String(card.address).toLowerCase()));
@@ -832,7 +837,24 @@ function renderPoolCards() {
     ${communityCards || '<div class="notice">No community pools yet. Approved new pools will appear here automatically.</div>'}
   `;
   list.querySelectorAll("[data-pool-idx]").forEach((btn) => {
+    if (btn.dataset.poolAction) return;
     btn.addEventListener("click", () => selectPoolCard(cards[Number(btn.dataset.poolIdx)]));
+    btn.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectPoolCard(cards[Number(btn.dataset.poolIdx)]);
+      }
+    });
+  });
+  list.querySelectorAll("[data-pool-action]").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const card = cards[Number(btn.dataset.poolIdx)];
+      if (btn.dataset.poolAction === "lock") lockDexLPForValidation(card, btn);
+      if (btn.dataset.poolAction === "register") registerDexValidatorFromLockedLP(card, btn);
+      if (btn.dataset.poolAction === "unlock") unlockDexLPForValidation(card, btn);
+    });
   });
 }
 
@@ -942,8 +964,10 @@ async function loadLiquidityDashboard() {
   }
 }
 
-async function lockDexLPForValidation() {
-  const form = getLPForm();
+async function lockDexLPForValidation(card = null, button = $("lpLockBtn")) {
+  if (card?.form) selectPoolCard(card);
+  const form = card?.form || getLPForm();
+  const storage = card?.storage || lpDashboard.storage || {};
   const amount = $("lpLockAmount")?.value?.trim() || "";
   const days = parseInt($("lpLockDays")?.value, 10) || 365;
   if (!form.pool || !form.tokenA || !form.tokenB || !amount) {
@@ -951,10 +975,10 @@ async function lockDexLPForValidation() {
     return;
   }
   try {
-    $("lpLockBtn").disabled = true;
+    if (button) button.disabled = true;
     const rawLP = parseHuman(amount, 8);
     const durationSecs = String(Math.max(1, days) * 86400);
-    const useFactory = isFactoryPoolForm(form);
+    const useFactory = isFactoryPoolForm(form, storage);
     const args = useFactory ? [form.tokenA, form.tokenB, rawLP, durationSecs] : [rawLP, durationSecs];
     const res = await contractTx(form.pool, "LockLPForValidation", args);
     const hash = res.tx_hash || res.TxHash || res.hash || "";
@@ -968,19 +992,21 @@ async function lockDexLPForValidation() {
     showResult("lpLockResult", "✗ " + e.message, true);
     toast("LP lock failed: " + e.message, "error");
   } finally {
-    $("lpLockBtn").disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
-async function unlockDexLPForValidation() {
-  const form = getLPForm();
+async function unlockDexLPForValidation(card = null, button = $("lpUnlockBtn")) {
+  if (card?.form) selectPoolCard(card);
+  const form = card?.form || getLPForm();
+  const storage = card?.storage || lpDashboard.storage || {};
   if (!form.pool || !form.tokenA || !form.tokenB) {
     toast("Select a pool first", "error");
     return;
   }
   try {
-    $("lpUnlockBtn").disabled = true;
-    const useFactory = isFactoryPoolForm(form);
+    if (button) button.disabled = true;
+    const useFactory = isFactoryPoolForm(form, storage);
     const args = useFactory ? [form.tokenA, form.tokenB] : [];
     const res = await contractTx(form.pool, "UnlockValidatorLP", args);
     const hash = res.tx_hash || res.TxHash || res.hash || "";
@@ -993,19 +1019,21 @@ async function unlockDexLPForValidation() {
     showResult("lpLockResult", "✗ " + e.message, true);
     toast("LP unlock failed: " + e.message, "error");
   } finally {
-    $("lpUnlockBtn").disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
-async function registerDexValidatorFromLockedLP() {
-  const form = getLPForm();
-  const pairAddress = getPairAddressForLPAction(form);
+async function registerDexValidatorFromLockedLP(card = null, button = $("lpRegisterValidatorBtn")) {
+  if (card?.form) selectPoolCard(card);
+  const form = card?.form || getLPForm();
+  const storage = card?.storage || lpDashboard.storage || {};
+  const pairAddress = getPairAddressForLPAction(form, storage);
   if (!pairAddress) {
     toast("Select a configured pool first", "error");
     return;
   }
   try {
-    $("lpRegisterValidatorBtn").disabled = true;
+    if (button) button.disabled = true;
     const res = await nodePost("/validator/register-dex", {
       address: state.address,
       pair_address: pairAddress,
@@ -1017,7 +1045,7 @@ async function registerDexValidatorFromLockedLP() {
     showResult("lpLockResult", "✗ " + e.message, true);
     toast("Validator registration failed: " + e.message, "error");
   } finally {
-    $("lpRegisterValidatorBtn").disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -1091,9 +1119,9 @@ async function syncPoolRegistry() {
 $("lpRefreshBtn")?.addEventListener("click", loadLiquidityDashboard);
 $("lpLoadBtn")?.addEventListener("click", loadLiquidityDashboard);
 $("lpSaveBtn")?.addEventListener("click", () => { saveLPSettings(); loadLiquidityDashboard(); });
-$("lpLockBtn")?.addEventListener("click", lockDexLPForValidation);
-$("lpUnlockBtn")?.addEventListener("click", unlockDexLPForValidation);
-$("lpRegisterValidatorBtn")?.addEventListener("click", registerDexValidatorFromLockedLP);
+$("lpLockBtn")?.addEventListener("click", () => lockDexLPForValidation());
+$("lpUnlockBtn")?.addEventListener("click", () => unlockDexLPForValidation());
+$("lpRegisterValidatorBtn")?.addEventListener("click", () => registerDexValidatorFromLockedLP());
 $("lpClaimBtn")?.addEventListener("click", claimOrSyncRewards);
 $("lpSyncPoolsBtn")?.addEventListener("click", syncPoolRegistry);
 $("lpSyncPoolsTopBtn")?.addEventListener("click", syncPoolRegistry);
