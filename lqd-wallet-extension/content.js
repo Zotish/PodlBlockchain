@@ -9,9 +9,26 @@ const ext = typeof chrome !== "undefined" ? chrome : browser;
 
 let port = null;
 
+function postProviderError(id, error) {
+  window.postMessage({
+    __LQD_EXT__: true,
+    type: "LQD_RESPONSE",
+    id,
+    error,
+  }, "*");
+}
+
 function ensurePort() {
   if (port) return port;
-  port = ext.runtime.connect({ name: "lqd" });
+  try {
+    if (!ext?.runtime?.id) {
+      throw new Error("LQD extension context is not active. Reload the page after updating or reloading the extension.");
+    }
+    port = ext.runtime.connect({ name: "lqd" });
+  } catch (error) {
+    port = null;
+    throw new Error(error?.message || "LQD extension context is not active. Reload the page and try again.");
+  }
   port.onDisconnect.addListener(() => {
     port = null;
   });
@@ -31,6 +48,10 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
   if (!msg || msg.__LQD_EXT__ !== true) return;
   if (msg.type !== "LQD_REQUEST") return;
-  const p = ensurePort();
-  p.postMessage({ type: "LQD_REQUEST", payload: msg.payload });
+  try {
+    const p = ensurePort();
+    p.postMessage({ type: "LQD_REQUEST", payload: msg.payload });
+  } catch (error) {
+    postProviderError(msg.payload?.id, error?.message || "LQD extension context is not active. Reload the page and try again.");
+  }
 });
