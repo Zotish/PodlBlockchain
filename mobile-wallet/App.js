@@ -322,7 +322,16 @@ const TABS = [
   { id: "bridge", label: "Bridge", icon: "🌉" },
   { id: "browser", label: "Browser", icon: "🌐" },
   { id: "contracts", label: "Contract", icon: "📝" },
+  { id: "liquidity", label: "Liquidity", icon: "💧" },
   { id: "settings", label: "Settings", icon: "⚙️" },
+];
+
+const LP_CANONICAL_POOL_SLOTS = [
+  { id: "lqd-usdt", token: "USDT", label: "LQD / USDT", tier: "Tier 1", weight: "1.25x" },
+  { id: "lqd-usdc", token: "USDC", label: "LQD / USDC", tier: "Tier 1", weight: "1.25x" },
+  { id: "lqd-eth", token: "ETH", label: "LQD / ETH", tier: "Tier 2", weight: "1.00x" },
+  { id: "lqd-bnb", token: "BNB", label: "LQD / BNB", tier: "Tier 2", weight: "0.90x" },
+  { id: "lqd-btc", token: "BTC", label: "LQD / BTC", tier: "Tier 2", weight: "1.00x" },
 ];
 
 const ADVANCED_TABS = [
@@ -542,6 +551,128 @@ function LPRewardTierGuide() {
       </View>
     </Card>
   );
+}
+
+function safeBig(raw) {
+  try {
+    if (raw === null || raw === undefined || raw === "") return 0n;
+    if (typeof raw === "number") return BigInt(Math.trunc(raw));
+    return BigInt(String(raw));
+  } catch {
+    return 0n;
+  }
+}
+
+function normalizeContractStorage(data) {
+  return data?.State?.storage || data?.State || data?.storage || data || {};
+}
+
+function findStorageValue(storage, key, fallback = "") {
+  if (!storage || !key) return fallback;
+  if (storage[key] !== undefined) return storage[key];
+  const lower = String(key).toLowerCase();
+  const found = Object.keys(storage).find((item) => String(item).toLowerCase() === lower);
+  return found ? storage[found] : fallback;
+}
+
+function normalizePoolMap(poolsPayload) {
+  const raw = poolsPayload?.pools || poolsPayload?.Pools || {};
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+
+function tokenLabel(value) {
+  const token = String(value || "").trim();
+  if (!token) return "Token";
+  if (token.toLowerCase() === "lqd") return "LQD";
+  if (token.startsWith("0x")) return shortAddress(token);
+  return token.toUpperCase();
+}
+
+function normalizePoolAsset(value) {
+  const token = String(value || "").trim();
+  if (!token) return "";
+  if (token.startsWith("0x")) return token.toLowerCase();
+  return token.toUpperCase();
+}
+
+function canonicalSlotForForm(form) {
+  const a = normalizePoolAsset(form?.tokenA);
+  const b = normalizePoolAsset(form?.tokenB);
+  if (a !== "LQD" && b !== "LQD") return null;
+  const other = a === "LQD" ? b : a;
+  return LP_CANONICAL_POOL_SLOTS.find((slot) => slot.token === other) || null;
+}
+
+function inferPoolForm(address, storage = {}, saved = {}) {
+  const tokenA = saved.tokenA || findStorageValue(storage, "token0", findStorageValue(storage, "tokenA", "lqd")) || "lqd";
+  const tokenB = saved.tokenB || findStorageValue(storage, "token1", findStorageValue(storage, "tokenB", "")) || "";
+  return {
+    pool: address,
+    tokenA,
+    tokenB,
+    decimalsA: parseInt(saved.decimalsA || findStorageValue(storage, "decimals0", findStorageValue(storage, "decimalsA", "8")), 10) || 8,
+    decimalsB: parseInt(saved.decimalsB || findStorageValue(storage, "decimals1", findStorageValue(storage, "decimalsB", "8")), 10) || 8,
+  };
+}
+
+function resolveDexStorage(storage, form, ownerAddress) {
+  const normA = String(form?.tokenA || "lqd").toLowerCase();
+  const token0 = String(findStorageValue(storage, "token0", findStorageValue(storage, "tokenA", "")) || "").toLowerCase();
+  const reserve0 = findStorageValue(storage, "reserve0", findStorageValue(storage, "reserveA", "0"));
+  const reserve1 = findStorageValue(storage, "reserve1", findStorageValue(storage, "reserveB", "0"));
+  const owner = String(ownerAddress || "").toLowerCase();
+  return {
+    reserveA: token0 && normA !== token0 ? reserve1 : reserve0,
+    reserveB: token0 && normA !== token0 ? reserve0 : reserve1,
+    totalLP: findStorageValue(storage, "totalLP", "0"),
+    lpBalance: owner ? findStorageValue(storage, `lp:${owner}`, "0") : "0",
+    lockedLP: owner ? findStorageValue(storage, `vlp:${owner}`, "0") : "0",
+    lockUntil: owner ? findStorageValue(storage, `vlu:${owner}`, "0") : "0",
+  };
+}
+
+function sortedPairKey(tokenA, tokenB) {
+  const a = String(tokenA || "").trim().toLowerCase();
+  const b = String(tokenB || "").trim().toLowerCase();
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
+function getPairAddressForLPAction(form, storage = {}) {
+  const key = sortedPairKey(form?.tokenA, form?.tokenB);
+  return findStorageValue(storage, `pairAddr:${key}`, "") || form?.pool || "";
+}
+
+function isFactoryPoolForm(form, storage = {}) {
+  const key = sortedPairKey(form?.tokenA, form?.tokenB);
+  return !!findStorageValue(storage, `pairAddr:${key}`, "");
+}
+
+function formatPercentFromParts(numerator, denominator, decimals = 2) {
+  const n = safeBig(numerator);
+  const d = safeBig(denominator);
+  if (d <= 0n) return "0.00%";
+  const scaleValue = 10n ** BigInt(decimals);
+  const value = (n * 100n * scaleValue) / d;
+  const whole = value / scaleValue;
+  const frac = (value % scaleValue).toString().padStart(decimals, "0");
+  return `${whole}.${frac}%`;
+}
+
+function formatUnlockTime(raw) {
+  const ts = Number(raw || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return "Not locked";
+  const remainingMs = (ts * 1000) - Date.now();
+  const date = new Date(ts * 1000).toLocaleString();
+  if (remainingMs <= 0) return `Ready · ${date}`;
+  return `${Math.ceil(remainingMs / 86400000)}d · ${date}`;
+}
+
+function formatLockDays(raw) {
+  const ts = Number(raw || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return "365 default";
+  const remainingMs = (ts * 1000) - Date.now();
+  if (remainingMs <= 0) return "Ready";
+  return `${Math.ceil(remainingMs / 86400000)} days left`;
 }
 
 const TokenRow = ({ item, onSend, onRefresh, onRemove }) => (
@@ -888,6 +1019,17 @@ function App() {
 
   const [nativeBalance, setNativeBalance] = useState("0");
   const [factoryAddress, setFactoryAddress] = useState("");
+  const [liquidityDashboard, setLiquidityDashboard] = useState({
+    protocol: null,
+    providers: [],
+    latestRewards: null,
+    recentRewards: [],
+    poolCards: [],
+  });
+  const [liquidityLoading, setLiquidityLoading] = useState(false);
+  const [liquidityAction, setLiquidityAction] = useState("");
+  const [liquidityPoolInputs, setLiquidityPoolInputs] = useState({});
+  const [liquidityPoolResults, setLiquidityPoolResults] = useState({});
   const [recentTxs, setRecentTxs] = useState([]);
   const [activity, setActivity] = useState([]);
   const [watchlist, setWatchlist] = useState([]);
@@ -1410,6 +1552,217 @@ function App() {
       });
     return () => { alive = false; };
   }, [selectedTokenForSend, tokenSendForm.to, tokenSendForm.amount, activeNetworkId, activeAddress, nodeUrl, wallet?.address]);
+
+  function liquidityInputKey(card) {
+    return card?.address ? String(card.address).toLowerCase() : `slot:${card?.slotId || card?.label || "unknown"}`;
+  }
+
+  function updateLiquidityPoolInput(card, patch) {
+    const key = liquidityInputKey(card);
+    setLiquidityPoolInputs((prev) => ({
+      ...prev,
+      [key]: { lockAmount: "", lockDays: "365", ...(prev[key] || {}), ...patch },
+    }));
+  }
+
+  function setLiquidityPoolResult(card, message, type = "info") {
+    const key = liquidityInputKey(card);
+    setLiquidityPoolResults((prev) => ({ ...prev, [key]: { message, type } }));
+  }
+
+  async function buildMobilePoolCards(poolsPayload) {
+    const poolMap = normalizePoolMap(poolsPayload);
+    const entries = Object.keys(poolMap).filter(Boolean).slice(0, 40);
+    const cards = [];
+    for (const address of entries) {
+      let storage = {};
+      try {
+        storage = normalizeContractStorage(await nodeContractStorage(nodeUrl, address));
+      } catch {
+        storage = {};
+      }
+      const form = inferPoolForm(address, storage);
+      const slot = canonicalSlotForForm(form);
+      const dex = resolveDexStorage(storage, form, activeAddress || wallet?.address);
+      cards.push({
+        address,
+        form,
+        storage,
+        dex,
+        registryLiquidity: poolMap[address] || poolMap[String(address).toLowerCase()] || "0",
+        pair: `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
+        slotId: slot?.id || "",
+        tierLabel: slot?.tier || "Tier 3",
+        weightLabel: slot?.weight || "0.35x",
+      });
+    }
+    return cards;
+  }
+
+  async function loadLiquidityDashboard() {
+    if (!wallet?.address) return;
+    setLiquidityLoading(true);
+    try {
+      const [protocol, providers, latestRewards, recentRewards, poolsPayload] = await Promise.all([
+        getJson(`${normalizeUrl(nodeUrl)}/liquidity/info?address=${encodeURIComponent(wallet.address)}`).catch(() => null),
+        getJson(`${normalizeUrl(nodeUrl)}/liquidity/all`).catch(() => []),
+        getJson(`${normalizeUrl(nodeUrl)}/rewards/latest?address=${encodeURIComponent(wallet.address)}`).catch(() => null),
+        getJson(`${normalizeUrl(nodeUrl)}/rewards/recent?limit=10`).catch(() => []),
+        nodeLiquidityPools(nodeUrl).catch(() => null),
+      ]);
+      const poolCards = await buildMobilePoolCards(poolsPayload || {});
+      setLiquidityDashboard({
+        protocol,
+        providers: Array.isArray(providers) ? providers : [],
+        latestRewards,
+        recentRewards: Array.isArray(recentRewards) ? recentRewards : [],
+        poolCards,
+      });
+    } catch (error) {
+      showToast(error?.message || "Liquidity dashboard failed", "error");
+    } finally {
+      setLiquidityLoading(false);
+    }
+  }
+
+  async function syncLiquidityPools() {
+    setLiquidityAction("sync");
+    try {
+      await postJson(`${normalizeUrl(nodeUrl)}/liquidity/pools/sync`, {});
+      await loadLiquidityDashboard();
+      showToast("Liquidity pools synced", "success");
+    } catch (error) {
+      showToast(error?.message || "Pool sync failed", "error");
+    } finally {
+      setLiquidityAction("");
+    }
+  }
+
+  async function claimLiquidityRewards() {
+    if (!wallet?.address) return showToast("Unlock wallet first", "error");
+    setLiquidityAction("claim");
+    setProcessingMessage("Claiming LP rewards...");
+    try {
+      const res = await postJson(`${normalizeUrl(nodeUrl)}/liquidity/claim`, { address: wallet.address });
+      showToast("LP reward claim submitted", "success");
+      rememberActivity({
+        type: "lp_claim",
+        TxHash: res?.tx_hash || res?.hash || "",
+        From: wallet.address,
+        Status: "pending",
+        Timestamp: Math.floor(Date.now() / 1000),
+      });
+      await loadLiquidityDashboard();
+      setTimeout(() => refreshWalletSnapshot(), 2500);
+    } catch (error) {
+      showToast(error?.message || "Claim failed", "error");
+    } finally {
+      setLiquidityAction("");
+      setProcessingMessage("");
+    }
+  }
+
+  async function submitPoolLockAction(card) {
+    if (!wallet?.address || !wallet?.privateKey) return showToast("Unlock wallet first", "error");
+    if (!card?.address) return showToast("Configure this pool first", "error");
+    const input = liquidityPoolInputs[liquidityInputKey(card)] || {};
+    const amount = String(input.lockAmount || "").trim();
+    const days = Math.max(1, parseInt(input.lockDays || "365", 10) || 365);
+    if (!amount) return showToast("Enter LP amount", "error");
+    setLiquidityAction(`lock:${liquidityInputKey(card)}`);
+    setProcessingMessage("Broadcasting LP lock transaction...");
+    try {
+      const rawLP = parseUnits(amount, 8);
+      const durationSecs = String(days * 86400);
+      const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
+      const baseFeeValue = baseFee?.base_fee || baseFee?.BaseFee || baseFee?.baseFee || baseFee || 10;
+      const useFactory = isFactoryPoolForm(card.form, card.storage);
+      const args = useFactory ? [card.form.tokenA, card.form.tokenB, rawLP, durationSecs] : [rawLP, durationSecs];
+      const res = await walletContractTx(walletUrl, {
+        address: wallet.address,
+        contract_address: card.form.pool,
+        function: "LockLPForValidation",
+        args,
+        value: "0",
+        gas: 500000,
+        gas_price: Number(baseFeeValue || 10),
+        private_key: wallet.privateKey,
+      });
+      const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
+      setLiquidityPoolResult(card, `LP lock submitted${hash ? `: ${shortAddress(hash, 8, 6)}` : ""}`, "success");
+      updateLiquidityPoolInput(card, { lockAmount: "" });
+      rememberActivity({ type: "lp_lock", TxHash: hash, From: wallet.address, Contract: card.address, Value: rawLP, Timestamp: Math.floor(Date.now() / 1000) });
+      showToast("LP lock submitted", "success");
+      setTimeout(() => loadLiquidityDashboard(), 3000);
+    } catch (error) {
+      setLiquidityPoolResult(card, error?.message || "LP lock failed", "error");
+      showToast(error?.message || "LP lock failed", "error");
+    } finally {
+      setLiquidityAction("");
+      setProcessingMessage("");
+    }
+  }
+
+  async function submitPoolUnlockAction(card) {
+    if (!wallet?.address || !wallet?.privateKey) return showToast("Unlock wallet first", "error");
+    if (!card?.address) return showToast("Configure this pool first", "error");
+    setLiquidityAction(`unlock:${liquidityInputKey(card)}`);
+    setProcessingMessage("Broadcasting LP unlock transaction...");
+    try {
+      const baseFee = await nodeBaseFee(nodeUrl).catch(() => 10);
+      const baseFeeValue = baseFee?.base_fee || baseFee?.BaseFee || baseFee?.baseFee || baseFee || 10;
+      const useFactory = isFactoryPoolForm(card.form, card.storage);
+      const args = useFactory ? [card.form.tokenA, card.form.tokenB] : [];
+      const res = await walletContractTx(walletUrl, {
+        address: wallet.address,
+        contract_address: card.form.pool,
+        function: "UnlockValidatorLP",
+        args,
+        value: "0",
+        gas: 500000,
+        gas_price: Number(baseFeeValue || 10),
+        private_key: wallet.privateKey,
+      });
+      const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
+      setLiquidityPoolResult(card, `LP unlock submitted${hash ? `: ${shortAddress(hash, 8, 6)}` : ""}`, "success");
+      rememberActivity({ type: "lp_unlock", TxHash: hash, From: wallet.address, Contract: card.address, Timestamp: Math.floor(Date.now() / 1000) });
+      showToast("LP unlock submitted", "success");
+      setTimeout(() => loadLiquidityDashboard(), 3000);
+    } catch (error) {
+      setLiquidityPoolResult(card, error?.message || "LP unlock failed", "error");
+      showToast(error?.message || "LP unlock failed", "error");
+    } finally {
+      setLiquidityAction("");
+      setProcessingMessage("");
+    }
+  }
+
+  async function registerPoolValidator(card) {
+    if (!wallet?.address) return showToast("Unlock wallet first", "error");
+    if (!card?.address) return showToast("Configure this pool first", "error");
+    const pairAddress = getPairAddressForLPAction(card.form, card.storage);
+    if (!pairAddress) return showToast("Pool pair address not found", "error");
+    setLiquidityAction(`register:${liquidityInputKey(card)}`);
+    try {
+      const res = await postJson(`${normalizeUrl(nodeUrl)}/validator/register-dex`, {
+        address: wallet.address,
+        pair_address: pairAddress,
+      });
+      setLiquidityPoolResult(card, `Validator registration submitted: ${JSON.stringify(res)}`, "success");
+      showToast("Validator registration submitted", "success");
+      await loadLiquidityDashboard();
+    } catch (error) {
+      setLiquidityPoolResult(card, error?.message || "Validator registration failed", "error");
+      showToast(error?.message || "Validator registration failed", "error");
+    } finally {
+      setLiquidityAction("");
+    }
+  }
+
+  useEffect(() => {
+    if (tab !== "liquidity" || !wallet?.address) return;
+    loadLiquidityDashboard();
+  }, [tab, wallet?.address, activeAddress, nodeUrl]);
 
 
   const currentBridgeFamily = String(currentBridgeChain?.family || "evm").toLowerCase();
@@ -5964,9 +6317,13 @@ function App() {
                 <Text style={styles.menuItemIcon}>🖼️</Text>
                 <Text style={styles.menuItemText}>Import NFT</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => { setIsMainMenuVisible(false); autoDiscoverTokensAction(); }} style={[styles.menuItem, { borderBottomWidth: 0 }]}>
+              <TouchableOpacity onPress={() => { setIsMainMenuVisible(false); autoDiscoverTokensAction(); }} style={styles.menuItem}>
                 <Text style={styles.menuItemIcon}>🔄</Text>
                 <Text style={styles.menuItemText}>Auto Detect</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => { setIsMainMenuVisible(false); setTab("liquidity"); }} style={[styles.menuItem, { borderBottomWidth: 0 }]}>
+                <Text style={styles.menuItemIcon}>💧</Text>
+                <Text style={styles.menuItemText}>Liquidity</Text>
               </TouchableOpacity>
             </View>
           </TouchableOpacity>
@@ -7034,6 +7391,118 @@ function App() {
 
 
 
+          {tab === "liquidity" && (
+            <View style={styles.mmHome}>
+              <View style={[styles.mmAccountCard, { backgroundColor: '#1e293b', marginBottom: scale(18) }]}>
+                <Text style={{ color: '#f4f7ff', fontSize: scale(20), fontWeight: '800', marginBottom: scale(6) }}>Liquidity</Text>
+                <Text style={{ color: '#94a3b8', fontSize: scale(13), textAlign: 'center' }}>
+                  Track DEX LP positions, lock LP for validation, register validator eligibility, and claim rewards.
+                </Text>
+                <View style={[styles.inlineButtons, { marginTop: scale(14) }]}>
+                  <Button label={liquidityLoading ? "Loading…" : "Refresh"} onPress={loadLiquidityDashboard} disabled={liquidityLoading} />
+                  <Button label={liquidityAction === "sync" ? "Syncing…" : "Sync Pools"} onPress={syncLiquidityPools} disabled={!!liquidityAction} secondary />
+                </View>
+              </View>
+
+              <LPRewardTierGuide />
+
+              <Card title="Reward Dashboard" subtitle="LP rewards are weighted by approved pool tier and your locked LP position.">
+                <View style={styles.statsGrid}>
+                  <Stat label="Pending Rewards" value={`${formatUnits(liquidityDashboard.protocol?.pending_reward || liquidityDashboard.latestRewards?.pending_reward || "0", 8, 4)} LQD`} />
+                  <Stat label="Total Earned" value={`${formatUnits(liquidityDashboard.protocol?.total_reward || liquidityDashboard.latestRewards?.total_reward || "0", 8, 4)} LQD`} />
+                  <Stat label="APR/APY" value={liquidityDashboard.latestRewards?.apr ? `${liquidityDashboard.latestRewards.apr}%` : "Dynamic"} subvalue="Pool-weighted" />
+                </View>
+                <Button label={liquidityAction === "claim" ? "Claiming…" : "Claim Rewards"} onPress={claimLiquidityRewards} disabled={!!liquidityAction} />
+              </Card>
+
+              <Card title="Multi-pool LP Positions" subtitle="Add/remove liquidity in DEX. This section locks LP, unlocks LP, and registers validators against each pool.">
+                {liquidityLoading ? (
+                  <View style={{ padding: scale(24), alignItems: 'center' }}>
+                    <ActivityIndicator color="#8a78ff" />
+                    <Text style={{ color: '#94a3b8', marginTop: scale(10) }}>Loading liquidity pools...</Text>
+                  </View>
+                ) : (() => {
+                  const used = new Set();
+                  const allCards = liquidityDashboard.poolCards || [];
+                  const findSlotCard = (slot) => {
+                    const idx = allCards.findIndex((card) => card.slotId === slot.id && !used.has(String(card.address).toLowerCase()));
+                    if (idx === -1) return null;
+                    used.add(String(allCards[idx].address).toLowerCase());
+                    return allCards[idx];
+                  };
+                  const communityCards = allCards.filter((card) => !card.slotId && !used.has(String(card.address).toLowerCase()));
+                  const renderPoolCard = (slot, card) => {
+                    const configured = !!card?.address;
+                    const view = card || {
+                      slotId: slot.id,
+                      pair: slot.label,
+                      tierLabel: slot.tier,
+                      weightLabel: slot.weight,
+                      dex: { lpBalance: "0", lockedLP: "0", totalLP: "0", lockUntil: "0" },
+                    };
+                    const key = liquidityInputKey(view);
+                    const input = liquidityPoolInputs[key] || { lockAmount: "", lockDays: "365" };
+                    const result = liquidityPoolResults[key];
+                    const actionKey = liquidityAction.split(":")[0];
+                    const isActiveAction = liquidityAction.endsWith(key);
+                    return (
+                      <View key={key} style={{ backgroundColor: configured ? '#151b31' : '#11172a', borderWidth: 1, borderColor: configured ? '#273152' : '#27315288', borderRadius: scale(18), padding: scale(14), marginBottom: scale(12), opacity: configured ? 1 : 0.72 }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: scale(10) }}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ color: '#f4f7ff', fontSize: scale(17), fontWeight: '900' }}>{view.pair || slot.label}</Text>
+                            <Text style={{ color: '#94a3b8', fontSize: scale(11), marginTop: scale(3) }}>
+                              {view.tierLabel || slot.tier} · Weight {view.weightLabel || slot.weight}{configured ? ` · ${shortAddress(view.address)}` : ' · Configure in DEX/admin first'}
+                            </Text>
+                          </View>
+                          <View style={{ paddingHorizontal: scale(10), paddingVertical: scale(5), borderRadius: scale(999), backgroundColor: configured ? 'rgba(16, 185, 129, 0.12)' : 'rgba(148, 163, 184, 0.10)', borderWidth: 1, borderColor: configured ? 'rgba(16, 185, 129, 0.35)' : '#334070' }}>
+                            <Text style={{ color: configured ? '#86efac' : '#94a3b8', fontSize: scale(11), fontWeight: '800' }}>{configured ? 'Configured' : 'Not configured'}</Text>
+                          </View>
+                        </View>
+
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: scale(8), marginTop: scale(14) }}>
+                          <View style={styles.lpMiniStat}><Text style={styles.lpMiniLabel}>Unlocked LP</Text><Text style={styles.lpMiniValue}>{formatUnits(view.dex.lpBalance, 8, 4)} LP</Text></View>
+                          <View style={styles.lpMiniStat}><Text style={styles.lpMiniLabel}>Locked LP</Text><Text style={styles.lpMiniValue}>{formatUnits(view.dex.lockedLP, 8, 4)} LP</Text></View>
+                          <View style={styles.lpMiniStat}><Text style={styles.lpMiniLabel}>Pool Share</Text><Text style={styles.lpMiniValue}>{formatPercentFromParts(view.dex.lpBalance, view.dex.totalLP)}</Text></View>
+                          <View style={styles.lpMiniStat}><Text style={styles.lpMiniLabel}>Unlock Time</Text><Text style={styles.lpMiniValue}>{formatUnlockTime(view.dex.lockUntil)}</Text></View>
+                          <View style={styles.lpMiniStat}><Text style={styles.lpMiniLabel}>Lock Days</Text><Text style={styles.lpMiniValue}>{formatLockDays(view.dex.lockUntil)}</Text></View>
+                        </View>
+
+                        <View style={{ marginTop: scale(14) }}>
+                          <Field label="LP Amount" value={input.lockAmount || ""} onChangeText={(v) => updateLiquidityPoolInput(view, { lockAmount: v })} placeholder="0.0" keyboardType="decimal-pad" editable={configured && !liquidityAction} />
+                          <Field label="Lock Days" value={String(input.lockDays || "365")} onChangeText={(v) => updateLiquidityPoolInput(view, { lockDays: v.replace(/[^\d]/g, "") })} placeholder="365" keyboardType="numeric" editable={configured && !liquidityAction} />
+                        </View>
+
+                        <View style={styles.inlineButtons}>
+                          <Button label={isActiveAction && actionKey === "lock" ? "Locking…" : "Stake / Lock LP"} onPress={() => submitPoolLockAction(view)} disabled={!configured || !!liquidityAction} compact />
+                          <Button label={isActiveAction && actionKey === "register" ? "Registering…" : "Register Validator"} onPress={() => registerPoolValidator(view)} disabled={!configured || !!liquidityAction} compact secondary />
+                        </View>
+                        <Button label={isActiveAction && actionKey === "unlock" ? "Unlocking…" : "Unstake / Unlock LP"} onPress={() => submitPoolUnlockAction(view)} disabled={!configured || !!liquidityAction} danger />
+
+                        {result?.message ? (
+                          <View style={[styles.resultBox, { marginTop: scale(12), borderColor: result.type === 'error' ? '#7f1d1d' : '#14532d', backgroundColor: result.type === 'error' ? 'rgba(127, 29, 29, 0.18)' : 'rgba(20, 83, 45, 0.18)' }]}>
+                            <Text style={{ color: result.type === 'error' ? '#fca5a5' : '#86efac', fontSize: scale(12), lineHeight: scale(18) }}>{result.message}</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                    );
+                  };
+                  return (
+                    <View>
+                      <Text style={styles.inspectTitle}>Core reward pools</Text>
+                      {LP_CANONICAL_POOL_SLOTS.map((slot) => renderPoolCard(slot, findSlotCard(slot)))}
+                      <Text style={[styles.inspectTitle, { marginTop: scale(10) }]}>Tier 3 community pools</Text>
+                      {communityCards.length ? communityCards.map((card) => renderPoolCard({ id: card.address, label: card.pair, tier: "Tier 3", weight: "0.35x" }, card)) : (
+                        <View style={[styles.resultBox, { marginTop: scale(8), borderColor: '#334070' }]}>
+                          <Text style={{ color: '#94a3b8' }}>No community pools yet. Admin-approved pools will appear here automatically.</Text>
+                        </View>
+                      )}
+                    </View>
+                  );
+                })()}
+              </Card>
+            </View>
+          )}
+
           {tab === "settings" && (
             <View style={styles.sectionGap}>
               <Card title="Wallet Settings" subtitle="Configure your experience and endpoints.">
@@ -7726,6 +8195,11 @@ const styles = StyleSheet.create({
     gap: scale(10),
     flexWrap: "wrap",
   },
+  statsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: scale(10),
+  },
   actionGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -7757,6 +8231,35 @@ const styles = StyleSheet.create({
     fontSize: scale(12),
     marginTop: scale(4),
     fontWeight: "700",
+  },
+  lpMiniStat: {
+    flexGrow: 1,
+    flexBasis: "46%",
+    minWidth: scale(126),
+    backgroundColor: "#10172a",
+    borderColor: "#273152",
+    borderWidth: 1,
+    borderRadius: scale(14),
+    padding: scale(11),
+  },
+  lpMiniLabel: {
+    color: "#7d89b2",
+    fontSize: scale(10),
+    fontWeight: "800",
+    textTransform: "uppercase",
+    marginBottom: scale(4),
+  },
+  lpMiniValue: {
+    color: "#f4f7ff",
+    fontSize: scale(13),
+    fontWeight: "900",
+  },
+  resultBox: {
+    backgroundColor: "#10172a",
+    borderColor: "#273152",
+    borderWidth: 1,
+    borderRadius: scale(14),
+    padding: scale(12),
   },
   sectionGap: {
     gap: scale(12),
