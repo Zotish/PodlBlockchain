@@ -823,6 +823,11 @@ function renderPoolCards() {
         <span class="lp-pool-badge muted">Not configured</span>
         <span class="lp-pool-small">Save pool below</span>
       </div>
+      <div class="lp-pool-actions">
+        <button class="btn btn-primary btn-xs" type="button" disabled title="Configure this pool first">Stake / Lock</button>
+        <button class="btn btn-secondary btn-xs" type="button" disabled title="Configure this pool first">Register</button>
+        <button class="btn btn-danger btn-xs" type="button" disabled title="Configure this pool first">Unstake / Unlock</button>
+      </div>
     </div>`;
   }).join("");
   const communityCards = cards
