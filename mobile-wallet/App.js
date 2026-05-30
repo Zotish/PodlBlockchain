@@ -6381,8 +6381,6 @@ function App() {
                 </View>
               </View>
 
-              <LPRewardTierGuide />
-
               {/* Sub Tabs: Tokens / Activity */}
               <View style={[styles.mmSubTabRow, { alignItems: 'center' }]}>
                 <TouchableOpacity onPress={() => setHomeSubTab("tokens")} style={[styles.mmSubTab, homeSubTab === "tokens" && styles.mmSubTabActive]}>
