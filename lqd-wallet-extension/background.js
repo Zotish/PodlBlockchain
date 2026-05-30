@@ -339,8 +339,11 @@ async function getBaseFee() {
 async function recordActivity(entry) {
   const data = await ext.storage.local.get(["txActivity"]);
   const list = Array.isArray(data.txActivity) ? data.txActivity : [];
-  list.unshift({ ...entry, chainId: session.chainId, time: Date.now() });
-  await ext.storage.local.set({ txActivity: list.slice(0, 200) });
+  const item = { ...entry, chainId: session.chainId, time: Date.now() };
+  const key = String(item.activity_id || item.tx_hash || item.hash || "");
+  const next = key ? list.filter((existing) => String(existing.activity_id || existing.tx_hash || existing.hash || "") !== key) : list;
+  next.unshift(item);
+  await ext.storage.local.set({ txActivity: next.slice(0, 200) });
 }
 
 // ── Push helpers ──────────────────────────────────────────────────────────────
@@ -658,6 +661,14 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "LQD_GET_ACTIVITY") {
     ext.storage.local.get(["txActivity"]).then((data) => {
       sendResponse({ ok: true, list: data.txActivity || [] });
+    });
+    return true;
+  }
+  if (message.type === "LQD_RECORD_ACTIVITY") {
+    recordActivity(message.entry || {}).then(() => {
+      sendResponse({ ok: true });
+    }).catch((e) => {
+      sendResponse({ ok: false, error: e.message });
     });
     return true;
   }

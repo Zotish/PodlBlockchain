@@ -889,8 +889,17 @@ function renderActivity(list) {
     const div = document.createElement("div");
     div.className = "item activity-item";
     const time = tx.time ? new Date(tx.time).toLocaleString() : "";
-    const typeLabel = tx.type === "token" ? "Token Transfer" : tx.type === "send" ? "Send LQD" : "Contract Call";
-    const icon = tx.type === "send" ? "↑" : tx.type === "token" ? "⬡" : "⚙";
+    const typeLabels = {
+      token: "Token Transfer",
+      send: "Send LQD",
+      lp_lock: "Stake / Lock LP",
+      lp_unlock: "Unstake / Unlock LP",
+      lp_claim: "Claim LP Rewards",
+      validator_register: "Validator Register",
+    };
+    const icons = { send: "↑", token: "⬡", lp_lock: "🔒", lp_unlock: "🔓", lp_claim: "💧", validator_register: "✅" };
+    const typeLabel = typeLabels[tx.type] || "Contract Call";
+    const icon = icons[tx.type] || "⚙";
     div.innerHTML = `
       <div class="activity-row">
         <div class="activity-icon">${icon}</div>
@@ -909,7 +918,15 @@ function renderActivity(list) {
 function openActivityModal(tx) {
   const titleEl = document.getElementById("activityTitle");
   const detailsEl = document.getElementById("activityDetails");
-  if (titleEl) titleEl.textContent = tx.type === "token" ? "Token Transfer" : tx.type === "send" ? "Send LQD" : "Contract Call";
+  const typeLabels = {
+    token: "Token Transfer",
+    send: "Send LQD",
+    lp_lock: "Stake / Lock LP",
+    lp_unlock: "Unstake / Unlock LP",
+    lp_claim: "Claim LP Rewards",
+    validator_register: "Validator Register",
+  };
+  if (titleEl) titleEl.textContent = typeLabels[tx.type] || "Contract Call";
   if (detailsEl) detailsEl.textContent = [
     `Hash:   ${tx.tx_hash || "-"}`,
     `To:     ${tx.to || "-"}`,
