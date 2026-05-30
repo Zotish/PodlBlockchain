@@ -1021,9 +1021,6 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 
 	// 4) Nonce policy - proper nonce validation
 	expected := bc.GetAccountNonce(tx.From)
-	if expected > 0 {
-		expected--
-	}
 	if tx.Nonce != 0 && tx.Nonce != expected {
 		tx.Status = constantset.StatusFailed
 		log.Printf("TX %s failed: bad nonce (got %d want %d)", tx.TxHash, tx.Nonce, expected)
