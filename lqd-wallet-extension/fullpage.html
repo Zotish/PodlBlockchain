@@ -253,28 +253,6 @@
       </div>
 
       <div class="card">
-        <div class="card-title">Stake / Lock LP for Validation</div>
-        <div class="notice" style="margin-bottom:14px;">
-          DEX creates and removes liquidity. This wallet only locks the selected pool's LP tokens for rewards and validator eligibility.
-        </div>
-        <div class="grid-3">
-          <div class="stat-box"><div class="stat-label">Unlocked LP</div><div class="stat-value" id="lpUnlockedStat">—</div></div>
-          <div class="stat-box"><div class="stat-label">Locked LP</div><div class="stat-value" id="lpLockedStat">—</div></div>
-          <div class="stat-box"><div class="stat-label">Unlock Time</div><div class="stat-value" id="lpUnlockTimeStat">—</div></div>
-        </div>
-        <div class="grid-2" style="margin-top:16px;">
-          <div class="field"><label>LP Amount</label><input id="lpLockAmount" type="number" step="0.00000001" placeholder="0.0" /></div>
-          <div class="field"><label>Lock Days</label><input id="lpLockDays" type="number" value="365" min="1" /></div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn btn-primary btn-sm" id="lpLockBtn">Stake / Lock LP</button>
-          <button class="btn btn-secondary btn-sm" id="lpRegisterValidatorBtn">Register Validator</button>
-          <button class="btn btn-danger btn-sm" id="lpUnlockBtn">Unstake / Unlock LP</button>
-        </div>
-        <div id="lpLockResult" class="result-box" style="display:none;"></div>
-      </div>
-
-      <div class="card">
         <div class="card-title">Reward Dashboard</div>
         <div class="grid-3">
           <div class="stat-box"><div class="stat-label">Protocol Pending</div><div class="stat-value" id="lpPendingRewardStat">—</div></div>
