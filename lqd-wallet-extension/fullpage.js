@@ -58,6 +58,11 @@ function toast(text, kind = "info") {
 function showResult(elId, text, isErr = false) {
   const el = $(elId);
   if (!el) return;
+  showResultElement(el, text, isErr);
+}
+
+function showResultElement(el, text, isErr = false) {
+  if (!el) return;
   el.style.display = "block";
   el.style.color = isErr ? "var(--red)" : "var(--green)";
   el.textContent = text;
@@ -739,6 +744,14 @@ function formatUnlockTime(raw) {
   return `${days}d · ${date}`;
 }
 
+function formatLockDays(raw) {
+  const ts = Number(raw || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return "365 default";
+  const remainingMs = (ts * 1000) - Date.now();
+  if (remainingMs <= 0) return "Ready";
+  return `${Math.ceil(remainingMs / 86400000)} days left`;
+}
+
 async function buildPoolCards(poolsPayload, preferredForm) {
   const poolMap = normalizePoolMap(poolsPayload);
   const savedPools = loadSavedLPPools();
@@ -796,16 +809,25 @@ function renderPoolCards() {
         <div class="lp-pool-meta">${escapeHtml(card.tierLabel)} · Weight ${escapeHtml(card.weightLabel)} · ${escapeHtml(shortAddr(card.address))}</div>
       </div>
       <div class="lp-pool-metrics">
-        <span class="lp-pool-badge">Unlocked ${escapeHtml(fmtAmount(card.dex.lpBalance, 8))} LP</span>
-        <span class="lp-pool-badge">Locked ${escapeHtml(fmtAmount(card.dex.lockedLP, 8))} LP</span>
+        <span class="lp-pool-badge">Configured</span>
         <span class="lp-pool-small">${escapeHtml(formatPercentFromParts(card.dex.lpBalance, card.dex.totalLP))} share</span>
-        <span class="lp-pool-small">${escapeHtml(formatUnlockTime(card.dex.lockUntil))}</span>
+      </div>
+      <div class="lp-pool-stats">
+        <div class="lp-mini-stat"><span>Unlocked LP</span><strong>${escapeHtml(fmtAmount(card.dex.lpBalance, 8))} LP</strong></div>
+        <div class="lp-mini-stat"><span>Locked LP</span><strong>${escapeHtml(fmtAmount(card.dex.lockedLP, 8))} LP</strong></div>
+        <div class="lp-mini-stat"><span>Unlock Time</span><strong>${escapeHtml(formatUnlockTime(card.dex.lockUntil))}</strong></div>
+        <div class="lp-mini-stat"><span>Lock Days</span><strong>${escapeHtml(formatLockDays(card.dex.lockUntil))}</strong></div>
+      </div>
+      <div class="lp-pool-form">
+        <label>LP Amount<input data-pool-lock-amount type="number" step="0.00000001" placeholder="0.0" /></label>
+        <label>Lock Days<input data-pool-lock-days type="number" value="365" min="1" /></label>
       </div>
       <div class="lp-pool-actions">
-        <button class="btn btn-primary btn-xs" data-pool-action="lock" data-pool-idx="${idx}" type="button">Stake / Lock</button>
-        <button class="btn btn-secondary btn-xs" data-pool-action="register" data-pool-idx="${idx}" type="button">Register</button>
+        <button class="btn btn-primary btn-xs" data-pool-action="lock" data-pool-idx="${idx}" type="button">Stake / Lock LP</button>
+        <button class="btn btn-secondary btn-xs" data-pool-action="register" data-pool-idx="${idx}" type="button">Register Validator</button>
         <button class="btn btn-danger btn-xs" data-pool-action="unlock" data-pool-idx="${idx}" type="button">Unstake / Unlock</button>
       </div>
+      <div class="result-box lp-pool-result" data-pool-result="${idx}" style="display:none;"></div>
     </div>`;
   };
   const canonicalCards = LP_CANONICAL_POOL_SLOTS.map((slot) => {
@@ -823,9 +845,19 @@ function renderPoolCards() {
         <span class="lp-pool-badge muted">Not configured</span>
         <span class="lp-pool-small">Save pool below</span>
       </div>
+      <div class="lp-pool-stats">
+        <div class="lp-mini-stat"><span>Unlocked LP</span><strong>—</strong></div>
+        <div class="lp-mini-stat"><span>Locked LP</span><strong>—</strong></div>
+        <div class="lp-mini-stat"><span>Unlock Time</span><strong>Configure first</strong></div>
+        <div class="lp-mini-stat"><span>Lock Days</span><strong>365 default</strong></div>
+      </div>
+      <div class="lp-pool-form">
+        <label>LP Amount<input type="number" placeholder="0.0" disabled /></label>
+        <label>Lock Days<input type="number" value="365" disabled /></label>
+      </div>
       <div class="lp-pool-actions">
-        <button class="btn btn-primary btn-xs" type="button" disabled title="Configure this pool first">Stake / Lock</button>
-        <button class="btn btn-secondary btn-xs" type="button" disabled title="Configure this pool first">Register</button>
+        <button class="btn btn-primary btn-xs" type="button" disabled title="Configure this pool first">Stake / Lock LP</button>
+        <button class="btn btn-secondary btn-xs" type="button" disabled title="Configure this pool first">Register Validator</button>
         <button class="btn btn-danger btn-xs" type="button" disabled title="Configure this pool first">Unstake / Unlock</button>
       </div>
     </div>`;
@@ -843,7 +875,10 @@ function renderPoolCards() {
   `;
   list.querySelectorAll("[data-pool-idx]").forEach((btn) => {
     if (btn.dataset.poolAction) return;
-    btn.addEventListener("click", () => selectPoolCard(cards[Number(btn.dataset.poolIdx)]));
+    btn.addEventListener("click", (event) => {
+      if (event.target.closest("button,input,label")) return;
+      selectPoolCard(cards[Number(btn.dataset.poolIdx)]);
+    });
     btn.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
@@ -897,9 +932,6 @@ function renderLiquidityDashboard() {
   $("lpTotalStat").textContent = `${fmtAmount(dex.totalLP, 8)} LP`;
   $("lpReserveAStat").textContent = `${fmtAmount(dex.reserveA, form.decimalsA)} / ${fmtAmount(userA, form.decimalsA)}`;
   $("lpReserveBStat").textContent = `${fmtAmount(dex.reserveB, form.decimalsB)} / ${fmtAmount(userB, form.decimalsB)}`;
-  $("lpUnlockedStat").textContent = `${fmtAmount(dex.lpBalance, 8)} LP`;
-  $("lpLockedStat").textContent = `${fmtAmount(dex.lockedLP, 8)} LP`;
-  $("lpUnlockTimeStat").textContent = formatUnlockTime(dex.lockUntil);
 
   const protocol = lpDashboard.protocol || {};
   $("lpPendingRewardStat").textContent = fmtAmount(protocol.pending_rewards || protocol.PendingRewards || "0") + " LQD";
@@ -969,12 +1001,28 @@ async function loadLiquidityDashboard() {
   }
 }
 
+function getPoolActionContext(button) {
+  const cardEl = button?.closest?.(".lp-pool-card");
+  const amountInput = cardEl?.querySelector?.("[data-pool-lock-amount]") || $("lpLockAmount");
+  const daysInput = cardEl?.querySelector?.("[data-pool-lock-days]") || $("lpLockDays");
+  return {
+    amount: amountInput?.value?.trim() || "",
+    days: parseInt(daysInput?.value, 10) || 365,
+    amountInput,
+    resultEl: cardEl?.querySelector?.("[data-pool-result]") || $("lpLockResult"),
+  };
+}
+
 async function lockDexLPForValidation(card = null, button = $("lpLockBtn")) {
-  if (card?.form) selectPoolCard(card);
+  const { amount, days, amountInput, resultEl } = getPoolActionContext(button);
+  if (card?.form) {
+    setLPForm(card.form);
+    upsertSavedLPPool(card.form);
+    lpDashboard.selectedPool = card;
+    lpDashboard.storage = card.storage || {};
+  }
   const form = card?.form || getLPForm();
   const storage = card?.storage || lpDashboard.storage || {};
-  const amount = $("lpLockAmount")?.value?.trim() || "";
-  const days = parseInt($("lpLockDays")?.value, 10) || 365;
   if (!form.pool || !form.tokenA || !form.tokenB || !amount) {
     toast("Select a pool and enter LP amount", "error");
     return;
@@ -987,14 +1035,14 @@ async function lockDexLPForValidation(card = null, button = $("lpLockBtn")) {
     const args = useFactory ? [form.tokenA, form.tokenB, rawLP, durationSecs] : [rawLP, durationSecs];
     const res = await contractTx(form.pool, "LockLPForValidation", args);
     const hash = res.tx_hash || res.TxHash || res.hash || "";
-    showResult("lpLockResult", `✓ LP lock submitted\nTx: ${hash}`);
+    showResultElement(resultEl, `✓ LP lock submitted\nTx: ${hash}`);
     await recordLocalActivity({ type: "lp_lock", contract: form.pool, tx_hash: hash, value: rawLP });
-    $("lpLockAmount").value = "";
+    if (amountInput) amountInput.value = "";
     toast("LP lock submitted", "success");
     if (hash) await waitForTx(hash, 6000).catch(() => null);
     await loadLiquidityDashboard();
   } catch (e) {
-    showResult("lpLockResult", "✗ " + e.message, true);
+    showResultElement(resultEl, "✗ " + e.message, true);
     toast("LP lock failed: " + e.message, "error");
   } finally {
     if (button) button.disabled = false;
@@ -1002,7 +1050,13 @@ async function lockDexLPForValidation(card = null, button = $("lpLockBtn")) {
 }
 
 async function unlockDexLPForValidation(card = null, button = $("lpUnlockBtn")) {
-  if (card?.form) selectPoolCard(card);
+  const { resultEl } = getPoolActionContext(button);
+  if (card?.form) {
+    setLPForm(card.form);
+    upsertSavedLPPool(card.form);
+    lpDashboard.selectedPool = card;
+    lpDashboard.storage = card.storage || {};
+  }
   const form = card?.form || getLPForm();
   const storage = card?.storage || lpDashboard.storage || {};
   if (!form.pool || !form.tokenA || !form.tokenB) {
@@ -1015,13 +1069,13 @@ async function unlockDexLPForValidation(card = null, button = $("lpUnlockBtn")) 
     const args = useFactory ? [form.tokenA, form.tokenB] : [];
     const res = await contractTx(form.pool, "UnlockValidatorLP", args);
     const hash = res.tx_hash || res.TxHash || res.hash || "";
-    showResult("lpLockResult", `✓ LP unlock submitted\nTx: ${hash}`);
+    showResultElement(resultEl, `✓ LP unlock submitted\nTx: ${hash}`);
     await recordLocalActivity({ type: "lp_unlock", contract: form.pool, tx_hash: hash });
     toast("LP unlock submitted", "success");
     if (hash) await waitForTx(hash, 6000).catch(() => null);
     await loadLiquidityDashboard();
   } catch (e) {
-    showResult("lpLockResult", "✗ " + e.message, true);
+    showResultElement(resultEl, "✗ " + e.message, true);
     toast("LP unlock failed: " + e.message, "error");
   } finally {
     if (button) button.disabled = false;
@@ -1029,7 +1083,13 @@ async function unlockDexLPForValidation(card = null, button = $("lpUnlockBtn")) 
 }
 
 async function registerDexValidatorFromLockedLP(card = null, button = $("lpRegisterValidatorBtn")) {
-  if (card?.form) selectPoolCard(card);
+  const { resultEl } = getPoolActionContext(button);
+  if (card?.form) {
+    setLPForm(card.form);
+    upsertSavedLPPool(card.form);
+    lpDashboard.selectedPool = card;
+    lpDashboard.storage = card.storage || {};
+  }
   const form = card?.form || getLPForm();
   const storage = card?.storage || lpDashboard.storage || {};
   const pairAddress = getPairAddressForLPAction(form, storage);
@@ -1043,11 +1103,11 @@ async function registerDexValidatorFromLockedLP(card = null, button = $("lpRegis
       address: state.address,
       pair_address: pairAddress,
     });
-    showResult("lpLockResult", `✓ Validator registration submitted\n${JSON.stringify(res, null, 2)}`);
+    showResultElement(resultEl, `✓ Validator registration submitted\n${JSON.stringify(res, null, 2)}`);
     toast("Validator registered from locked LP", "success");
     await loadLiquidityDashboard();
   } catch (e) {
-    showResult("lpLockResult", "✗ " + e.message, true);
+    showResultElement(resultEl, "✗ " + e.message, true);
     toast("Validator registration failed: " + e.message, "error");
   } finally {
     if (button) button.disabled = false;
@@ -1124,9 +1184,6 @@ async function syncPoolRegistry() {
 $("lpRefreshBtn")?.addEventListener("click", loadLiquidityDashboard);
 $("lpLoadBtn")?.addEventListener("click", loadLiquidityDashboard);
 $("lpSaveBtn")?.addEventListener("click", () => { saveLPSettings(); loadLiquidityDashboard(); });
-$("lpLockBtn")?.addEventListener("click", () => lockDexLPForValidation());
-$("lpUnlockBtn")?.addEventListener("click", () => unlockDexLPForValidation());
-$("lpRegisterValidatorBtn")?.addEventListener("click", () => registerDexValidatorFromLockedLP());
 $("lpClaimBtn")?.addEventListener("click", claimOrSyncRewards);
 $("lpSyncPoolsBtn")?.addEventListener("click", syncPoolRegistry);
 $("lpSyncPoolsTopBtn")?.addEventListener("click", syncPoolRegistry);
