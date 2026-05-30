@@ -231,6 +231,7 @@ func (f *Factory) CreatePair(ctx *bc.Context, tokenA string, tokenB string) {
 	ctx.Set("pairCount", new(big.Int).Add(n, big.NewInt(1)).String())
 
 	ctx.Set("output", pairAddr)
+	ctx.Commit()
 	ctx.Emit("PairCreated", map[string]interface{}{
 		"token0":   t0,
 		"token1":   t1,

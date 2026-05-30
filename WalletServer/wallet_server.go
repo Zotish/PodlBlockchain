@@ -75,18 +75,21 @@ func (ws *WalletServer) fetchNextNonce(client *http.Client, addr string) (uint64
 		Nonce          uint64 `json:"nonce"`
 		NextNonce      uint64 `json:"next_nonce"`
 		ConfirmedNonce uint64 `json:"confirmed_nonce"`
+		PendingCount   uint64 `json:"pending_count"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&nonceResp); err != nil {
 		return 0, err
 	}
 
 	switch {
+	case nonceResp.PendingCount == 0:
+		return nonceResp.ConfirmedNonce, nil
 	case nonceResp.NextNonce > 0:
 		return nonceResp.NextNonce, nil
 	case nonceResp.Nonce > 0:
 		return nonceResp.Nonce, nil
 	default:
-		return nonceResp.ConfirmedNonce + 1, nil
+		return nonceResp.ConfirmedNonce, nil
 	}
 }
 
