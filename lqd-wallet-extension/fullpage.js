@@ -68,6 +68,11 @@ function showResultElement(el, text, isErr = false) {
   el.textContent = text;
 }
 
+function extractTxHash(res) {
+  return res?.tx_hash || res?.TxHash || res?.hash || res?.transaction_hash || res?.transactionHash ||
+    res?.result?.tx_hash || res?.result?.TxHash || res?.result?.hash || res?.result?.transaction_hash || res?.result?.transactionHash || "";
+}
+
 function fmtAmount(raw, dec = 8) {
   try {
     if (!raw || raw === "0") return "0";
@@ -1034,9 +1039,9 @@ async function lockDexLPForValidation(card = null, button = $("lpLockBtn")) {
     const useFactory = isFactoryPoolForm(form, storage);
     const args = useFactory ? [form.tokenA, form.tokenB, rawLP, durationSecs] : [rawLP, durationSecs];
     const res = await contractTx(form.pool, "LockLPForValidation", args);
-    const hash = res.tx_hash || res.TxHash || res.hash || "";
+    const hash = extractTxHash(res);
     showResultElement(resultEl, `✓ LP lock submitted\nTx: ${hash}`);
-    await recordLocalActivity({ type: "lp_lock", contract: form.pool, tx_hash: hash, value: rawLP });
+    await recordLocalActivity({ type: "lp_lock", to: form.pool, contract: form.pool, tx_hash: hash, value: rawLP, status: hash ? "pending" : "submitted" });
     if (amountInput) amountInput.value = "";
     toast("LP lock submitted", "success");
     if (hash) await waitForTx(hash, 6000).catch(() => null);
@@ -1068,9 +1073,9 @@ async function unlockDexLPForValidation(card = null, button = $("lpUnlockBtn")) 
     const useFactory = isFactoryPoolForm(form, storage);
     const args = useFactory ? [form.tokenA, form.tokenB] : [];
     const res = await contractTx(form.pool, "UnlockValidatorLP", args);
-    const hash = res.tx_hash || res.TxHash || res.hash || "";
+    const hash = extractTxHash(res);
     showResultElement(resultEl, `✓ LP unlock submitted\nTx: ${hash}`);
-    await recordLocalActivity({ type: "lp_unlock", contract: form.pool, tx_hash: hash });
+    await recordLocalActivity({ type: "lp_unlock", to: form.pool, contract: form.pool, tx_hash: hash, status: hash ? "pending" : "submitted" });
     toast("LP unlock submitted", "success");
     if (hash) await waitForTx(hash, 6000).catch(() => null);
     await loadLiquidityDashboard();
@@ -1103,6 +1108,8 @@ async function registerDexValidatorFromLockedLP(card = null, button = $("lpRegis
       address: state.address,
       pair_address: pairAddress,
     });
+    const hash = extractTxHash(res);
+    await recordLocalActivity({ type: "validator_register", to: pairAddress, contract: pairAddress, tx_hash: hash, function: "register-dex", status: hash ? "pending" : "submitted" });
     showResultElement(resultEl, `✓ Validator registration submitted\n${JSON.stringify(res, null, 2)}`);
     toast("Validator registered from locked LP", "success");
     await loadLiquidityDashboard();
@@ -1156,6 +1163,8 @@ async function claimOrSyncRewards() {
         ? "Manual claim endpoint is not active on the node yet. Current rewards are auto-accounted by the chain and visible in this dashboard."
         : err.message);
     });
+    const hash = extractTxHash(res);
+    await recordLocalActivity({ type: "lp_claim", to: "LP Rewards", tx_hash: hash, function: "liquidity-claim", status: hash ? "pending" : "submitted" });
     showResult("lpClaimResult", `✓ Claim/sync complete\n${JSON.stringify(res, null, 2)}`);
     toast("Rewards synced", "success");
     await loadLiquidityDashboard();
@@ -2410,9 +2419,11 @@ async function recordLocalActivity(entry) {
   const key = `lqd_activity_${state.address}`;
   let acts = [];
   try { acts = JSON.parse(localStorage.getItem(key) || "[]"); } catch { }
-  acts.unshift({ ...entry, time: Date.now() });
+  const item = { ...entry, activity_id: entry.activity_id || `${entry.type || "tx"}:${Date.now()}:${Math.random().toString(16).slice(2)}`, time: Date.now() };
+  acts.unshift(item);
   if (acts.length > 200) acts = acts.slice(0, 200);
   localStorage.setItem(key, JSON.stringify(acts));
+  msg("LQD_RECORD_ACTIVITY", { entry: item }).catch(() => {});
 }
 
 function loadActivity() {
@@ -2423,7 +2434,16 @@ function loadActivity() {
   // Also pull from extension background activity
   msg("LQD_GET_ACTIVITY").then(res => {
     const bgActs = res?.list || [];
-    const all = [...bgActs, ...acts].sort((a, b) => (b.time || 0) - (a.time || 0)).slice(0, 200);
+    const seen = new Set();
+    const all = [...bgActs, ...acts]
+      .sort((a, b) => (b.time || 0) - (a.time || 0))
+      .filter((a) => {
+        const key = String(a.activity_id || a.tx_hash || a.hash || `${a.type}:${a.contract || a.to || ""}:${a.value || ""}:${a.time || ""}`);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 200);
     renderActivity(all);
   }).catch(() => renderActivity(acts));
 }
@@ -2431,13 +2451,14 @@ function loadActivity() {
 function renderActivity(acts) {
   const container = $("activityList");
   if (!acts.length) { container.innerHTML = '<div class="notice">No activity yet.</div>'; return; }
-  const icons = { send: "↑", receive: "↓", token: "🪙", contract: "📜", deploy: "🚀", bridge: "🌉" };
+  const icons = { send: "↑", receive: "↓", token: "🪙", contract: "📜", deploy: "🚀", bridge: "🌉", lp_lock: "🔒", lp_unlock: "🔓", lp_claim: "💧", validator_register: "✅" };
+  const labels = { lp_lock: "LP STAKE / LOCK", lp_unlock: "LP UNSTAKE / UNLOCK", lp_claim: "LP REWARD CLAIM", validator_register: "VALIDATOR REGISTER" };
   container.innerHTML = `<div class="activity-list">
     ${acts.map(a => `
       <div class="activity-row">
         <div class="act-icon">${icons[a.type] || "•"}</div>
         <div class="act-info">
-          <div class="act-type">${(a.type || "tx").toUpperCase()}${a.function ? " · " + a.function : ""}${a.contractType ? " · " + a.contractType : ""}</div>
+          <div class="act-type">${labels[a.type] || (a.type || "tx").toUpperCase()}${a.function ? " · " + a.function : ""}${a.contractType ? " · " + a.contractType : ""}</div>
           <div class="act-hash">${a.tx_hash ? "Tx: " + a.tx_hash : (a.contract ? "Contract: " + a.contract : (a.to ? "To: " + a.to : ""))}</div>
           <div class="act-time">${a.time ? new Date(a.time).toLocaleString() : ""}</div>
         </div>

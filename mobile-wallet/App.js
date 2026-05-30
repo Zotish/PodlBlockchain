@@ -675,6 +675,11 @@ function formatLockDays(raw) {
   return `${Math.ceil(remainingMs / 86400000)} days left`;
 }
 
+function extractTxHash(res) {
+  return res?.tx_hash || res?.TxHash || res?.hash || res?.transaction_hash || res?.transactionHash ||
+    res?.result?.tx_hash || res?.result?.TxHash || res?.result?.hash || res?.result?.transaction_hash || res?.result?.transactionHash || "";
+}
+
 const TokenRow = ({ item, onSend, onRefresh, onRemove }) => (
   <View style={styles.rowCard}>
     <View style={styles.rowIcon}>
@@ -745,6 +750,12 @@ const MMActionBtn = ({ label, icon, onPress, disabled }) => (
 function ActivityRow({ item, onPress }) {
   const hash = item.TxHash || item.tx_hash || item.hash || "";
   const type = item.Type || item.type || "tx";
+  const typeLabels = {
+    lp_lock: "Stake / Lock LP",
+    lp_unlock: "Unstake / Unlock LP",
+    lp_claim: "Claim LP Rewards",
+    validator_register: "Validator Register",
+  };
   const rawStatus = item.Status || item.status || "success";
   const s = String(rawStatus).toLowerCase();
 
@@ -764,9 +775,9 @@ function ActivityRow({ item, onPress }) {
           <View style={{ backgroundColor: statusColor + "20", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginRight: scale(8) }}>
             <Text style={{ color: statusColor, fontSize: scale(10), fontWeight: "800" }}>{s.toUpperCase()}</Text>
           </View>
-          <Text style={styles.rowTitle}>{type.toUpperCase()}</Text>
+          <Text style={styles.rowTitle}>{typeLabels[type] || type.toUpperCase()}</Text>
         </View>
-        <Text style={styles.rowSub}>Hash: {shortAddress(hash, 8, 6)}</Text>
+        <Text style={styles.rowSub}>{hash ? `Hash: ${shortAddress(hash, 8, 6)}` : "Submitted to node"}</Text>
         <Text style={styles.rowSub}>
           {shortAddress(from)} → {shortAddress(to)}
         </Text>
@@ -1644,12 +1655,14 @@ function App() {
     setProcessingMessage("Claiming LP rewards...");
     try {
       const res = await postJson(`${normalizeUrl(nodeUrl)}/liquidity/claim`, { address: wallet.address });
+      const hash = extractTxHash(res);
       showToast("LP reward claim submitted", "success");
       rememberActivity({
         type: "lp_claim",
-        TxHash: res?.tx_hash || res?.hash || "",
+        TxHash: hash,
         From: wallet.address,
-        Status: "pending",
+        To: "LP Rewards",
+        Status: hash ? "pending" : "submitted",
         Timestamp: Math.floor(Date.now() / 1000),
       });
       await loadLiquidityDashboard();
@@ -1688,10 +1701,10 @@ function App() {
         gas_price: Number(baseFeeValue || 10),
         private_key: wallet.privateKey,
       });
-      const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
+      const hash = extractTxHash(res);
       setLiquidityPoolResult(card, `LP lock submitted${hash ? `: ${shortAddress(hash, 8, 6)}` : ""}`, "success");
       updateLiquidityPoolInput(card, { lockAmount: "" });
-      rememberActivity({ type: "lp_lock", TxHash: hash, From: wallet.address, Contract: card.address, Value: rawLP, Timestamp: Math.floor(Date.now() / 1000) });
+      rememberActivity({ type: "lp_lock", TxHash: hash, From: wallet.address, To: card.address, Contract: card.address, Value: rawLP, Status: hash ? "pending" : "submitted", Timestamp: Math.floor(Date.now() / 1000) });
       showToast("LP lock submitted", "success");
       setTimeout(() => loadLiquidityDashboard(), 3000);
     } catch (error) {
@@ -1723,9 +1736,9 @@ function App() {
         gas_price: Number(baseFeeValue || 10),
         private_key: wallet.privateKey,
       });
-      const hash = res?.tx_hash || res?.TxHash || res?.hash || "";
+      const hash = extractTxHash(res);
       setLiquidityPoolResult(card, `LP unlock submitted${hash ? `: ${shortAddress(hash, 8, 6)}` : ""}`, "success");
-      rememberActivity({ type: "lp_unlock", TxHash: hash, From: wallet.address, Contract: card.address, Timestamp: Math.floor(Date.now() / 1000) });
+      rememberActivity({ type: "lp_unlock", TxHash: hash, From: wallet.address, To: card.address, Contract: card.address, Status: hash ? "pending" : "submitted", Timestamp: Math.floor(Date.now() / 1000) });
       showToast("LP unlock submitted", "success");
       setTimeout(() => loadLiquidityDashboard(), 3000);
     } catch (error) {
@@ -1747,6 +1760,16 @@ function App() {
       const res = await postJson(`${normalizeUrl(nodeUrl)}/validator/register-dex`, {
         address: wallet.address,
         pair_address: pairAddress,
+      });
+      const hash = extractTxHash(res);
+      rememberActivity({
+        type: "validator_register",
+        TxHash: hash,
+        From: wallet.address,
+        To: pairAddress,
+        Contract: pairAddress,
+        Status: hash ? "pending" : "submitted",
+        Timestamp: Math.floor(Date.now() / 1000),
       });
       setLiquidityPoolResult(card, `Validator registration submitted: ${JSON.stringify(res)}`, "success");
       showToast("Validator registration submitted", "success");
