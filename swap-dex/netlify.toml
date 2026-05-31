@@ -7,6 +7,7 @@
   REACT_APP_NODE_URL = "https://api.178-105-133-94.sslip.io"
   REACT_APP_WALLET_BASE = "https://wallet.178-105-133-94.sslip.io"
   REACT_APP_WALLET_URL = "https://wallet.178-105-133-94.sslip.io"
+  REACT_APP_DEX_REGISTRY_API = "https://dex-api.178-105-133-94.sslip.io"
 
 [[redirects]]
   from = "/*"

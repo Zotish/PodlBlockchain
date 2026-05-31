@@ -8,6 +8,8 @@ import {
   getContractAbi,
   getCurrentDexFactory,
   getContractStorage,
+  getDexRegistryConfig,
+  getDexRegistryTokens,
   getTokenAllowance,
   getTokenBalance,
   getTokenMeta,
@@ -15,7 +17,7 @@ import {
   waitForTx,
   sendContractTx,
 } from "./api";
-import { loadTokens, saveTokens, upsertToken } from "./storage";
+import { loadTokens, mergeTokens, saveTokens, upsertToken } from "./storage";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SECS_PER_DAY = 86400;
@@ -269,6 +271,62 @@ export default function App() {
       clearTimeout(t);
       if (window.lqd) window.lqd.removeListener("accountsChanged", onAccountsChanged);
       window.removeEventListener("lqd#initialized", setup);
+    };
+  }, []);
+
+  // ── Shared SQLite DEX registry — universal tokens/config for all users ────
+  useEffect(() => {
+    let alive = true;
+
+    async function syncDexRegistry() {
+      const [configResult, tokensResult] = await Promise.allSettled([
+        getDexRegistryConfig(),
+        getDexRegistryTokens()
+      ]);
+
+      if (!alive) return;
+
+      if (configResult.status === "fulfilled" && configResult.value) {
+        const cfg = configResult.value;
+        const factory = String(cfg.factory_address || cfg.factoryAddress || "").trim();
+        const node = String(cfg.node_url || cfg.nodeUrl || "").trim().replace(/\/+$/, "");
+        const walletServer = String(cfg.wallet_url || cfg.walletUrl || "").trim().replace(/\/+$/, "");
+
+        if (factory) {
+          setCanonicalDexAddr(factory);
+          setDexAddr(factory);
+          localStorage.setItem("lqd_dex_address", factory);
+        }
+        if (node) {
+          setNodeUrl(node);
+          localStorage.setItem("lqd_node_url", node);
+        }
+        if (walletServer) {
+          setWalletUrl(walletServer);
+          localStorage.setItem("lqd_wallet_url", walletServer);
+        }
+      }
+
+      if (tokensResult.status === "fulfilled" && tokensResult.value?.length) {
+        const registryTokens = tokensResult.value.map((token) => ({
+          address: token.address,
+          name: token.name,
+          symbol: token.symbol,
+          decimals: token.decimals || "8",
+          logoUrl: token.logoUrl || token.logo_url || "",
+          native: !!token.native,
+          verified: token.verified !== false,
+          registry: true
+        }));
+        setTokens((current) => mergeTokens(registryTokens, current));
+      }
+    }
+
+    syncDexRegistry();
+    const id = setInterval(syncDexRegistry, 30000);
+    return () => {
+      alive = false;
+      clearInterval(id);
     };
   }, []);
 
@@ -1585,6 +1643,8 @@ export default function App() {
                     </div>
                     {t.native
                       ? <div className="token-row-bal" style={{ color: "var(--accent2)", fontSize: 11 }}>native</div>
+                      : t.registry
+                        ? <div className="token-row-bal" style={{ color: "var(--accent2)", fontSize: 11 }}>verified</div>
                       : <button
                           style={{ background: "none", border: "none", color: "var(--red)", cursor: "pointer", fontSize: 14, padding: "0 4px" }}
                           onClick={() => {

@@ -1,4 +1,4 @@
-import { NODE_URL, WALLET_URL } from "./config";
+import { DEX_REGISTRY_URL, NODE_URL, WALLET_URL } from "./config";
 
 function getNodeUrl() {
   return localStorage.getItem("lqd_node_url") || NODE_URL;
@@ -6,6 +6,35 @@ function getNodeUrl() {
 
 function getWalletUrl() {
   return localStorage.getItem("lqd_wallet_url") || WALLET_URL;
+}
+
+function getRegistryUrl() {
+  return DEX_REGISTRY_URL;
+}
+
+async function registryJSON(path) {
+  const base = getRegistryUrl();
+  if (!base) return null;
+  const res = await fetch(`${base}${path}`);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || text || "DEX registry request failed");
+  return data;
+}
+
+export async function getDexRegistryConfig() {
+  return registryJSON("/config");
+}
+
+export async function getDexRegistryTokens() {
+  const data = await registryJSON("/tokens");
+  return Array.isArray(data) ? data : [];
+}
+
+export async function getDexRegistryPools() {
+  const data = await registryJSON("/pools");
+  return Array.isArray(data) ? data : [];
 }
 
 // Poll until TX appears in a block (confirmed), up to timeoutMs
