@@ -18,6 +18,11 @@ export const WEB_WALLET_URL = normalizeBaseUrl(
   "http://127.0.0.1:3000"
 ); // optional web wallet UI
 
+export const DEX_REGISTRY_URL = normalizeBaseUrl(
+  process.env.REACT_APP_DEX_REGISTRY_API,
+  ""
+); // optional SQLite registry API for universal DEX config/tokens/pools
+
 export const DEX_CONTRACT_ADDRESS =
   (process.env.REACT_APP_DEX_CONTRACT_ADDRESS || "0x51d85e8fea15bc1523e83f9fc919c11605abc4ae").trim(); // deployed Factory contract
 

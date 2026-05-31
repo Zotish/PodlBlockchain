@@ -26,6 +26,19 @@ export function saveTokens(tokens) {
   localStorage.setItem(TOKENS_KEY, JSON.stringify(tokens));
 }
 
+export function mergeTokens(...groups) {
+  const byAddress = new Map();
+  for (const group of groups) {
+    for (const token of Array.isArray(group) ? group : []) {
+      if (!token?.address) continue;
+      const key = String(token.address).toLowerCase();
+      byAddress.set(key, { ...(byAddress.get(key) || {}), ...token, address: key === "lqd" ? "lqd" : token.address });
+    }
+  }
+  byAddress.delete("lqd");
+  return [NATIVE_LQD, ...Array.from(byAddress.values())];
+}
+
 export function upsertToken(token) {
   // Never overwrite native LQD entry
   if (token.address === "lqd") return loadTokens();
