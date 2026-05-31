@@ -3649,17 +3649,10 @@ func prebuiltBuiltinPluginPath(projectRoot, template string) string {
 
 func loadBuiltinPluginBytes(projectRoot, template string) ([]byte, error) {
 	prebuiltPath := prebuiltBuiltinPluginPath(projectRoot, template)
-	if template == "dex_router" {
-		prebuiltPath = prebuiltBuiltinPluginPath(projectRoot, "dex_factory")
-	}
 	if soBytes, err := os.ReadFile(prebuiltPath); err == nil && len(soBytes) > 0 {
 		return soBytes, nil
 	}
-	sourceTemplate := template
-	if template == "dex_router" {
-		sourceTemplate = "dex_factory"
-	}
-	return compileBuiltinTemplate(projectRoot, sourceTemplate)
+	return compileBuiltinTemplate(projectRoot, template)
 }
 
 func compileBuiltinTemplate(projectRoot, template string) ([]byte, error) {

@@ -26,8 +26,11 @@ export const DEX_REGISTRY_URL = normalizeBaseUrl(
 export const DEX_CONTRACT_ADDRESS =
   (process.env.REACT_APP_DEX_CONTRACT_ADDRESS || "0x51d85e8fea15bc1523e83f9fc919c11605abc4ae").trim(); // deployed Factory contract
 
-// LQD DEX Factory + Router ABI
-// Single contract manages ALL pairs — Uniswap v2 Factory + Router combined
+export const DEX_ROUTER_ADDRESS =
+  (process.env.REACT_APP_DEX_ROUTER_ADDRESS || "").trim(); // optional Router contract initialized with factory address
+
+// LQD DEX Factory / Router ABI
+// Factory creates pools. Router can handle swap/liquidity/LP-lock when configured.
 export const DEX_ABI = [
   // ── Factory ─────────────────────────────────────────────────────────────
   { name: "CreatePair",                   inputs: ["string","string"],                        type: "function" },

@@ -1,7 +1,7 @@
 /* global BigInt */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import "./styles.css";
-import { DEX_CONTRACT_ADDRESS, NODE_URL, WALLET_URL, WEB_WALLET_URL } from "./config";
+import { DEX_CONTRACT_ADDRESS, DEX_ROUTER_ADDRESS, NODE_URL, WALLET_URL, WEB_WALLET_URL } from "./config";
 import {
   callContract,
   getBaseFee,
@@ -118,6 +118,7 @@ export default function App() {
 
   // DEX config
   const [dexAddr, setDexAddr] = useState(() => localStorage.getItem("lqd_dex_address") || DEX_CONTRACT_ADDRESS);
+  const [routerAddr, setRouterAddr] = useState(() => localStorage.getItem("lqd_dex_router_address") || DEX_ROUTER_ADDRESS);
   const [nodeUrl, setNodeUrl]   = useState(() => localStorage.getItem("lqd_node_url") || NODE_URL);
   const [walletUrl, setWalletUrl] = useState(() => localStorage.getItem("lqd_wallet_url") || WALLET_URL);
   const [pairAddr, setPairAddr] = useState("");
@@ -192,7 +193,8 @@ export default function App() {
 
   // Wallet is considered connected if address is set + can sign (pk or extension)
   const walletConnected = !!(wallet.address && (wallet.privateKey || (typeof window !== "undefined" && window.lqd)));
-  const canSend = !!(walletConnected && dexAddr);
+  const routeContractAddr = routerAddr || dexAddr;
+  const canSend = !!(walletConnected && routeContractAddr);
   // pairExists = CreatePair has happened; poolHasLiquidity = actual reserves exist
   const dexIsFactory = dexValid && dexKind === "factory";
   const pairExists = !!pairAddr && dexIsFactory;
@@ -289,6 +291,7 @@ export default function App() {
       if (configResult.status === "fulfilled" && configResult.value) {
         const cfg = configResult.value;
         const factory = String(cfg.factory_address || cfg.factoryAddress || "").trim();
+        const router = String(cfg.router_address || cfg.routerAddress || "").trim();
         const node = String(cfg.node_url || cfg.nodeUrl || "").trim().replace(/\/+$/, "");
         const walletServer = String(cfg.wallet_url || cfg.walletUrl || "").trim().replace(/\/+$/, "");
 
@@ -296,6 +299,10 @@ export default function App() {
           setCanonicalDexAddr(factory);
           setDexAddr(factory);
           localStorage.setItem("lqd_dex_address", factory);
+        }
+        if (router) {
+          setRouterAddr(router);
+          localStorage.setItem("lqd_dex_router_address", router);
         }
         if (node) {
           setNodeUrl(node);
@@ -559,11 +566,11 @@ export default function App() {
 
   // ── Validator info ────────────────────────────────────────────────────────
   useEffect(() => {
-    if (tab !== "Validate" || !wallet.address || !dexAddr || !tokenA || !tokenB) return;
-    callContract({ address: dexAddr, caller: wallet.address, fn: "GetValidatorLP", args: [tokenA, tokenB, wallet.address], value: "0" })
+    if (tab !== "Validate" || !wallet.address || !routeContractAddr || !tokenA || !tokenB) return;
+    callContract({ address: routeContractAddr, caller: wallet.address, fn: "GetValidatorLP", args: [tokenA, tokenB, wallet.address], value: "0" })
       .then(r => setValInfo(r))
       .catch(() => setValInfo(null));
-  }, [tab, wallet.address, dexAddr, tokenA, tokenB]);
+  }, [tab, wallet.address, routeContractAddr, tokenA, tokenB]);
 
   // ── Close menus on outside click ─────────────────────────────────────────
   useEffect(() => {
@@ -640,7 +647,7 @@ export default function App() {
   async function doSwap() {
     if (!canSend) { showToast("Connect wallet first", "error"); return; }
     if (!poolHasLiquidity) { showToast("Pool not initialized — add liquidity after creating the pair", "error"); return; }
-    if (!dexIsFactory) { showToast("The configured DEX is not a factory contract. Deploy a fresh DEX first.", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
     if (!amtIn || parseFloat(amtIn) <= 0) { showToast("Enter an amount", "error"); return; }
 
     // Convert human-readable input → raw base units for contract
@@ -674,7 +681,7 @@ export default function App() {
 
     const nativeValue = isNativeIn ? rawIn : "0";
     const ok = await sendTx(
-      dexAddr, "SwapExactTokensForTokens",
+      routeContractAddr, "SwapExactTokensForTokens",
       [rawIn, minOut, tokenIn, tokenOut],
       "Swap submitted",
       nativeValue
@@ -686,7 +693,7 @@ export default function App() {
     if (!canSend) { showToast("Connect wallet first", "error"); return; }
     if (!tokenA || !tokenB) { showToast("Select both tokens first", "error"); return; }
     if (!liqA || !liqB) { showToast("Enter both amounts", "error"); return; }
-    if (!dexIsFactory) { showToast("The configured DEX is not a factory contract. Deploy a fresh DEX first.", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
     await refreshPool();
     if (!pairExists) { showToast("Create the pair first", "error"); return; }
     const rawA = parseHuman(liqA, decA);
@@ -708,20 +715,20 @@ export default function App() {
     if (tokenA === "lqd") nativeValue = rawA;
     else if (tokenB === "lqd") nativeValue = rawB;
 
-    // Factory: AddLiquidity(tokenA, tokenB, amountA, amountB)
-    const ok = await sendTx(dexAddr, "AddLiquidity", [tokenA, tokenB, rawA, rawB], "Liquidity added", nativeValue);
+    // Router/Factory: AddLiquidity(tokenA, tokenB, amountA, amountB)
+    const ok = await sendTx(routeContractAddr, "AddLiquidity", [tokenA, tokenB, rawA, rawB], "Liquidity added", nativeValue);
     if (ok) { setLiqA(""); setLiqB(""); setLiqScreen(null); }
   }
 
   async function doRemoveLiquidity() {
     if (!canSend) { showToast("Connect wallet first", "error"); return; }
     if (!lpBurn) { showToast("Enter LP amount to burn", "error"); return; }
-    if (!dexIsFactory) { showToast("The configured DEX is not a factory contract. Deploy a fresh DEX first.", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
     await refreshPool();
     if (!pairExists) { showToast("Create the pair first", "error"); return; }
     const rawLp = parseHuman(lpBurn, 8);  // LP tokens always 8 decimals
-    // Factory: RemoveLiquidity(tokenA, tokenB, lpAmount)
-    const ok = await sendTx(dexAddr, "RemoveLiquidity", [tokenA, tokenB, rawLp], "Liquidity removed");
+    // Router/Factory: RemoveLiquidity(tokenA, tokenB, lpAmount)
+    const ok = await sendTx(routeContractAddr, "RemoveLiquidity", [tokenA, tokenB, rawLp], "Liquidity removed");
     if (ok) { setLpBurn(""); setLiqScreen(null); }
   }
 
@@ -729,13 +736,13 @@ export default function App() {
     if (!canSend) { showToast("Connect wallet first", "error"); return; }
     if (!tokenA || !tokenB) { showToast("Select the pool tokens first", "error"); return; }
     if (!valLPAmt) { showToast("Enter LP amount", "error"); return; }
-    if (!dexIsFactory) { showToast("The configured DEX is not a factory contract. Deploy a fresh DEX first.", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
     await refreshPool();
     if (!pairExists) { showToast("Create the pair first", "error"); return; }
     const days = parseInt(valDays, 10);
     if (!days || days <= 0) { showToast("Invalid lock duration", "error"); return; }
     const rawLP = parseHuman(valLPAmt, 8);  // LP tokens always 8 decimals
-    const ok = await sendTx(dexAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation");
+    const ok = await sendTx(routeContractAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation");
     if (ok && pairAddr) {
       try {
         const registration = await registerDexValidator({ address: wallet.address, pairAddress: pairAddr });
@@ -750,10 +757,10 @@ export default function App() {
   async function doUnlockLP() {
     if (!canSend) return;
     if (!tokenA || !tokenB) { showToast("Select the pool tokens first", "error"); return; }
-    if (!dexIsFactory) { showToast("The configured DEX is not a factory contract. Deploy a fresh DEX first.", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
     await refreshPool();
     if (!pairExists) { showToast("Create the pair first", "error"); return; }
-    await sendTx(dexAddr, "UnlockValidatorLP", [tokenA, tokenB], "LP unlocked");
+    await sendTx(routeContractAddr, "UnlockValidatorLP", [tokenA, tokenB], "LP unlocked");
   }
 
   async function doImportToken() {
@@ -1602,7 +1609,7 @@ export default function App() {
             <div className="settings-section">
               <h3>DEX Contract</h3>
               <div className="field">
-                <label>DEX Address</label>
+                <label>Factory Address</label>
                 <input
                   value={dexAddr}
                   onChange={e => { setDexAddr(e.target.value); localStorage.setItem("lqd_dex_address", e.target.value); }}
@@ -1610,12 +1617,20 @@ export default function App() {
                   style={{ borderColor: !dexAddr ? "var(--red)" : undefined }}
                 />
               </div>
+              <div className="field">
+                <label>Router Address</label>
+                <input
+                  value={routerAddr}
+                  onChange={e => { setRouterAddr(e.target.value); localStorage.setItem("lqd_dex_router_address", e.target.value); }}
+                  placeholder="0x... (optional router initialized with factory)"
+                />
+              </div>
               {!dexAddr ? (
                 <div className="notice error">⚠ No DEX address set. Deploy a fresh DEX factory to enable swapping and pool creation.</div>
               ) : !dexValid ? (
                 <div className="notice error">⚠ Stored DEX address is stale. Deploy a fresh DEX factory.</div>
               ) : dexKind === "factory" ? (
-                <div className="notice">✓ DEX factory contract configured.</div>
+                <div className="notice">✓ DEX factory contract configured.{routerAddr ? ` Router: ${shortAddr(routerAddr)}` : " Router not set; factory fallback active."}</div>
               ) : dexKind === "swap" ? (
                 <div className="notice error">⚠ This address is a pool contract, not a DEX factory. Create Pair cannot run here. Deploy a fresh DEX factory.</div>
               ) : (
