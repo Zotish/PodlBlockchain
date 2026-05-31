@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   fetchHistoricalTransactionPage,
+  fetchDexRegistryPools,
+  fetchDexRegistryTokens,
   fetchJSON,
   mergeArrayResults,
   firstNodeResult,
@@ -119,7 +121,42 @@ const EmptyRow = ({ colSpan, label }) => (
 
 export const TokenTrackerPage = () => {
   const { contracts, loading, error } = useContracts();
-  const tokens = useMemo(() => contracts.filter(isTokenContract), [contracts]);
+  const [registryTokens, setRegistryTokens] = useState([]);
+  const [registryError, setRegistryError] = useState('');
+  const tokens = useMemo(() => {
+    const byAddress = new Map();
+    registryTokens.forEach((token) => {
+      const address = token.address || token.contract || '';
+      if (!address) return;
+      byAddress.set(String(address).toLowerCase(), {
+        address,
+        type: token.native ? 'native' : 'registry_token',
+        owner: token.owner || '',
+        name: token.name || token.symbol || 'Registry Token',
+        symbol: token.symbol || '',
+        decimals: token.decimals || '8',
+        totalSupply: token.total_supply || token.totalSupply || '',
+        registry: true,
+        verified: token.verified !== false,
+      });
+    });
+    contracts.filter(isTokenContract).forEach((token) => {
+      if (!token.address) return;
+      byAddress.set(String(token.address).toLowerCase(), {
+        ...(byAddress.get(String(token.address).toLowerCase()) || {}),
+        ...token,
+      });
+    });
+    return Array.from(byAddress.values());
+  }, [contracts, registryTokens]);
+
+  useEffect(() => {
+    let alive = true;
+    fetchDexRegistryTokens()
+      .then((items) => { if (alive) setRegistryTokens(items); })
+      .catch((err) => { if (alive) setRegistryError(err.message || 'DEX registry unavailable'); });
+    return () => { alive = false; };
+  }, []);
 
   return (
     <TrackerShell
@@ -129,6 +166,7 @@ export const TokenTrackerPage = () => {
       loading={loading}
       error={error}
     >
+      {registryError && <div className="tracker-warning">DEX registry: {registryError}</div>}
       <div className="tracker-table-wrap">
         <table className="tracker-table">
           <thead>
@@ -152,7 +190,7 @@ export const TokenTrackerPage = () => {
                   <strong>{token.name || token.symbol || 'LQD Token'}</strong>
                   <small>{token.symbol || 'metadata pending'}</small>
                 </td>
-                <td><span className="badge badge-blue">{token.type}</span></td>
+                <td><span className={`badge ${token.registry ? 'badge-teal' : 'badge-blue'}`}>{token.registry ? 'verified registry' : token.type}</span></td>
                 <td>{token.decimals || '-'}</td>
                 <td>{token.totalSupply || '-'}</td>
                 <td><Link to={`/address/${token.address}`}>{shortHash(token.address)}</Link></td>
@@ -168,6 +206,7 @@ export const TokenTrackerPage = () => {
 
 export const PoolTrackerPage = () => {
   const [pools, setPools] = useState([]);
+  const [registryPools, setRegistryPools] = useState([]);
   const [summary, setSummary] = useState({ total: 0, target: 0, unallocated: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -175,13 +214,17 @@ export const PoolTrackerPage = () => {
   const load = useCallback(async () => {
     try {
       setError('');
-      const data = await fetchJSON('/liquidity/pools', { cacheTtlMs: 4000, timeoutMs: 10000 });
+      const [data, registry] = await Promise.all([
+        fetchJSON('/liquidity/pools', { cacheTtlMs: 4000, timeoutMs: 10000 }),
+        fetchDexRegistryPools().catch(() => []),
+      ]);
       const payload = firstNodeResult(data) || {};
       const entries = Object.entries(payload.pools || {}).map(([address, liquidity]) => ({
         address,
         liquidity,
       }));
       setPools(entries);
+      setRegistryPools(registry);
       setSummary({
         total: payload.total || 0,
         target: payload.target_equal || 0,
@@ -214,6 +257,16 @@ export const PoolTrackerPage = () => {
         <div>Target Equal <strong>{formatLQD(summary.target)}</strong></div>
         <div>Unallocated <strong>{formatLQD(summary.unallocated)}</strong></div>
       </div>
+      {registryPools.length > 0 && (
+        <div className="tracker-stat-grid">
+          {registryPools.map((pool) => (
+            <div key={pool.address || `${pool.token_a}-${pool.token_b}`}>
+              {pool.token_a || 'LQD'} / {pool.token_b || pool.symbol || 'Token'}
+              <strong>{pool.tier || 'Tier 3'} · {pool.weight || '0.35x'}</strong>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="tracker-table-wrap">
         <table className="tracker-table">
           <thead>

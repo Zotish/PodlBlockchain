@@ -23,6 +23,11 @@ export const WEB_WALLET_BASE = normalizeBaseUrl(
   "http://127.0.0.1:3000"
 );
 
+export const DEX_REGISTRY_BASE = normalizeBaseUrl(
+  process.env.REACT_APP_DEX_REGISTRY_API,
+  "https://dex-api.178-105-133-94.sslip.io"
+);
+
 export function apiUrl(base, path) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${base}${normalizedPath}`;
@@ -94,6 +99,20 @@ export async function fetchChainJSON(path, options = {}) {
 
 export async function fetchWalletJSON(path, options = {}) {
   return fetchJSON(path, { ...options, base: WALLET_BASE });
+}
+
+export async function fetchDexRegistryJSON(path, options = {}) {
+  return fetchJSON(path, { ...options, base: DEX_REGISTRY_BASE });
+}
+
+export async function fetchDexRegistryTokens(options = {}) {
+  const data = await fetchDexRegistryJSON("/tokens", { cacheTtlMs: 10000, timeoutMs: 10000, ...options });
+  return Array.isArray(data) ? data : [];
+}
+
+export async function fetchDexRegistryPools(options = {}) {
+  const data = await fetchDexRegistryJSON("/pools", { cacheTtlMs: 10000, timeoutMs: 10000, ...options });
+  return Array.isArray(data) ? data : [];
 }
 
 export function extractBlocks(data) {

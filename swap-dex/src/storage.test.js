@@ -2,6 +2,7 @@ import { loadTokens, saveTokens, upsertToken, NATIVE_LQD } from './storage';
 
 beforeEach(() => {
   localStorage.clear();
+  saveTokens([]);
 });
 
 test('loadTokens always includes native LQD first', () => {

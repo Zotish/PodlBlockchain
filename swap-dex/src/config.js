@@ -20,7 +20,7 @@ export const WEB_WALLET_URL = normalizeBaseUrl(
 
 export const DEX_REGISTRY_URL = normalizeBaseUrl(
   process.env.REACT_APP_DEX_REGISTRY_API,
-  ""
+  "https://dex-api.178-105-133-94.sslip.io"
 ); // optional SQLite registry API for universal DEX config/tokens/pools
 
 export const DEX_CONTRACT_ADDRESS =
@@ -46,6 +46,7 @@ export const DEX_ABI = [
   { name: "SwapExactTokensForTokens",     inputs: ["string","string","string","string"],      type: "function" },
 
   // ── View helpers ─────────────────────────────────────────────────────────
+  { name: "GetBestRoute",                 inputs: ["string","string"],                        type: "function" },
   { name: "GetAmountOut",                 inputs: ["string","string","string"],               type: "function" },
   { name: "GetAmountIn",                  inputs: ["string","string","string"],               type: "function" },
   { name: "GetPoolInfo",                  inputs: ["string","string"],                        type: "function" },

@@ -1,4 +1,5 @@
 const TOKENS_KEY = "lqd.swap.tokens";
+let sessionTokens = [];
 
 // Native LQD coin — always present, cannot be removed
 export const NATIVE_LQD = {
@@ -11,19 +12,17 @@ export const NATIVE_LQD = {
 
 export function loadTokens() {
   try {
-    const raw = localStorage.getItem(TOKENS_KEY);
-    const stored = raw ? JSON.parse(raw) : [];
-    const list = Array.isArray(stored) ? stored : [];
-    // Always ensure native LQD is first
-    const withoutNative = list.filter(t => t.address !== "lqd");
+    localStorage.removeItem(TOKENS_KEY);
+    const withoutNative = sessionTokens.filter(t => t.address !== "lqd");
     return [NATIVE_LQD, ...withoutNative];
   } catch {
-    return [NATIVE_LQD];
+    return [NATIVE_LQD, ...sessionTokens.filter(t => t.address !== "lqd")];
   }
 }
 
 export function saveTokens(tokens) {
-  localStorage.setItem(TOKENS_KEY, JSON.stringify(tokens));
+  sessionTokens = (Array.isArray(tokens) ? tokens : []).filter(t => t?.address && t.address !== "lqd" && !t.registry);
+  try { localStorage.removeItem(TOKENS_KEY); } catch {}
 }
 
 export function mergeTokens(...groups) {
@@ -42,8 +41,7 @@ export function mergeTokens(...groups) {
 export function upsertToken(token) {
   // Never overwrite native LQD entry
   if (token.address === "lqd") return loadTokens();
-  const raw = (() => { try { const r = localStorage.getItem(TOKENS_KEY); return r ? JSON.parse(r) : []; } catch { return []; } })();
-  const list = Array.isArray(raw) ? raw.filter(t => t.address !== "lqd") : [];
+  const list = sessionTokens.filter(t => t.address !== "lqd" && !t.registry);
   const idx = list.findIndex((t) => t.address.toLowerCase() === token.address.toLowerCase());
   if (idx >= 0) list[idx] = { ...list[idx], ...token };
   else list.push(token);
