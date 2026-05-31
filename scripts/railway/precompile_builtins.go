@@ -17,6 +17,7 @@ var builtinTemplates = []string{
 	"dao_treasury",
 	"dex_factory",
 	"dex_pair",
+	"dex_router",
 	"dex_swap",
 	"lending_pool",
 	"lqd20",

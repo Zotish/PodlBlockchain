@@ -374,6 +374,14 @@ func (p *Pair) GetInfo(ctx *bc.Context) {
 	})
 }
 
+func (p *Pair) Token0(ctx *bc.Context) {
+	ctx.Set("output", ctx.Get("token0"))
+}
+
+func (p *Pair) Token1(ctx *bc.Context) {
+	ctx.Set("output", ctx.Get("token1"))
+}
+
 // GetRoutingWeight returns this pair's current routing weight (0-100).
 // Set by the Dynamic Liquidity Engine every epoch based on swap volume.
 // Higher weight = more in-demand = preferred routing target.
