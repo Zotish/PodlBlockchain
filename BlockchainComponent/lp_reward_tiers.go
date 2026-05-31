@@ -18,6 +18,28 @@ type lpRewardPosition struct {
 	Locked       bool
 }
 
+func (bc *Blockchain_struct) dexLPRewardPositionFor(address string) (lpRewardPosition, bool) {
+	address = strings.ToLower(strings.TrimSpace(address))
+	if address == "" {
+		return lpRewardPosition{}, false
+	}
+
+	var aggregate lpRewardPosition
+	for _, pos := range bc.dexLPRewardPositions() {
+		if !strings.EqualFold(pos.Address, address) {
+			continue
+		}
+		if aggregate.Address == "" {
+			aggregate = pos
+			continue
+		}
+		aggregate.LiquidityUSD += pos.LiquidityUSD
+		aggregate.Weight += pos.Weight
+		aggregate.Locked = aggregate.Locked || pos.Locked
+	}
+	return aggregate, aggregate.Address != ""
+}
+
 func (bc *Blockchain_struct) dexLPRewardPositions() []lpRewardPosition {
 	if bc.ContractEngine == nil || bc.ContractEngine.DB == nil {
 		return nil

@@ -1533,6 +1533,25 @@ func (bc *Blockchain_struct) ClaimLPRewards(address string) (*big.Int, string, e
 		}
 	}
 	if !exists {
+		if pos, ok := bc.dexLPRewardPositionFor(address); ok {
+			address = pos.Address
+			lp = &LiquidityProvider{
+				Address:        pos.Address,
+				StakeAmount:    big.NewInt(0),
+				LiquidityPower: pos.Weight,
+				TotalRewards:   big.NewInt(0),
+				PendingRewards: big.NewInt(0),
+				UnstakeAmount:  big.NewInt(0),
+				ReleasedSoFar:  big.NewInt(0),
+			}
+			if bc.LiquidityProviders == nil {
+				bc.LiquidityProviders = make(map[string]*LiquidityProvider)
+			}
+			bc.LiquidityProviders[address] = lp
+			exists = true
+		}
+	}
+	if !exists {
 		return nil, "", fmt.Errorf("no liquidity position found")
 	}
 	if lp.PendingRewards == nil || lp.PendingRewards.Sign() <= 0 {
