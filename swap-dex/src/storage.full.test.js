@@ -5,6 +5,7 @@ import { loadTokens, saveTokens, upsertToken, NATIVE_LQD } from './storage';
 
 beforeEach(() => {
   localStorage.clear();
+  saveTokens([]);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,11 +79,12 @@ describe('loadTokens', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('saveTokens', () => {
-  test('persists tokens to localStorage', () => {
+  test('keeps local session tokens out of localStorage', () => {
     const tokens = [{ address: '0xabc', symbol: 'ABC', decimals: '8' }];
     saveTokens(tokens);
     const raw = localStorage.getItem('lqd.swap.tokens');
-    expect(JSON.parse(raw)).toEqual(tokens);
+    expect(raw).toBeNull();
+    expect(loadTokens()).toEqual([NATIVE_LQD, ...tokens]);
   });
 
   test('overwrites previous data', () => {

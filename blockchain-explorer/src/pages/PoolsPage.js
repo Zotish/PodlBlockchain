@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { fetchJSON, firstNodeResult } from "../utils/api";
+import { fetchDexRegistryPools, fetchJSON, firstNodeResult } from "../utils/api";
 import { formatLQD } from "../utils/lqdUnits";
 
 const REFRESH_MS = 5000;
@@ -9,14 +9,19 @@ export default function PoolsPage() {
   const [total, setTotal] = useState(0);
   const [target, setTarget] = useState(0);
   const [unallocated, setUnallocated] = useState(0);
+  const [registryPools, setRegistryPools] = useState([]);
   const [error, setError] = useState("");
 
   const loadPools = async () => {
     try {
       setError("");
-      const data = await fetchJSON("/liquidity/pools");
+      const [data, registry] = await Promise.all([
+        fetchJSON("/liquidity/pools"),
+        fetchDexRegistryPools().catch(() => []),
+      ]);
       const payload = firstNodeResult(data) || {};
       setPools(payload.pools || {});
+      setRegistryPools(registry);
       setTotal(payload.total || 0);
       setTarget(payload.target_equal || 0);
       setUnallocated(payload.unallocated || 0);
@@ -44,6 +49,17 @@ export default function PoolsPage() {
         <div>Target Equal: {formatLQD(target)}</div>
         <div>Unallocated: {formatLQD(unallocated)}</div>
       </div>
+
+      {registryPools.length > 0 && (
+        <div className="stats-card">
+          <strong>DEX Registry Pools</strong>
+          {registryPools.map((pool) => (
+            <div key={pool.address || `${pool.token_a}-${pool.token_b}`}>
+              {pool.token_a || "LQD"} / {pool.token_b || pool.symbol || "Token"} · {pool.tier || "Tier 3"} · Weight {pool.weight || "0.35x"}
+            </div>
+          ))}
+        </div>
+      )}
 
       <table className="table">
         <thead>

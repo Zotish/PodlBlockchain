@@ -50,6 +50,9 @@ const scale = (size) => (SCREEN_WIDTH / 375) * size;
 
 import {
   getJson,
+  dexRegistryConfig,
+  dexRegistryPools,
+  dexRegistryTokens,
   nodeBaseFee,
   nodeBridgeRequests,
   nodeBridgeFamilies,
@@ -1582,7 +1585,12 @@ function App() {
   }
 
   async function buildMobilePoolCards(poolsPayload) {
+    const registryPools = await dexRegistryPools().catch(() => []);
     const poolMap = normalizePoolMap(poolsPayload);
+    (registryPools || []).forEach((pool) => {
+      const address = normalizeAddress(pool.address || pool.pool || "");
+      if (address && !poolMap[address]) poolMap[address] = pool.liquidity || "0";
+    });
     const entries = Object.keys(poolMap).filter(Boolean).slice(0, 40);
     const cards = [];
     for (const address of entries) {
@@ -1621,6 +1629,7 @@ function App() {
         getJson(`${normalizeUrl(nodeUrl)}/rewards/recent?limit=10`).catch(() => []),
         nodeLiquidityPools(nodeUrl).catch(() => null),
       ]);
+      await syncDexRegistryIntoWallet().catch(() => null);
       const poolCards = await buildMobilePoolCards(poolsPayload || {});
       setLiquidityDashboard({
         protocol,
@@ -2385,7 +2394,7 @@ function App() {
         })()
       ];
 
-      const [status, native, factory, recent, requests, tokensResp, poolsResp, feeResp] = await Promise.all([
+      const [status, native, factory, recent, requests, tokensResp, poolsResp, feeResp, dexRegistry] = await Promise.all([
         rpcPromises[0],
         rpcPromises[1],
         family === 'evm' && fullRefresh ? nodeCurrentFactory(nodeUrl).catch(() => null) : Promise.resolve(null),
@@ -2394,6 +2403,7 @@ function App() {
         family === 'evm' && fullRefresh ? nodeBridgeTokens(nodeUrl).catch(() => []) : Promise.resolve([]),
         family === 'evm' && fullRefresh ? nodeLiquidityPools(nodeUrl).catch(() => null) : Promise.resolve(null),
         family === 'evm' && fullRefresh ? nodeBaseFee(nodeUrl).catch(() => 10) : Promise.resolve(10),
+        family === 'evm' && fullRefresh ? syncDexRegistryIntoWallet().catch(() => null) : Promise.resolve(null),
       ]);
 
       const online = !!status?.online || !!status?.version;
@@ -2451,6 +2461,7 @@ function App() {
             bridgeTokens: Array.isArray(tokensResp) ? tokensResp : [],
             factory,
             pools: poolsResp,
+            registryTokens: dexRegistry?.tokens || [],
           }, targetAddr));
         }
         Promise.allSettled(backgroundTasks).catch((error) => {
@@ -2629,12 +2640,45 @@ function App() {
     return detected.length;
   }
 
+  function normalizeRegistryToken(token = {}) {
+    const address = normalizeAddress(token.address || token.contract || "");
+    if (!address || address === "lqd") return null;
+    return {
+      address,
+      name: token.name || token.symbol || "Registry Token",
+      symbol: token.symbol || address.slice(2, 6).toUpperCase(),
+      decimals: String(token.decimals || "8"),
+      balance: "0",
+      detectedFrom: "dex-registry",
+      verified: token.verified !== false,
+      registry: true,
+      networkId: "lqd",
+      family: "evm",
+      holderAddress: wallet?.address || "",
+      logoUrl: token.logo_url || token.logoUrl || "",
+    };
+  }
+
+  async function syncDexRegistryIntoWallet() {
+    const [cfg, tokens] = await Promise.all([
+      dexRegistryConfig().catch(() => null),
+      dexRegistryTokens().catch(() => []),
+    ]);
+    if (cfg?.factory_address) setFactoryAddress(String(cfg.factory_address));
+    const registryTokens = (Array.isArray(tokens) ? tokens : []).map(normalizeRegistryToken).filter(Boolean);
+    if (registryTokens.length) {
+      setWatchlist((prev) => mergeUniqueByKey(prev, registryTokens, "address"));
+    }
+    return { cfg, tokens: registryTokens };
+  }
+
   async function autoDiscoverTokens(snapshot = {}, addressOverride = "") {
     const activeAddress = addressOverride || wallet?.address;
     if (!activeAddress) return 0;
     const currentAddress = normalizeAddress(activeAddress);
     const recent = Array.isArray(snapshot.recent) ? snapshot.recent : recentTxs;
     const bridgeTokenList = Array.isArray(snapshot.bridgeTokens) ? snapshot.bridgeTokens : bridgeTokens;
+    const registryTokenList = Array.isArray(snapshot.registryTokens) ? snapshot.registryTokens : [];
     const factory = snapshot.factory || null;
     const poolTokenCandidates = await discoverPoolTokenCandidates(snapshot.pools);
 
@@ -2657,6 +2701,7 @@ function App() {
 
     const extra = [
       ...tokenCandidateFromValue(bridgeTokenList),
+      ...tokenCandidateFromValue(registryTokenList),
       ...tokenCandidateFromValue(factory),
       ...poolTokenCandidates,
       ...tokenCandidateFromValue(deployForm.tokenA),

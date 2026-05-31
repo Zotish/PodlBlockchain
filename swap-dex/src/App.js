@@ -137,10 +137,13 @@ export default function App() {
   const [amtIn,   setAmtIn]   = useState("");
   const [amtOut,  setAmtOut]  = useState("");
   const [impact,  setImpact]  = useState(0); // basis-points
+  const [quoteAt, setQuoteAt] = useState(0);
+  const [routeInfo, setRouteInfo] = useState("");
 
   // Settings (slippage)
   const [slippage, setSlippage]       = useState("0.5");
   const [customSlip, setCustomSlip]   = useState("");
+  const [deadlineMinutes, setDeadlineMinutes] = useState("20");
   const [showSettings, setShowSettings] = useState(false);
 
   // Liquidity UI state (sub-screen: null | "add" | "remove")
@@ -228,8 +231,27 @@ export default function App() {
     const rawOut = quoteOut(rawIn, resA, resB);
     setAmtOut(rawOut > 0n ? fmtAmount(rawOut.toString(), decB) : "");
     setImpact(priceImpactBps(rawIn, resA));
+    setQuoteAt(rawOut > 0n ? Date.now() : 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amtIn, pool.reserveA, pool.reserveB, decA, decB]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!routeContractAddr || !wallet.address || !tokenA || !tokenB) {
+      setRouteInfo("");
+      return () => { alive = false; };
+    }
+    callContract({ address: routeContractAddr, caller: wallet.address, fn: "GetBestRoute", args: [tokenA, tokenB], value: "0" })
+      .then((res) => {
+        if (!alive) return;
+        const output = String(res?.output || res?.Output || "").trim();
+        if (!output) setRouteInfo("No route");
+        else if (output.includes(",")) setRouteInfo(`Multi-hop · ${output.split(",").map(shortAddr).join(" → ")}`);
+        else setRouteInfo(`Direct · ${shortAddr(output)}`);
+      })
+      .catch(() => { if (alive) setRouteInfo(pairExists ? `Direct · ${shortAddr(displayedPairAddr)}` : "Route unavailable"); });
+    return () => { alive = false; };
+  }, [routeContractAddr, wallet.address, tokenA, tokenB, pairExists, displayedPairAddr]);
 
   // ── Extension auto-connect + accountsChanged reactive listener ──────────
   useEffect(() => {
@@ -325,7 +347,7 @@ export default function App() {
           verified: token.verified !== false,
           registry: true
         }));
-        setTokens((current) => mergeTokens(registryTokens, current));
+        setTokens((current) => mergeTokens(current, registryTokens));
       }
     }
 
@@ -649,6 +671,11 @@ export default function App() {
     if (!poolHasLiquidity) { showToast("Pool not initialized — add liquidity after creating the pair", "error"); return; }
     if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
     if (!amtIn || parseFloat(amtIn) <= 0) { showToast("Enter an amount", "error"); return; }
+    const deadlineMs = Math.max(1, parseInt(deadlineMinutes, 10) || 20) * 60 * 1000;
+    if (!quoteAt || Date.now() - quoteAt > deadlineMs) {
+      showToast("Quote expired. Refresh the amount or pool quote before swapping.", "error");
+      return;
+    }
 
     // Convert human-readable input → raw base units for contract
     const inDec = decA;
@@ -775,7 +802,7 @@ export default function App() {
       const caller = wallet.address || ZERO_ADDR;
       const m = await getTokenMeta(addr, caller);
       const list = upsertToken({ address: addr, name: m.name || "Token", symbol: m.symbol || addr.slice(2, 6).toUpperCase(), decimals: m.decimals || "8" });
-      setTokens(list);
+      setTokens((current) => mergeTokens(current.filter(t => t.registry), list));
       setImportAddr("");
       showToast("Token imported", "success");
     } catch (err) { showToast(err.message || "Import failed", "error"); }
@@ -1090,6 +1117,19 @@ export default function App() {
                         <span>Active: {activeSlip}%</span>
                         {parseFloat(activeSlip) > 5 && <span style={{ color: "var(--yellow)" }}>⚠ High</span>}
                       </div>
+                      <div className="settings-row" style={{ marginTop: 10 }}>
+                        <span>Quote deadline</span>
+                        <input
+                          className="settings-input"
+                          style={{ width: 86 }}
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={deadlineMinutes}
+                          onChange={(e) => setDeadlineMinutes(e.target.value.replace(/[^\d]/g, "") || "1")}
+                        />
+                        <span>min</span>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1172,7 +1212,11 @@ export default function App() {
                   </div>
                   <div className="price-row">
                     <span className="price-label">Route</span>
-                    <span>{symA} → {symB}</span>
+                    <span>{symA} → {symB}{routeInfo ? ` · ${routeInfo}` : (routerAddr ? " · Router" : " · Factory fallback")}</span>
+                  </div>
+                  <div className="price-row">
+                    <span className="price-label">Quote Deadline</span>
+                    <span>{deadlineMinutes || "1"} min</span>
                   </div>
                 </div>
               )}
@@ -1664,8 +1708,8 @@ export default function App() {
                           style={{ background: "none", border: "none", color: "var(--red)", cursor: "pointer", fontSize: 14, padding: "0 4px" }}
                           onClick={() => {
                             const list = tokens.filter(x => x.address !== t.address);
-                            saveTokens(list.filter(x => !x.native));
-                            setTokens(loadTokens());
+                            saveTokens(list.filter(x => !x.native && !x.registry));
+                            setTokens(list);
                             if (tokenA === t.address) setTokenA("");
                             if (tokenB === t.address) setTokenB("");
                           }}
@@ -1675,18 +1719,18 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              {tokens.filter(t => !t.native).length > 0 && (
+              {tokens.filter(t => !t.native && !t.registry).length > 0 && (
                 <button
                   className="action-btn secondary"
                   style={{ margin: "10px 0 0", borderColor: "var(--red)", color: "var(--red)" }}
                   onClick={() => {
                     saveTokens([]);
-                    setTokens(loadTokens());
+                    setTokens(tokens.filter(t => t.native || t.registry));
                     setTokenA(""); setTokenB("");
-                    showToast("Token list cleared", "success");
+                    showToast("Local session tokens cleared", "success");
                   }}
                 >
-                  Clear All Tokens
+                  Clear Local Tokens
                 </button>
               )}
             </div>

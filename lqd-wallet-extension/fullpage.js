@@ -5,6 +5,7 @@ const PROD_WALLET_URL = "https://wallet.178-105-133-94.sslip.io";
 const PROD_AGGREGATOR_URL = "https://api.178-105-133-94.sslip.io";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
 const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
+const PROD_DEX_REGISTRY_URL = "https://dex-api.178-105-133-94.sslip.io";
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
@@ -194,6 +195,15 @@ async function walletPost(path, body) {
   return data;
 }
 
+async function dexRegistryGet(path) {
+  const r = await fetch(PROD_DEX_REGISTRY_URL + path);
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!r.ok) throw new Error(data.error || text || "DEX registry request failed");
+  return data;
+}
+
 async function contractCall(contractAddr, fn, args = []) {
   return nodePost("/contract/call", {
     address: contractAddr, caller: state.address,
@@ -290,6 +300,7 @@ function showApp() {
   loadBridgeChains().catch(() => { });
   useExtensionWalletSigner().catch(() => { });
   loadTokens();
+  syncDexRegistryTokens().catch(() => { });
   refreshBalance();
   loadActivity();
   loadNetworkList();
@@ -431,6 +442,36 @@ function upsertToken(t) {
   else state.tokens.push(t);
   saveTokens();
   renderTokenList();
+}
+
+function normalizeRegistryToken(token = {}) {
+  const address = String(token.address || token.contract || "").trim().toLowerCase();
+  if (!address || address === "lqd") return null;
+  return {
+    address,
+    name: token.name || token.symbol || "Registry Token",
+    symbol: token.symbol || address.slice(2, 6).toUpperCase(),
+    decimals: parseInt(token.decimals, 10) || 8,
+    balance: "0",
+    registry: true,
+    verified: token.verified !== false,
+    logo_url: token.logo_url || token.logoUrl || "",
+  };
+}
+
+async function syncDexRegistryTokens() {
+  const tokens = await dexRegistryGet("/tokens").catch(() => []);
+  const registryTokens = (Array.isArray(tokens) ? tokens : []).map(normalizeRegistryToken).filter(Boolean);
+  if (!registryTokens.length) return [];
+  registryTokens.forEach((token) => {
+    const idx = state.tokens.findIndex(x => String(x.address).toLowerCase() === token.address);
+    if (idx >= 0) state.tokens[idx] = { ...state.tokens[idx], ...token };
+    else state.tokens.push(token);
+  });
+  saveTokens();
+  renderTokenList();
+  await Promise.allSettled(registryTokens.map((token) => refreshTokenBal(token.address)));
+  return registryTokens;
 }
 
 async function fetchTokenMeta(addr) {
@@ -760,6 +801,7 @@ function formatLockDays(raw) {
 async function buildPoolCards(poolsPayload, preferredForm) {
   const poolMap = normalizePoolMap(poolsPayload);
   const savedPools = loadSavedLPPools();
+  const registryPools = await dexRegistryGet("/pools").catch(() => []);
   const byAddress = new Map();
   Object.keys(poolMap).forEach((address) => {
     if (address) byAddress.set(String(address).toLowerCase(), { pool: address });
@@ -767,6 +809,21 @@ async function buildPoolCards(poolsPayload, preferredForm) {
   savedPools.forEach((pool) => {
     const key = String(pool.pool).toLowerCase();
     byAddress.set(key, { ...(byAddress.get(key) || {}), ...pool });
+  });
+  (Array.isArray(registryPools) ? registryPools : []).forEach((pool) => {
+    const address = String(pool.address || pool.pool || "").trim().toLowerCase();
+    if (!address) return;
+    byAddress.set(address, {
+      ...(byAddress.get(address) || {}),
+      pool: address,
+      tokenA: pool.token_a || pool.tokenA || "lqd",
+      tokenB: pool.token_b || pool.tokenB || "",
+      decimalsA: parseInt(pool.decimals_a || pool.decimalsA || 8, 10) || 8,
+      decimalsB: parseInt(pool.decimals_b || pool.decimalsB || 8, 10) || 8,
+      registry: true,
+      registryTier: pool.tier,
+      registryWeight: pool.weight,
+    });
   });
   if (preferredForm?.pool) {
     const key = String(preferredForm.pool).toLowerCase();
@@ -793,8 +850,8 @@ async function buildPoolCards(poolsPayload, preferredForm) {
       registryLiquidity: poolMap[address] || poolMap[String(address).toLowerCase()] || "0",
       pair: `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
       slotId: slot?.id || "",
-      tierLabel: slot?.tier || "Tier 3",
-      weightLabel: slot?.weight || "0.35x",
+      tierLabel: slot?.tier || (entry.registryTier ? `Tier ${entry.registryTier}` : "Tier 3"),
+      weightLabel: slot?.weight || (entry.registryWeight ? `${entry.registryWeight}x` : "0.35x"),
     });
   }
   return cards;
@@ -968,6 +1025,7 @@ function renderLiquidityDashboard() {
 
 async function loadLiquidityDashboard() {
   loadSavedLPSettings();
+  await syncDexRegistryTokens().catch(() => []);
   let form = getLPForm();
   try {
     const [protocol, providers, latestRewards, recentRewards, pools] = await Promise.all([
