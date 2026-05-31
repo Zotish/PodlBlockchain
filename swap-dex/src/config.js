@@ -19,7 +19,7 @@ export const WEB_WALLET_URL = normalizeBaseUrl(
 ); // optional web wallet UI
 
 export const DEX_CONTRACT_ADDRESS =
-  (process.env.REACT_APP_DEX_CONTRACT_ADDRESS || "").trim(); // set after deploying fresh Factory contract
+  (process.env.REACT_APP_DEX_CONTRACT_ADDRESS || "0x51d85e8fea15bc1523e83f9fc919c11605abc4ae").trim(); // deployed Factory contract
 
 // LQD DEX Factory + Router ABI
 // Single contract manages ALL pairs — Uniswap v2 Factory + Router combined
