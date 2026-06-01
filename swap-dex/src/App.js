@@ -24,6 +24,13 @@ const SECS_PER_DAY = 86400;
 const TABS = ["Swap", "Pool", "Validate", "Settings"];
 const SLIPPAGE_PRESETS = ["0.1", "0.5", "1.0"];
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+const DEX_GAS = {
+  approve: 120000,
+  createPair: 1200000,
+  liquidity: 900000,
+  swap: 700000,
+  validation: 600000
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function safeBig(v) {
@@ -607,12 +614,13 @@ export default function App() {
   }, [showSettings, showWalletMenu]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
-  async function sendTx(contractAddress, fn, args, successMsg, nativeValue = "0") {
+  async function sendTx(contractAddress, fn, args, successMsg, nativeValue = "0", gas = 500000) {
     setLoading(true);
     try {
       const res = await sendContractTx({
         address: wallet.address, privateKey: wallet.privateKey,
         contractAddress, fn, args, value: nativeValue,
+        gas,
         gasPrice: baseFee ? baseFee + 1 : 0,
         onPending: () => showToast("🔔 Open the LQD Wallet extension popup to approve this transaction", "info")
       });
@@ -628,7 +636,12 @@ export default function App() {
       setTimeout(() => { refreshPool(); refreshAllowances(); refreshBalances(); }, 1500);
       return true;
     } catch (err) {
-      showToast(err.message || "Transaction failed", "error");
+      const msg = err.message || "Transaction failed";
+      if (msg.includes("runtime fingerprint mismatch")) {
+        showToast("This DEX contract is from an older backend build. Deploy/set a fresh factory + router, then retry.", "error");
+      } else {
+        showToast(msg, "error");
+      }
       return false;
     } finally {
       setLoading(false);
@@ -640,7 +653,7 @@ export default function App() {
     if (!canSend || !tokenAddr) return;
     if (!approvalTargetAddr) { showToast("Select both tokens and set the DEX address first", "error"); return; }
     const rawAmt = parseHuman(humanAmt, dec) || "0";
-    const ok = await sendTx(tokenAddr, "Approve", [approvalTargetAddr, rawAmt], "Approved");
+    const ok = await sendTx(tokenAddr, "Approve", [approvalTargetAddr, rawAmt], "Approved", "0", DEX_GAS.approve);
     if (ok) {
       // Set optimistic floor in ref — survives re-renders until on-chain confirms
       if (tokenAddr === tokenA) minAllowanceRef.current.a = rawAmt;
@@ -659,7 +672,7 @@ export default function App() {
     if (!tokenA || !tokenB) { showToast("Select both tokens first", "error"); return false; }
     if (!dexIsFactory) { showToast("The configured DEX is not a factory contract. Deploy a fresh DEX first.", "error"); return false; }
     // Factory uses CreatePair(tokenA, tokenB)
-    const ok = await sendTx(dexAddr, "CreatePair", [tokenA, tokenB], "Pair created — waiting for confirmation…");
+    const ok = await sendTx(dexAddr, "CreatePair", [tokenA, tokenB], "Pair created — waiting for confirmation…", "0", DEX_GAS.createPair);
     if (ok) {
       await refreshPool();
       await refreshAllowances();
@@ -713,7 +726,8 @@ export default function App() {
       routeContractAddr, "SwapExactTokensForTokens",
       [rawIn, minOut, tokenIn, tokenOut],
       "Swap submitted",
-      nativeValue
+      nativeValue,
+      DEX_GAS.swap
     );
     if (ok) { setAmtIn(""); setAmtOut(""); }
   }
@@ -745,7 +759,7 @@ export default function App() {
     else if (tokenB === "lqd") nativeValue = rawB;
 
     // Router/Factory: AddLiquidity(tokenA, tokenB, amountA, amountB)
-    const ok = await sendTx(routeContractAddr, "AddLiquidity", [tokenA, tokenB, rawA, rawB], "Liquidity added", nativeValue);
+    const ok = await sendTx(routeContractAddr, "AddLiquidity", [tokenA, tokenB, rawA, rawB], "Liquidity added", nativeValue, DEX_GAS.liquidity);
     if (ok) { setLiqA(""); setLiqB(""); setLiqScreen(null); }
   }
 
@@ -757,7 +771,7 @@ export default function App() {
     if (!pairExists) { showToast("Create the pair first", "error"); return; }
     const rawLp = parseHuman(lpBurn, 8);  // LP tokens always 8 decimals
     // Router/Factory: RemoveLiquidity(tokenA, tokenB, lpAmount)
-    const ok = await sendTx(routeContractAddr, "RemoveLiquidity", [tokenA, tokenB, rawLp], "Liquidity removed");
+    const ok = await sendTx(routeContractAddr, "RemoveLiquidity", [tokenA, tokenB, rawLp], "Liquidity removed", "0", DEX_GAS.liquidity);
     if (ok) { setLpBurn(""); setLiqScreen(null); }
   }
 
@@ -771,7 +785,7 @@ export default function App() {
     const days = parseInt(valDays, 10);
     if (!days || days <= 0) { showToast("Invalid lock duration", "error"); return; }
     const rawLP = parseHuman(valLPAmt, 8);  // LP tokens always 8 decimals
-    const ok = await sendTx(routeContractAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation");
+    const ok = await sendTx(routeContractAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation", "0", DEX_GAS.validation);
     if (ok && pairAddr) {
       try {
         const registration = await registerDexValidator({ address: wallet.address, pairAddress: pairAddr });
@@ -789,7 +803,7 @@ export default function App() {
     if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
     await refreshPool();
     if (!pairExists) { showToast("Create the pair first", "error"); return; }
-    await sendTx(routeContractAddr, "UnlockValidatorLP", [tokenA, tokenB], "LP unlocked");
+    await sendTx(routeContractAddr, "UnlockValidatorLP", [tokenA, tokenB], "LP unlocked", "0", DEX_GAS.validation);
   }
 
   async function doImportToken() {
