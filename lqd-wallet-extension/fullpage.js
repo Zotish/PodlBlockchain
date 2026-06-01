@@ -1064,6 +1064,9 @@ async function loadLiquidityDashboard() {
       poolCards,
       selectedPool,
     };
+    if (protocol?.exists !== false && protocol?.Address && String(protocol.Address).toLowerCase() !== String(state.address).toLowerCase()) {
+      protocol.Address = state.address;
+    }
     renderPoolCards();
     renderLiquidityDashboard();
   } catch (e) {
