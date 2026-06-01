@@ -312,6 +312,27 @@ async function callNodeGet(path) {
   if (!res.ok) throw new Error(extractErr(data, text || `Node error ${res.status}`));
   return data;
 }
+function safeBig(raw) {
+  try {
+    if (raw === null || raw === undefined || raw === "") return 0n;
+    if (typeof raw === "number") return BigInt(Math.trunc(raw));
+    return BigInt(String(raw));
+  } catch {
+    return 0n;
+  }
+}
+function readBalanceRaw(data) {
+  return String(data?.balance ?? data?.confirmed_balance ?? data?.Balance ?? data?.confirmed ?? "0");
+}
+async function callCombinedBalance(address) {
+  const original = String(address || "").trim();
+  if (!original) return "0";
+  const primary = await callNodeGet(`/balance?address=${encodeURIComponent(original)}`);
+  const lower = original.toLowerCase();
+  if (original === lower) return readBalanceRaw(primary);
+  const secondary = await callNodeGet(`/balance?address=${encodeURIComponent(lower)}`).catch(() => null);
+  return (safeBig(readBalanceRaw(primary)) + safeBig(readBalanceRaw(secondary))).toString();
+}
 async function callWallet(path, body) {
   let res;
   try {
@@ -400,8 +421,8 @@ async function handleRequest({ id, method, params }) {
 
     case "lqd_getBalance": {
       const addr = (params && params[0]) || session.address;
-      const res = await callNodeGet(`/balance?address=${encodeURIComponent(addr)}`);
-      return { result: res.balance ?? res };
+      const balance = await callCombinedBalance(addr);
+      return { result: balance };
     }
 
     case "lqd_estimateGas": {

@@ -116,6 +116,33 @@ function formatLQD(raw) {
   return fracPart ? `${intPart}.${fracPart}` : intPart;
 }
 
+function safeBig(raw) {
+  try {
+    if (raw === null || raw === undefined || raw === "") return 0n;
+    if (typeof raw === "number") return BigInt(Math.trunc(raw));
+    return BigInt(String(raw));
+  } catch {
+    return 0n;
+  }
+}
+
+function readBalanceRaw(data) {
+  return String(data?.balance ?? data?.confirmed_balance ?? data?.Balance ?? data?.confirmed ?? "0");
+}
+
+async function fetchCombinedBalanceRaw(url, address) {
+  const original = String(address || "").trim();
+  if (!original) return "0";
+  const primaryRes = await fetch(`${url}/balance?address=${encodeURIComponent(original)}`);
+  const primary = await primaryRes.json();
+  const lower = original.toLowerCase();
+  if (original === lower) return readBalanceRaw(primary);
+  const secondary = await fetch(`${url}/balance?address=${encodeURIComponent(lower)}`)
+    .then((res) => res.json())
+    .catch(() => null);
+  return (safeBig(readBalanceRaw(primary)) + safeBig(readBalanceRaw(secondary))).toString();
+}
+
 function parseAmount(human, decimals = 8) {
   if (!human) return "0";
   const [intS, fracS = ""] = String(human).split(".");
@@ -193,9 +220,7 @@ async function refreshBalance() {
   try {
     let url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
     if (isLocalEndpoint(url)) url = PROD_CHAIN_URL;
-    const res = await fetch(`${url}/balance?address=${encodeURIComponent(data.address)}`);
-    const json = await res.json();
-    const raw = json.balance || json.Balance || "0";
+    const raw = await fetchCombinedBalanceRaw(url, data.address);
     const el = document.getElementById("lqdBalance");
     if (el) el.textContent = `${formatLQD(raw)} LQD`;
   } catch (e) {
@@ -584,9 +609,7 @@ on("openSend", "click", async () => {
     let url = (data.nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
     if (isLocalEndpoint(url)) url = PROD_CHAIN_URL;
     try {
-      const res = await fetch(`${url}/balance?address=${encodeURIComponent(data.address)}`);
-      const json = await res.json();
-      _sendRawBalance = json.balance || json.Balance || "0";
+      _sendRawBalance = await fetchCombinedBalanceRaw(url, data.address);
       const el = document.getElementById("sendBalanceDisplay");
       if (el) el.textContent = `Balance: ${formatLQD(_sendRawBalance)} LQD`;
     } catch { }
