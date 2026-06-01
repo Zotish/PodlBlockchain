@@ -1,10 +1,28 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import TransactionList from '../components/TransactionList';
-import { formatLQD } from "../utils/lqdUnits";
+import { formatLQD, toBigIntSafe } from "../utils/lqdUnits";
 import { fetchJSON, mergeArrayResults, firstNodeResult } from "../utils/api";
 
 const REFRESH_MS = 5000;
+
+async function fetchCombinedBalance(address) {
+  const original = String(address || '').trim();
+  const lower = original.toLowerCase();
+  const primary = firstNodeResult(await fetchJSON(`/balance?address=${encodeURIComponent(original)}`));
+  if (!primary || !original || original === lower) return primary;
+  const secondary = firstNodeResult(
+    await fetchJSON(`/balance?address=${encodeURIComponent(lower)}`).catch(() => null)
+  );
+  if (!secondary) return primary;
+  return {
+    ...primary,
+    balance: (toBigIntSafe(primary.balance ?? primary.confirmed_balance) + toBigIntSafe(secondary.balance ?? secondary.confirmed_balance)).toString(),
+    confirmed_balance: (toBigIntSafe(primary.confirmed_balance ?? primary.balance) + toBigIntSafe(secondary.confirmed_balance ?? secondary.balance)).toString(),
+    pending_balance_change: (toBigIntSafe(primary.pending_balance_change ?? primary.pending) + toBigIntSafe(secondary.pending_balance_change ?? secondary.pending)).toString(),
+    isValidator: primary.isValidator || secondary.isValidator || false
+  };
+}
 
 const AddressPage = () => {
   const { address } = useParams();
@@ -17,8 +35,7 @@ const AddressPage = () => {
     const fetchAddressData = async () => {
       try {
         // Fetch address balance and basic info
-        const balanceData = await fetchJSON(`/balance?address=${address}`);
-        const balanceResult = firstNodeResult(balanceData);
+        const balanceResult = await fetchCombinedBalance(address);
         if (!balanceResult) {
           throw new Error('Address not found');
         }

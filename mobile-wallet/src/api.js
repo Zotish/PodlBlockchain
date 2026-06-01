@@ -129,7 +129,22 @@ export async function walletImportPrivateKey(walletUrl, privateKey) {
 }
 
 export async function walletBalance(nodeUrl, address) {
-  return getJson(`${normalizeUrl(nodeUrl)}/balance?address=${encodeURIComponent(address)}`);
+  const original = String(address || "").trim();
+  const lower = original.toLowerCase();
+  const primary = await getJson(`${normalizeUrl(nodeUrl)}/balance?address=${encodeURIComponent(original)}`);
+  if (!original || original === lower) return primary;
+  const secondary = await getJson(`${normalizeUrl(nodeUrl)}/balance?address=${encodeURIComponent(lower)}`).catch(() => null);
+  if (!secondary) return primary;
+  const read = (data, key, fallbackKey) => String(data?.[key] ?? data?.[fallbackKey] ?? "0");
+  const sum = (...values) => values.reduce((total, value) => {
+    try { return total + BigInt(String(value || "0")); } catch { return total; }
+  }, 0n).toString();
+  return {
+    ...primary,
+    balance: sum(read(primary, "balance", "confirmed_balance"), read(secondary, "balance", "confirmed_balance")),
+    confirmed_balance: sum(read(primary, "confirmed_balance", "balance"), read(secondary, "confirmed_balance", "balance")),
+    pending_balance_change: sum(read(primary, "pending_balance_change", "pending"), read(secondary, "pending_balance_change", "pending")),
+  };
 }
 
 export async function nodeFaucet(nodeUrl, address) {
