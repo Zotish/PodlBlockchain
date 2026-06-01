@@ -41,13 +41,21 @@ export async function getDexRegistryPools() {
 export async function waitForTx(txHash, timeoutMs = 20000) {
   if (!txHash) return null;
   const deadline = Date.now() + timeoutMs;
+  const target = String(txHash).toLowerCase();
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 1200));
     try {
-      const res = await fetch(`${getNodeUrl()}/tx/${encodeURIComponent(txHash)}`);
+      // Avoid noisy browser-console 404s from /tx/:hash while the tx is still
+      // propagating. The paginated list includes pending + confirmed txs.
+      const res = await fetch(`${getNodeUrl()}/transactions?page=1&size=200`);
       if (res.ok) {
         const data = await res.json();
-        if (data && (data.tx_hash || data.TxHash || data.hash)) return data;
+        const txs = Array.isArray(data?.transactions) ? data.transactions : [];
+        const found = txs.find((tx) => {
+          const hash = tx?.tx_hash || tx?.TxHash || tx?.hash;
+          return hash && String(hash).toLowerCase() === target;
+        });
+        if (found && (found.source === "block" || found.block_number !== undefined)) return found;
       }
     } catch {}
   }
