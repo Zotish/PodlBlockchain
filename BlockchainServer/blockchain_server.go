@@ -2552,6 +2552,14 @@ func (bcs *BlockchainServer) GetLiquidityInfo(w http.ResponseWriter, r *http.Req
 	address := r.URL.Query().Get("address")
 	lp := bcs.BlockchainPtr.LiquidityProviders[address]
 	if lp == nil {
+		for key, candidate := range bcs.BlockchainPtr.LiquidityProviders {
+			if strings.EqualFold(key, address) {
+				lp = candidate
+				break
+			}
+		}
+	}
+	if lp == nil {
 		io.WriteString(w, `{"exists":false}`)
 		return
 	}
