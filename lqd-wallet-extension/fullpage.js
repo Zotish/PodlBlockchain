@@ -93,6 +93,29 @@ function safeBig(raw) {
   } catch { return 0n; }
 }
 
+function readBalanceRaw(data) {
+  return String(data?.balance ?? data?.confirmed_balance ?? data?.confirmed ?? "0");
+}
+
+function readPendingRaw(data) {
+  return String(data?.pending_balance_change ?? data?.pending ?? "0");
+}
+
+async function loadCombinedBalance(address) {
+  const original = String(address || "").trim();
+  if (!original) return { balance: "0", pending: "0" };
+  const primary = await nodeGet(`/balance?address=${encodeURIComponent(original)}`);
+  const lower = original.toLowerCase();
+  if (original === lower) {
+    return { balance: readBalanceRaw(primary), pending: readPendingRaw(primary) };
+  }
+  const secondary = await nodeGet(`/balance?address=${encodeURIComponent(lower)}`).catch(() => null);
+  return {
+    balance: (safeBig(readBalanceRaw(primary)) + safeBig(readBalanceRaw(secondary))).toString(),
+    pending: (safeBig(readPendingRaw(primary)) + safeBig(readPendingRaw(secondary))).toString(),
+  };
+}
+
 function formatPercentFromParts(numerator, denominator, decimals = 2) {
   const n = safeBig(numerator);
   const d = safeBig(denominator);
@@ -356,8 +379,8 @@ initSubtabs("contractSubtabs", "sub");
 // ══════════════════════════════════════════════════════════════════
 async function refreshBalance() {
   try {
-    const data = await nodeGet(`/balance?address=${state.address}`);
-    const bal = data.balance ?? data.confirmed ?? "0";
+    const data = await loadCombinedBalance(state.address);
+    const bal = data.balance ?? "0";
     const pend = data.pending ?? "0";
     $("heroBalance").textContent = fmtAmount(bal);
     $("statConfirmed").textContent = fmtAmount(bal) + " LQD";
