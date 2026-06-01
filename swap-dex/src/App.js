@@ -87,7 +87,7 @@ function extractHash(res) {
 }
 
 // ─── Token icon letter ─────────────────────────────────────────────────────
-function TokenIcon({ symbol, size = 22 }) {
+function TokenIcon({ symbol, logoUrl = "", size = 22 }) {
   const letter = (symbol || "?")[0].toUpperCase();
   const hue = ((symbol || "?").charCodeAt(0) * 47 + 120) % 360;
   return (
@@ -98,7 +98,7 @@ function TokenIcon({ symbol, size = 22 }) {
         background: `hsl(${hue},60%,45%)`,
       }}
     >
-      {letter}
+      {logoUrl ? <img src={logoUrl} alt={symbol || "token"} /> : letter}
     </div>
   );
 }
@@ -180,10 +180,12 @@ export default function App() {
   const autoFactoryLoadedRef = useRef(false);
 
   // Derived
-  const symA  = tokens.find(t => t.address === tokenA)?.symbol || "–";
-  const symB  = tokens.find(t => t.address === tokenB)?.symbol || "–";
-  const decA  = parseInt(tokens.find(t => t.address === tokenA)?.decimals || "8", 10) || 8;
-  const decB  = parseInt(tokens.find(t => t.address === tokenB)?.decimals || "8", 10) || 8;
+  const tokenAInfo = tokens.find(t => t.address === tokenA);
+  const tokenBInfo = tokens.find(t => t.address === tokenB);
+  const symA  = tokenAInfo?.symbol || "–";
+  const symB  = tokenBInfo?.symbol || "–";
+  const decA  = parseInt(tokenAInfo?.decimals || "8", 10) || 8;
+  const decB  = parseInt(tokenBInfo?.decimals || "8", 10) || 8;
   const outDec = decB;
   const activeSlip = customSlip || slippage;
   // amtOut is already human-readable; convert → raw for slippage maths
@@ -1150,7 +1152,7 @@ export default function App() {
                     className={`token-select-btn${!tokenA ? " unset" : ""}`}
                     onClick={() => openTokenModal("A")}
                   >
-                    {tokenA ? <><TokenIcon symbol={symA} />{symA}</> : "Select token"}
+                    {tokenA ? <><TokenIcon symbol={symA} logoUrl={tokenAInfo?.logoUrl} />{symA}</> : "Select token"}
                     <span className="arrow">▾</span>
                   </button>
                 </div>
@@ -1182,7 +1184,7 @@ export default function App() {
                     className={`token-select-btn${!tokenB ? " unset" : ""}`}
                     onClick={() => openTokenModal("B")}
                   >
-                    {tokenB ? <><TokenIcon symbol={symB} />{symB}</> : "Select token"}
+                    {tokenB ? <><TokenIcon symbol={symB} logoUrl={tokenBInfo?.logoUrl} />{symB}</> : "Select token"}
                     <span className="arrow">▾</span>
                   </button>
                 </div>
@@ -1308,7 +1310,7 @@ export default function App() {
                         <input className="token-amount-input" type="number" placeholder="0"
                         value={liqA} onChange={e => handleLiqAChange(e.target.value)} />
                       <button className="token-select-btn" onClick={() => openTokenModal("A")}>
-                        {tokenA ? <><TokenIcon symbol={symA} />{symA}</> : "Select"}
+                        {tokenA ? <><TokenIcon symbol={symA} logoUrl={tokenAInfo?.logoUrl} />{symA}</> : "Select"}
                         <span className="arrow">▾</span>
                       </button>
                     </div>
@@ -1323,7 +1325,7 @@ export default function App() {
                       <input className="token-amount-input" type="number" placeholder="0"
                         value={liqB} onChange={e => handleLiqBChange(e.target.value)} />
                       <button className="token-select-btn" onClick={() => openTokenModal("B")}>
-                        {tokenB ? <><TokenIcon symbol={symB} />{symB}</> : "Select"}
+                        {tokenB ? <><TokenIcon symbol={symB} logoUrl={tokenBInfo?.logoUrl} />{symB}</> : "Select"}
                         <span className="arrow">▾</span>
                       </button>
                     </div>
@@ -1416,8 +1418,8 @@ export default function App() {
                   <div className="pool-card">
                     <div className="pool-pair">
                       <div className="pool-icons">
-                        <TokenIcon symbol={symA} size={28} />
-                        <TokenIcon symbol={symB} size={28} />
+                        <TokenIcon symbol={symA} logoUrl={tokenAInfo?.logoUrl} size={28} />
+                        <TokenIcon symbol={symB} logoUrl={tokenBInfo?.logoUrl} size={28} />
                       </div>
                       <div>
                         <div className="pool-pair-name">{symA} / {symB}</div>
@@ -1695,7 +1697,7 @@ export default function App() {
               <div className="token-list" style={{ maxHeight: 200 }}>
                 {tokens.map(t => (
                   <div key={t.address} className="token-row">
-                    <TokenIcon symbol={t.symbol} />
+                    <TokenIcon symbol={t.symbol} logoUrl={t.logoUrl} />
                     <div className="token-row-info">
                       <div className="token-row-sym">{t.symbol}</div>
                       <div className="token-row-name">{t.name} · {t.address}</div>
@@ -1759,7 +1761,7 @@ export default function App() {
               {filteredTokens.map(t => (
                 <div key={t.address} className={`token-row${(modalTarget === "A" ? tokenA : tokenB) === t.address ? " selected" : ""}`}
                   onClick={() => selectToken(t.address)}>
-                  <TokenIcon symbol={t.symbol} />
+                  <TokenIcon symbol={t.symbol} logoUrl={t.logoUrl} />
                   <div className="token-row-info">
                     <div className="token-row-sym">{t.symbol}</div>
                     <div className="token-row-name">{t.name}</div>
