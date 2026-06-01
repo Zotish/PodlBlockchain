@@ -703,18 +703,32 @@ function tokenLabel(value) {
   const token = String(value || "").trim();
   if (!token) return "Token";
   if (token.toLowerCase() === "lqd") return "LQD";
-  if (token.startsWith("0x")) return shortAddr(token);
+  if (token.startsWith("0x")) return registrySymbolForToken(token) || shortAddr(token);
   return token.toUpperCase();
+}
+
+function registrySymbolForToken(value) {
+  const token = String(value || "").trim().toLowerCase();
+  if (!token) return "";
+  if (token === "lqd") return "LQD";
+  const found = (state.tokens || []).find(t => String(t.address || "").toLowerCase() === token);
+  return found?.symbol ? String(found.symbol).toUpperCase() : "";
 }
 
 function normalizePoolAsset(value) {
   const token = String(value || "").trim();
   if (!token) return "";
-  if (token.startsWith("0x")) return token.toLowerCase();
+  if (token.startsWith("0x")) return registrySymbolForToken(token) || token.toLowerCase();
   return token.toUpperCase();
 }
 
-function canonicalSlotForForm(form) {
+function canonicalSlotForForm(form, entry = {}) {
+  const pairKey = String(entry.pairKey || entry.pair_key || "").toUpperCase().replace(/\s+/g, "");
+  if (pairKey) {
+    const normalizedPair = pairKey.replace("-", "/");
+    const byPair = LP_CANONICAL_POOL_SLOTS.find(slot => slot.label.toUpperCase().replace(/\s+/g, "") === normalizedPair);
+    if (byPair) return byPair;
+  }
   const a = normalizePoolAsset(form?.tokenA);
   const b = normalizePoolAsset(form?.tokenB);
   if (a !== "LQD" && b !== "LQD") return null;
@@ -800,16 +814,8 @@ function formatLockDays(raw) {
 
 async function buildPoolCards(poolsPayload, preferredForm) {
   const poolMap = normalizePoolMap(poolsPayload);
-  const savedPools = loadSavedLPPools();
   const registryPools = await dexRegistryGet("/pools").catch(() => []);
   const byAddress = new Map();
-  Object.keys(poolMap).forEach((address) => {
-    if (address) byAddress.set(String(address).toLowerCase(), { pool: address });
-  });
-  savedPools.forEach((pool) => {
-    const key = String(pool.pool).toLowerCase();
-    byAddress.set(key, { ...(byAddress.get(key) || {}), ...pool });
-  });
   (Array.isArray(registryPools) ? registryPools : []).forEach((pool) => {
     const address = String(pool.address || pool.pool || "").trim().toLowerCase();
     if (!address) return;
@@ -823,9 +829,10 @@ async function buildPoolCards(poolsPayload, preferredForm) {
       registry: true,
       registryTier: pool.tier,
       registryWeight: pool.weight,
+      pairKey: pool.pair_key || pool.pairKey || "",
     });
   });
-  if (preferredForm?.pool) {
+  if (preferredForm?.pool && byAddress.has(String(preferredForm.pool).toLowerCase())) {
     const key = String(preferredForm.pool).toLowerCase();
     byAddress.set(key, { ...(byAddress.get(key) || {}), ...preferredForm });
   }
@@ -841,14 +848,14 @@ async function buildPoolCards(poolsPayload, preferredForm) {
     } catch { }
     const form = inferPoolForm(address, storage, entry);
     const dex = resolveDexStorage(storage, form);
-    const slot = canonicalSlotForForm(form);
+    const slot = canonicalSlotForForm(form, entry);
     cards.push({
       address,
       form,
       storage,
       dex,
       registryLiquidity: poolMap[address] || poolMap[String(address).toLowerCase()] || "0",
-      pair: `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
+      pair: entry.pairKey || `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
       slotId: slot?.id || "",
       tierLabel: slot?.tier || (entry.registryTier ? `Tier ${entry.registryTier}` : "Tier 3"),
       weightLabel: slot?.weight || (entry.registryWeight ? `${entry.registryWeight}x` : "0.35x"),
