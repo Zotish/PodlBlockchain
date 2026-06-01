@@ -598,7 +598,18 @@ function normalizePoolAsset(value) {
   return token.toUpperCase();
 }
 
-function canonicalSlotForForm(form) {
+function canonicalSlotForForm(form, registryEntry = {}) {
+  const pairKey = String(registryEntry?.pairKey || registryEntry?.pair_key || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  if (pairKey) {
+    const normalizedPair = pairKey.replace("-", "/");
+    const byPair = LP_CANONICAL_POOL_SLOTS.find(
+      (slot) => slot.label.toUpperCase().replace(/\s+/g, "") === normalizedPair
+    );
+    if (byPair) return byPair;
+  }
   const a = normalizePoolAsset(form?.tokenA);
   const b = normalizePoolAsset(form?.tokenB);
   if (a !== "LQD" && b !== "LQD") return null;
@@ -1587,21 +1598,29 @@ function App() {
   async function buildMobilePoolCards(poolsPayload) {
     const registryPools = await dexRegistryPools().catch(() => []);
     const poolMap = normalizePoolMap(poolsPayload);
-    (registryPools || []).forEach((pool) => {
-      const address = normalizeAddress(pool.address || pool.pool || "");
-      if (address && !poolMap[address]) poolMap[address] = pool.liquidity || "0";
-    });
-    const entries = Object.keys(poolMap).filter(Boolean).slice(0, 40);
+    const entries = (registryPools || [])
+      .map((pool) => ({
+        ...pool,
+        address: normalizeAddress(pool.address || pool.pool || ""),
+      }))
+      .filter((pool) => pool.address)
+      .slice(0, 40);
     const cards = [];
-    for (const address of entries) {
+    for (const entry of entries) {
+      const address = entry.address;
       let storage = {};
       try {
         storage = normalizeContractStorage(await nodeContractStorage(nodeUrl, address));
       } catch {
         storage = {};
       }
-      const form = inferPoolForm(address, storage);
-      const slot = canonicalSlotForForm(form);
+      const form = inferPoolForm(address, storage, {
+        tokenA: entry.tokenA || entry.token_a || "lqd",
+        tokenB: entry.tokenB || entry.token_b || "",
+        decimalsA: entry.decimalsA || entry.decimals_a || 8,
+        decimalsB: entry.decimalsB || entry.decimals_b || 8,
+      });
+      const slot = canonicalSlotForForm(form, entry);
       const dex = resolveDexStorage(storage, form, activeAddress || wallet?.address);
       cards.push({
         address,
@@ -1609,10 +1628,10 @@ function App() {
         storage,
         dex,
         registryLiquidity: poolMap[address] || poolMap[String(address).toLowerCase()] || "0",
-        pair: `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
+        pair: entry.pairKey || entry.pair_key || `${tokenLabel(form.tokenA)} / ${tokenLabel(form.tokenB)}`,
         slotId: slot?.id || "",
-        tierLabel: slot?.tier || "Tier 3",
-        weightLabel: slot?.weight || "0.35x",
+        tierLabel: slot?.tier || (entry.tier ? `Tier ${entry.tier}` : "Tier 3"),
+        weightLabel: slot?.weight || (entry.weight ? `${entry.weight}x` : "0.35x"),
       });
     }
     return cards;
@@ -1623,7 +1642,7 @@ function App() {
     setLiquidityLoading(true);
     try {
       const [protocol, providers, latestRewards, recentRewards, poolsPayload] = await Promise.all([
-        getJson(`${normalizeUrl(nodeUrl)}/liquidity/info?address=${encodeURIComponent(wallet.address)}`).catch(() => null),
+        getJson(`${normalizeUrl(nodeUrl)}/liquidity/info?address=${encodeURIComponent(String(wallet.address || "").toLowerCase())}`).catch(() => null),
         getJson(`${normalizeUrl(nodeUrl)}/liquidity/all`).catch(() => []),
         getJson(`${normalizeUrl(nodeUrl)}/rewards/latest?address=${encodeURIComponent(wallet.address)}`).catch(() => null),
         getJson(`${normalizeUrl(nodeUrl)}/rewards/recent?limit=10`).catch(() => []),

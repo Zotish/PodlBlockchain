@@ -1034,9 +1034,10 @@ async function loadLiquidityDashboard() {
   loadSavedLPSettings();
   await syncDexRegistryTokens().catch(() => []);
   let form = getLPForm();
+  const ownerAddress = String(state.address || "").toLowerCase();
   try {
     const [protocol, providers, latestRewards, recentRewards, pools] = await Promise.all([
-      nodeGet(`/liquidity/info?address=${encodeURIComponent(state.address)}`).catch(() => ({})),
+      nodeGet(`/liquidity/info?address=${encodeURIComponent(ownerAddress)}`).catch(() => ({})),
       nodeGet("/liquidity/all").catch(() => []),
       nodeGet("/rewards/latest").catch(() => ({})),
       nodeGet("/rewards/recent").catch(() => []),
