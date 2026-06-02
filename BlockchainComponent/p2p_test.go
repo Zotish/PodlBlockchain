@@ -156,22 +156,26 @@ func TestHealthyRemotePeerCountNearHeight_SkipsLaggingPeers(t *testing.T) {
 	now := time.Now()
 
 	ns.Peers["synced:6111"] = &Peer{
-		Address:    "synced",
-		Port:       6111,
-		HTTPPort:   6511,
-		IsActive:   true,
-		Reputation: 1,
-		LastSeen:   now,
-		Height:     100,
+		Address:           "synced",
+		Port:              6111,
+		HTTPPort:          6511,
+		IsActive:          true,
+		Reputation:        1,
+		LastSeen:          now,
+		Height:            100,
+		ValidatorAddress:  "0x1111111111111111111111111111111111111111",
+		ValidatorVerified: true,
 	}
 	ns.Peers["lagging:6112"] = &Peer{
-		Address:    "lagging",
-		Port:       6112,
-		HTTPPort:   6512,
-		IsActive:   true,
-		Reputation: 1,
-		LastSeen:   now,
-		Height:     10,
+		Address:           "lagging",
+		Port:              6112,
+		HTTPPort:          6512,
+		IsActive:          true,
+		Reputation:        1,
+		LastSeen:          now,
+		Height:            10,
+		ValidatorAddress:  "0x2222222222222222222222222222222222222222",
+		ValidatorVerified: true,
 	}
 
 	if got := ns.HealthyRemotePeerCountNearHeight(100); got != 1 {
@@ -188,13 +192,15 @@ func TestActiveVotingSetSize_UsesLatestBlockNumberNotMemoryLength(t *testing.T) 
 	}
 	bc.Network = NewNetworkService(bc)
 	bc.Network.Peers["lagging:6111"] = &Peer{
-		Address:    "lagging",
-		Port:       6111,
-		HTTPPort:   6511,
-		IsActive:   true,
-		Reputation: 1,
-		LastSeen:   time.Now(),
-		Height:     139,
+		Address:           "lagging",
+		Port:              6111,
+		HTTPPort:          6511,
+		IsActive:          true,
+		Reputation:        1,
+		LastSeen:          time.Now(),
+		Height:            139,
+		ValidatorAddress:  "0x2222222222222222222222222222222222222222",
+		ValidatorVerified: true,
 	}
 
 	if got := bc.ActiveVotingSetSize(); got != 1 {
@@ -204,6 +210,76 @@ func TestActiveVotingSetSize_UsesLatestBlockNumberNotMemoryLength(t *testing.T) 
 	bc.Network.Peers["lagging:6111"].Height = 169999
 	if got := bc.ActiveVotingSetSize(); got != 2 {
 		t.Fatalf("expected near-tip peer to be included in voting set, got %d", got)
+	}
+}
+
+func TestHasVotingPeerForValidatorRequiresVerifiedNearTip(t *testing.T) {
+	bc := newTestBlockchain()
+	ns := NewNetworkService(bc)
+	now := time.Now()
+	addr := "0x2222222222222222222222222222222222222222"
+
+	ns.Peers["unverified:6111"] = &Peer{
+		Address:           "unverified",
+		Port:              6111,
+		HTTPPort:          6511,
+		IsActive:          true,
+		Reputation:        1,
+		LastSeen:          now,
+		Height:            100,
+		ValidatorAddress:  addr,
+		ValidatorVerified: false,
+	}
+	if ns.HasVotingPeerForValidator(addr, 100) {
+		t.Fatal("unverified validator peer must not be voting eligible")
+	}
+
+	ns.Peers["verified:6112"] = &Peer{
+		Address:           "verified",
+		Port:              6112,
+		HTTPPort:          6512,
+		IsActive:          true,
+		Reputation:        1,
+		LastSeen:          now,
+		Height:            99,
+		ValidatorAddress:  addr,
+		ValidatorVerified: true,
+	}
+	if !ns.HasVotingPeerForValidator(addr, 100) {
+		t.Fatal("verified near-tip validator peer should be voting eligible")
+	}
+
+	ns.Peers["verified:6112"].Height = 50
+	if ns.HasVotingPeerForValidator(addr, 100) {
+		t.Fatal("lagging validator peer must not be voting eligible")
+	}
+}
+
+func TestPeerStatusSnapshotShowsValidatorState(t *testing.T) {
+	bc := newTestBlockchain()
+	bc.Blocks = []*Block{{BlockNumber: 100, CurrentHash: "0xtip"}}
+	ns := NewNetworkService(bc)
+	ns.Peers["verified:6111"] = &Peer{
+		Address:           "verified",
+		Port:              6111,
+		HTTPPort:          6511,
+		IsActive:          true,
+		Reputation:        1,
+		LastSeen:          time.Now(),
+		Height:            100,
+		ValidatorAddress:  "0x2222222222222222222222222222222222222222",
+		ValidatorVerified: true,
+	}
+
+	snapshot := ns.PeerStatusSnapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("expected 1 peer status, got %d", len(snapshot))
+	}
+	if snapshot[0]["sync_status"] != "active" {
+		t.Fatalf("expected active peer status, got %v", snapshot[0]["sync_status"])
+	}
+	if snapshot[0]["voting_eligible"] != true {
+		t.Fatalf("expected peer to be voting eligible, got %v", snapshot[0]["voting_eligible"])
 	}
 }
 
