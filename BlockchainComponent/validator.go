@@ -51,6 +51,16 @@ type Validator struct {
 	LastActive     time.Time `json:"last_active"`
 }
 
+func isDEXBackedValidator(v *Validator) bool {
+	if v == nil {
+		return false
+	}
+	return strings.TrimSpace(v.DEXAddress) != "" ||
+		strings.TrimSpace(v.LPTokenAmount) != "" ||
+		v.LockedLiquidityUSD > 0 ||
+		strings.TrimSpace(v.PairKey) != ""
+}
+
 type DEXValidatorAssessment struct {
 	Address            string  `json:"address"`
 	PairAddress        string  `json:"pair_address"`
@@ -577,6 +587,15 @@ func (bc *Blockchain_struct) SlashValidator(add string, penalty float64, reason 
 			// Cap penalty to prevent complete slashing from single offense
 			if effectivePenalty > 0.3 {
 				effectivePenalty = 0.3
+			}
+
+			if isDEXBackedValidator(v) {
+				// PosDL validators are backed by locked DEX LP positions, not legacy
+				// single-asset stake. Penalize their selection weight without deleting
+				// their registration just because LPStakeAmount is zero.
+				bc.Validators[i].PenaltyScore += 0.1
+				log.Printf("PosDL validator %s penalized (reason: %s, score: %.2f)", add, reason, bc.Validators[i].PenaltyScore)
+				return
 			}
 
 			LocalPenalty := v.LPStakeAmount * effectivePenalty
