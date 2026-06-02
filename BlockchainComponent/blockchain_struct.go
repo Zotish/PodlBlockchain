@@ -166,16 +166,19 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 		return false
 	}
 
-	// Determine required votes; 0 validators = single-node mode, require just 1
-	required := 1
-	if len(bc.Validators) > 0 {
-		required = int(math.Ceil(float64(len(bc.Validators)) * quorumPercent))
-		if required < 1 {
-			required = 1
-		}
+	activeVoters := bc.ActiveVotingSetSize()
+	required := int(math.Ceil(float64(activeVoters) * quorumPercent))
+	if required < 1 {
+		required = 1
 	}
 	votes := bc.BlockVotes[blockHash]
 	if len(votes) < required {
+		hashPreview := blockHash
+		if len(hashPreview) > 10 {
+			hashPreview = hashPreview[:10]
+		}
+		log.Printf("⏳ Block #%d pending finalization | hash=%s... | votes=%d/%d active_voters=%d registered=%d",
+			block.BlockNumber, hashPreview, len(votes), required, activeVoters, len(bc.Validators))
 		return false
 	}
 
@@ -224,9 +227,24 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 		hashPreview = hashPreview[:10]
 	}
 	log.Printf("✅ Block #%d finalized | hash=%s... | votes=%d/%d",
-		block.BlockNumber, hashPreview, voteCount, len(bc.Validators))
+		block.BlockNumber, hashPreview, voteCount, required)
 
 	return true
+}
+
+func (bc *Blockchain_struct) ActiveVotingSetSize() int {
+	active := 1
+	if bc.Network != nil {
+		active += bc.Network.HealthyRemotePeerCount()
+	}
+	registered := len(bc.Validators)
+	if registered > 0 && active > registered {
+		active = registered
+	}
+	if active < 1 {
+		active = 1
+	}
+	return active
 }
 
 // GetLock is the exported wrapper so other packages can read active locked amount.
