@@ -413,7 +413,7 @@ func (ns *NetworkService) peerVotingEligibleLocked(peer *Peer, localHeight int) 
 	if peer == nil || ns.isSelfPeer(peer) {
 		return false
 	}
-	if !peer.IsActive || peer.HTTPPort == 0 || peer.Reputation < MinReputationThreshold {
+	if !peer.IsActive || peer.HTTPPort == 0 {
 		return false
 	}
 	if !peer.ValidatorVerified || strings.TrimSpace(peer.ValidatorAddress) == "" {
