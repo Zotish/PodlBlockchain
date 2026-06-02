@@ -235,7 +235,8 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 func (bc *Blockchain_struct) ActiveVotingSetSize() int {
 	active := 1
 	if bc.Network != nil {
-		active += bc.Network.HealthyRemotePeerCount()
+		// Only count peers that are close enough to vote on the current chain tip.
+		active += bc.Network.HealthyRemotePeerCountNearHeight(len(bc.Blocks))
 	}
 	registered := len(bc.Validators)
 	if registered > 0 && active > registered {

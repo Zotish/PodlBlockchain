@@ -32,6 +32,7 @@ const (
 	PeerResponseThreshold  = 5 * time.Second
 	PeerReputationDecay    = 0.9
 	MinReputationThreshold = 0.3
+	MaxVotingPeerHeightLag = 2
 )
 
 type Peer struct {
@@ -1350,6 +1351,10 @@ func (ns *NetworkService) HasHealthyRemotePeer() bool {
 }
 
 func (ns *NetworkService) HealthyRemotePeerCount() int {
+	return ns.HealthyRemotePeerCountNearHeight(0)
+}
+
+func (ns *NetworkService) HealthyRemotePeerCountNearHeight(localHeight int) int {
 	ns.Mutex.Lock()
 	defer ns.Mutex.Unlock()
 
@@ -1362,6 +1367,9 @@ func (ns *NetworkService) HealthyRemotePeerCount() int {
 			continue
 		}
 		if peer.Reputation < MinReputationThreshold {
+			continue
+		}
+		if localHeight > 0 && peer.Height+MaxVotingPeerHeightLag < localHeight {
 			continue
 		}
 		if time.Since(peer.LastSeen) < 2*PingInterval {
