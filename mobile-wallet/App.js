@@ -2724,7 +2724,15 @@ function App() {
       dexRegistryTokens().catch(() => []),
     ]);
     if (cfg?.factory_address) setFactoryAddress(String(cfg.factory_address));
-    const registryTokens = (Array.isArray(tokens) ? tokens : []).map(normalizeRegistryToken).filter(Boolean);
+    let registryTokens = (Array.isArray(tokens) ? tokens : []).map(normalizeRegistryToken).filter(Boolean);
+    if (registryTokens.length && wallet?.address) {
+      const lqdNetwork = NETWORKS.find(n => n.id === "lqd") || currentNetwork;
+      const lqdUrls = getRpcCandidatesForFamily(lqdNetwork, "evm");
+      registryTokens = await Promise.all(registryTokens.map(async (token) => {
+        const balance = await resolveTokenBalanceMultichain(lqdUrls, walletUrl, token.address, wallet.address, "evm").catch(() => token.balance || "0");
+        return { ...token, holderAddress: wallet.address, balance };
+      }));
+    }
     if (registryTokens.length) {
       setWatchlist((prev) => mergeUniqueByKey(prev, registryTokens, "address"));
     }
