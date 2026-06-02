@@ -179,6 +179,34 @@ func TestHealthyRemotePeerCountNearHeight_SkipsLaggingPeers(t *testing.T) {
 	}
 }
 
+func TestActiveVotingSetSize_UsesLatestBlockNumberNotMemoryLength(t *testing.T) {
+	bc := newTestBlockchain()
+	bc.Blocks = []*Block{{BlockNumber: 170000, CurrentHash: "0xtip"}}
+	bc.Validators = []*Validator{
+		{Address: "0x1111111111111111111111111111111111111111"},
+		{Address: "0x2222222222222222222222222222222222222222"},
+	}
+	bc.Network = NewNetworkService(bc)
+	bc.Network.Peers["lagging:6111"] = &Peer{
+		Address:    "lagging",
+		Port:       6111,
+		HTTPPort:   6511,
+		IsActive:   true,
+		Reputation: 1,
+		LastSeen:   time.Now(),
+		Height:     139,
+	}
+
+	if got := bc.ActiveVotingSetSize(); got != 1 {
+		t.Fatalf("expected lagging peer to be excluded from voting set, got %d", got)
+	}
+
+	bc.Network.Peers["lagging:6111"].Height = 169999
+	if got := bc.ActiveVotingSetSize(); got != 2 {
+		t.Fatalf("expected near-tip peer to be included in voting set, got %d", got)
+	}
+}
+
 func TestNetworkService_RemoveLowReputationPeer(t *testing.T) {
 	bc := newTestBlockchain()
 	ns := NewNetworkService(bc)
