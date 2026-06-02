@@ -64,6 +64,36 @@ func TestSelectValidator_HigherStakeWins(t *testing.T) {
 	}
 }
 
+func TestSelectValidator_UsesLocalValidatorWhenConfigured(t *testing.T) {
+	local := makeValidator("0x1111111111111111111111111111111111111111", 1e10, 365)
+	remote := makeValidator("0x2222222222222222222222222222222222222222", 1e14, 365)
+	bc := newBCWithValidators([]*Validator{local, remote})
+	bc.LocalValidator = local.Address
+
+	selected, err := bc.SelectValidator()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if selected.Address != local.Address {
+		t.Errorf("expected configured local validator %q to win, got %q", local.Address, selected.Address)
+	}
+}
+
+func TestSelectValidator_LocalValidatorMustBeEligible(t *testing.T) {
+	local := &Validator{
+		Address:       "0x1111111111111111111111111111111111111111",
+		LPStakeAmount: 0,
+		LockTime:      time.Now().Add(-1 * time.Hour),
+	}
+	remote := makeValidator("0x2222222222222222222222222222222222222222", 1e14, 365)
+	bc := newBCWithValidators([]*Validator{local, remote})
+	bc.LocalValidator = local.Address
+
+	if _, err := bc.SelectValidator(); err == nil {
+		t.Fatal("expected error when configured local validator has no voting weight")
+	}
+}
+
 func TestSelectValidator_PenaltyReducesWeight(t *testing.T) {
 	// v1: large stake but extremely high penalty → very small effective weight
 	// v2: moderate stake, no penalty → larger effective weight

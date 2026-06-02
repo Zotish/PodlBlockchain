@@ -634,7 +634,11 @@ func (bc *Blockchain_struct) SelectValidator() (Validator, error) {
 	}
 
 	eligible := make([]weightedValidator, 0, len(bc.Validators))
+	localValidator := strings.ToLower(strings.TrimSpace(bc.LocalValidator))
 	for _, v := range bc.Validators {
+		if localValidator != "" && strings.ToLower(strings.TrimSpace(v.Address)) != localValidator {
+			continue
+		}
 		weight := v.LiquidityPower * (1.0 - v.PenaltyScore)
 		if weight < 0 {
 			weight = 0
@@ -646,6 +650,9 @@ func (bc *Blockchain_struct) SelectValidator() (Validator, error) {
 	}
 
 	if len(eligible) == 0 {
+		if localValidator != "" {
+			return Validator{}, fmt.Errorf("local validator %s is not eligible for selection", bc.LocalValidator)
+		}
 		return Validator{}, fmt.Errorf("no validators with positive weight")
 	}
 
