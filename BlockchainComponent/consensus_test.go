@@ -19,11 +19,11 @@ func newBCWithValidators(vs []*Validator) *Blockchain_struct {
 
 func makeValidator(addr string, stake float64, lockDays int) *Validator {
 	return &Validator{
-		Address:      addr,
+		Address:       addr,
 		LPStakeAmount: stake,
-		LockTime:     time.Now().Add(time.Duration(lockDays) * 24 * time.Hour),
-		LastActive:   time.Now(),
-		PenaltyScore: 0,
+		LockTime:      time.Now().Add(time.Duration(lockDays) * 24 * time.Hour),
+		LastActive:    time.Now(),
+		PenaltyScore:  0,
 	}
 }
 
@@ -87,10 +87,10 @@ func TestSelectValidator_PenaltyReducesWeight(t *testing.T) {
 
 func TestSelectValidator_ExpiredLockHasZeroWeight(t *testing.T) {
 	expired := &Validator{
-		Address:      "0x1111111111111111111111111111111111111111",
+		Address:       "0x1111111111111111111111111111111111111111",
 		LPStakeAmount: 1e15,
-		LockTime:     time.Now().Add(-24 * time.Hour), // already expired
-		LastActive:   time.Now(),
+		LockTime:      time.Now().Add(-24 * time.Hour), // already expired
+		LastActive:    time.Now(),
 	}
 	active := makeValidator("0x2222222222222222222222222222222222222222", 1e10, 10)
 	bc := newBCWithValidators([]*Validator{expired, active})
@@ -119,9 +119,9 @@ func TestSelectValidator_IncreasesBlocksProposed(t *testing.T) {
 
 func TestSelectValidator_AllZeroWeight_Error(t *testing.T) {
 	v := &Validator{
-		Address:      "0x1111111111111111111111111111111111111111",
+		Address:       "0x1111111111111111111111111111111111111111",
 		LPStakeAmount: 0,
-		LockTime:     time.Now().Add(-1 * time.Hour), // expired
+		LockTime:      time.Now().Add(-1 * time.Hour), // expired
 	}
 	bc := newBCWithValidators([]*Validator{v})
 	_, err := bc.SelectValidator()
@@ -199,6 +199,30 @@ func TestSlashValidator_RemovesValidatorBelowMinStake(t *testing.T) {
 	}
 }
 
+func TestSlashValidator_DoesNotRemoveDEXBackedValidator(t *testing.T) {
+	v := &Validator{
+		Address:            "0x2222222222222222222222222222222222222222",
+		DEXAddress:         "0xpool",
+		PairKey:            "LQD/USDT",
+		LPTokenAmount:      "100000000",
+		LockedLiquidityUSD: 100000,
+		LPStakeAmount:      0,
+		LockTime:           time.Now().Add(365 * 24 * time.Hour),
+		LastActive:         time.Now(),
+	}
+	bc := newBCWithValidators([]*Validator{v})
+	bc.MinStake = 100000 * 1e8
+
+	bc.SlashValidator(v.Address, 0.3, "dex validator penalty")
+
+	if len(bc.Validators) != 1 {
+		t.Fatalf("DEX-backed validator should not be removed by legacy stake check")
+	}
+	if bc.Validators[0].PenaltyScore <= 0 {
+		t.Error("DEX-backed validator penalty score should increase")
+	}
+}
+
 func TestSlashValidator_UnknownAddress_Noop(t *testing.T) {
 	v := makeValidator("0x1111111111111111111111111111111111111111", 1e12, 365)
 	bc := newBCWithValidators([]*Validator{v})
@@ -230,9 +254,9 @@ func TestUpdateLiquidityPower_LegacyPositive(t *testing.T) {
 
 func TestUpdateLiquidityPower_ExpiredLock_ZeroOrLow(t *testing.T) {
 	v := &Validator{
-		Address:      "0x1111111111111111111111111111111111111111",
+		Address:       "0x1111111111111111111111111111111111111111",
 		LPStakeAmount: 1e12,
-		LockTime:     time.Now().Add(-1 * time.Hour), // expired
+		LockTime:      time.Now().Add(-1 * time.Hour), // expired
 	}
 	bc := newBCWithValidators([]*Validator{v})
 	bc.UpdateLiquidityPower()
