@@ -236,7 +236,7 @@ func (bc *Blockchain_struct) ActiveVotingSetSize() int {
 	active := 1
 	if bc.Network != nil {
 		// Only count peers that are close enough to vote on the current chain tip.
-		active += bc.Network.HealthyRemotePeerCountNearHeight(len(bc.Blocks))
+		active += bc.Network.HealthyRemotePeerCountNearHeight(bc.latestBlockNumberForVoting())
 	}
 	registered := len(bc.Validators)
 	if registered > 0 && active > registered {
@@ -246,6 +246,13 @@ func (bc *Blockchain_struct) ActiveVotingSetSize() int {
 		active = 1
 	}
 	return active
+}
+
+func (bc *Blockchain_struct) latestBlockNumberForVoting() int {
+	if bc == nil || len(bc.Blocks) == 0 {
+		return 0
+	}
+	return int(bc.Blocks[len(bc.Blocks)-1].BlockNumber)
 }
 
 // GetLock is the exported wrapper so other packages can read active locked amount.
