@@ -174,6 +174,47 @@ function tokenColor(sym) {
   return `hsl(${hue},55%,42%)`;
 }
 
+function readTokenLogo(token = {}) {
+  return token.logo_url || token.logoUrl || token.logo || "";
+}
+
+function readTokenPrice(token = {}) {
+  return token.price_usd ?? token.priceUsd ?? token.price ?? token.usd_price ?? "";
+}
+
+function readTokenChange(token = {}) {
+  return token.price_change_24h ?? token.priceChange24h ?? token.change_24h ?? token.change24h ?? "";
+}
+
+function toMarketNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(String(value).replace("%", "").trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatTokenPrice(token = {}) {
+  const price = toMarketNumber(readTokenPrice(token));
+  if (price === null) return "Price unavailable";
+  const digits = price >= 1 ? 2 : 6;
+  return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: digits })}`;
+}
+
+function formatTokenChange(token = {}) {
+  const change = toMarketNumber(readTokenChange(token));
+  if (change === null) return { label: "24h --", className: "token-change-neutral" };
+  const sign = change > 0 ? "+" : "";
+  const className = change > 0 ? "token-change-pos" : change < 0 ? "token-change-neg" : "token-change-neutral";
+  return { label: `${sign}${change.toFixed(2)}%`, className };
+}
+
+function tokenLogoHtml(token = {}) {
+  const logo = readTokenLogo(token);
+  const symbol = escapeHtml(token.symbol || "Token");
+  const fallback = escapeHtml((token.symbol || "?").slice(0, 1).toUpperCase() || "?");
+  if (!logo) return fallback;
+  return `<img src="${escapeHtml(logo)}" alt="${symbol}" onerror="this.remove();this.parentElement.textContent='${fallback}'" />`;
+}
+
 // ─── API calls ────────────────────────────────────────────────────────────────
 async function nodeGet(path) {
   const r = await fetch(state.nodeUrl + path);
@@ -477,8 +518,11 @@ function normalizeRegistryToken(token = {}) {
     decimals: parseInt(token.decimals, 10) || 8,
     balance: "0",
     registry: true,
+    official: true,
     verified: token.verified !== false,
     logo_url: token.logo_url || token.logoUrl || "",
+    price_usd: readTokenPrice(token),
+    price_change_24h: readTokenChange(token),
   };
 }
 
@@ -519,13 +563,16 @@ function renderTokenList() {
   }
   container.innerHTML = "";
   state.tokens.forEach(t => {
+    const change = formatTokenChange(t);
+    const officialBadge = (t.official || t.registry) ? '<span class="token-badge">Official</span>' : "";
     const row = document.createElement("div");
     row.className = "token-row";
     row.innerHTML = `
-      <div class="token-icon-sm" style="background:${tokenColor(t.symbol)}">${(t.symbol || "?")[0]}</div>
+      <div class="token-icon-sm" style="background:${tokenColor(t.symbol)}">${tokenLogoHtml(t)}</div>
       <div class="token-info">
-        <div class="token-sym">${t.symbol}</div>
-        <div class="token-name">${t.name} · ${t.address.slice(0, 10)}…</div>
+        <div class="token-title-line"><span class="token-sym">${escapeHtml(t.symbol)}</span>${officialBadge}</div>
+        <div class="token-name">${escapeHtml(t.name)} · ${escapeHtml(t.address.slice(0, 10))}…</div>
+        <div class="token-price-line"><span>${formatTokenPrice(t)}</span><span class="${change.className}">${change.label}</span></div>
       </div>
       <div style="text-align:right;">
         <div class="token-bal">${fmtAmount(t.balance || "0", parseInt(t.decimals) || 8)}</div>

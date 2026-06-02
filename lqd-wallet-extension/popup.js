@@ -85,6 +85,56 @@ function setError(msg) {
   }
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function readTokenLogo(token = {}) {
+  return token.logo_url || token.logoUrl || token.logo || "";
+}
+
+function readTokenPrice(token = {}) {
+  return token.price_usd ?? token.priceUsd ?? token.price ?? token.usd_price ?? "";
+}
+
+function readTokenChange(token = {}) {
+  return token.price_change_24h ?? token.priceChange24h ?? token.change_24h ?? token.change24h ?? "";
+}
+
+function toMarketNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(String(value).replace("%", "").trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatTokenPrice(token = {}) {
+  const price = toMarketNumber(readTokenPrice(token));
+  if (price === null) return "Price unavailable";
+  const digits = price >= 1 ? 2 : 6;
+  return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: digits })}`;
+}
+
+function formatTokenChange(token = {}) {
+  const change = toMarketNumber(readTokenChange(token));
+  if (change === null) return { label: "24h --", className: "token-change-neutral" };
+  const sign = change > 0 ? "+" : "";
+  const className = change > 0 ? "token-change-pos" : change < 0 ? "token-change-neg" : "token-change-neutral";
+  return { label: `${sign}${change.toFixed(2)}%`, className };
+}
+
+function tokenIconHtml(token = {}) {
+  const logo = readTokenLogo(token);
+  const symbol = escapeHtml(token.symbol || "Token");
+  const fallback = escapeHtml((token.symbol || "?").slice(0, 1).toUpperCase() || "?");
+  if (!logo) return fallback;
+  return `<img src="${escapeHtml(logo)}" alt="${symbol}" onerror="this.remove();this.parentElement.textContent='${fallback}'" />`;
+}
+
 function setStatus(locked, address) {
   const statusEl = document.getElementById("status");
   const addrEl = document.getElementById("address");
@@ -835,7 +885,8 @@ async function renderTokens(watchlist) {
 
   container.innerHTML = "";
   for (const token of watchlist) {
-    const contractAddr = typeof token === "string" ? token : token.contract;
+    const contractAddr = typeof token === "string" ? token : (token.contract || token.address || token.contract_address || "");
+    if (!contractAddr) continue;
     const savedMeta = typeof token === "object" ? token : {};
 
     const div = document.createElement("div");
@@ -850,14 +901,17 @@ async function renderTokens(watchlist) {
     ]);
 
     const fmtBal = formatLQD(rawBal);
+    const change = formatTokenChange(meta);
+    const officialBadge = (meta.official || meta.registry) ? '<span class="token-official-badge">Official</span>' : "";
     div.innerHTML = `
       <div class="token-row">
-        <div class="token-icon">${(meta.symbol || "?")[0]}</div>
+        <div class="token-icon">${tokenIconHtml(meta)}</div>
         <div class="token-info">
-          <div class="token-name">${meta.name || meta.symbol}</div>
+          <div class="token-name-row"><span class="token-name">${escapeHtml(meta.name || meta.symbol || "Token")}</span>${officialBadge}</div>
           <div class="mono">${truncate(contractAddr, 10)}</div>
+          <div class="token-market-row"><span>${formatTokenPrice(meta)}</span><span class="${change.className}">${change.label}</span></div>
         </div>
-        <div class="token-balance">${fmtBal} <span class="token-symbol">${meta.symbol}</span></div>
+        <div class="token-balance">${fmtBal} <span class="token-symbol">${escapeHtml(meta.symbol || "")}</span></div>
       </div>`;
 
     const row = document.createElement("div");
@@ -872,7 +926,7 @@ async function renderTokens(watchlist) {
     removeBtn.onclick = async () => {
       const d = await ext.storage.local.get(["tokenWatchlist"]);
       const list = (d.tokenWatchlist || []).filter((t) =>
-        (typeof t === "string" ? t : t.contract) !== contractAddr
+        (typeof t === "string" ? t : (t.contract || t.address || t.contract_address)) !== contractAddr
       );
       await ext.storage.local.set({ tokenWatchlist: list });
       renderTokens(list);
