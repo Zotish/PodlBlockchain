@@ -622,6 +622,23 @@ func (bc *Blockchain_struct) UpdateMinStake(networkLoad float64) {
 	bc.MinStake = 1000000 * float64(constantset.Decimals) * (1 + networkLoad/10)
 }
 
+func (bc *Blockchain_struct) validatorSelectableOnThisNode(v *Validator, localValidator string) bool {
+	if v == nil {
+		return false
+	}
+	address := strings.TrimSpace(v.Address)
+	if address == "" {
+		return false
+	}
+	if localValidator == "" || strings.EqualFold(address, localValidator) {
+		return true
+	}
+	if bc.Network == nil {
+		return false
+	}
+	return bc.Network.HasVotingPeerForValidator(address, bc.latestBlockNumberForVoting())
+}
+
 func (bc *Blockchain_struct) SelectValidator() (Validator, error) {
 	if len(bc.Validators) == 0 {
 		return Validator{}, fmt.Errorf("no validator for selection")
@@ -634,9 +651,9 @@ func (bc *Blockchain_struct) SelectValidator() (Validator, error) {
 	}
 
 	eligible := make([]weightedValidator, 0, len(bc.Validators))
-	localValidator := strings.ToLower(strings.TrimSpace(bc.LocalValidator))
+	localValidator := strings.TrimSpace(bc.LocalValidator)
 	for _, v := range bc.Validators {
-		if localValidator != "" && strings.ToLower(strings.TrimSpace(v.Address)) != localValidator {
+		if !bc.validatorSelectableOnThisNode(v, localValidator) {
 			continue
 		}
 		weight := v.LiquidityPower * (1.0 - v.PenaltyScore)

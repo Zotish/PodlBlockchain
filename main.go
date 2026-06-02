@@ -33,6 +33,7 @@ func main() {
 	chainPort := chainCmdSet.Uint("port", 5000, "HTTP port to launch our blockchain server")
 	p2pPort := chainCmdSet.Uint("p2p_port", 0, "P2P TCP port for validator sync (default: port+1000)")
 	validatorAddress := chainCmdSet.String("validator", "", "Validator address to receive staking rewards")
+	validatorPrivateKey := chainCmdSet.String("validator_private_key", "", "Private key used to sign P2P validator handshakes")
 	remoteNode := chainCmdSet.String("remote_node", "", "Remote P2P node (host:port) to sync from")
 	minStake := chainCmdSet.Float64("min_stake", 100000, "Minimum stake amount to become a validator")
 	stakeAmount := chainCmdSet.Float64("stake_amount", 2000000, "Amount being staked by the validator (legacy PoS)")
@@ -79,6 +80,7 @@ func main() {
 				*p2pPort = *chainPort + 1000
 			}
 			bc.Network.HTTPPort = int(*chainPort)
+			bc.Network.SetValidatorIdentity(*validatorAddress, *validatorPrivateKey)
 			if err := bc.Network.Start(strconv.FormatUint(uint64(*p2pPort), 10)); err != nil {
 				log.Fatalf("Failed to start P2P network: %v", err)
 			}

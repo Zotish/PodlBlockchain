@@ -1018,25 +1018,7 @@ func (bcs *BlockchainServer) GetPeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bcs.BlockchainPtr.Network.Mutex.Lock()
-	defer bcs.BlockchainPtr.Network.Mutex.Unlock()
-
-	out := []map[string]interface{}{}
-	for _, p := range bcs.BlockchainPtr.Network.Peers {
-		if p == nil {
-			continue
-		}
-		out = append(out, map[string]interface{}{
-			"address":    p.Address,
-			"port":       p.Port,
-			"http_port":  p.HTTPPort,
-			"last_seen":  p.LastSeen,
-			"reputation": p.Reputation,
-			"height":     p.Height,
-			"is_active":  p.IsActive,
-		})
-	}
-	json.NewEncoder(w).Encode(out)
+	json.NewEncoder(w).Encode(bcs.BlockchainPtr.Network.PeerStatusSnapshot())
 }
 
 func (bcs *BlockchainServer) AddPeer(w http.ResponseWriter, r *http.Request) {
@@ -1138,12 +1120,77 @@ func (bcs *BlockchainServer) GetValidators(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
 
+	peerByValidator := map[string]map[string]interface{}{}
+	if bcs.BlockchainPtr.Network != nil {
+		for _, peer := range bcs.BlockchainPtr.Network.PeerStatusSnapshot() {
+			addr, _ := peer["validator_address"].(string)
+			if strings.TrimSpace(addr) != "" {
+				peerByValidator[strings.ToLower(addr)] = peer
+			}
+		}
+	}
+
+	toInt := func(v interface{}) int {
+		switch n := v.(type) {
+		case int:
+			return n
+		case int64:
+			return int(n)
+		case uint64:
+			return int(n)
+		case float64:
+			return int(n)
+		default:
+			return 0
+		}
+	}
+	localValidator := strings.TrimSpace(bcs.BlockchainPtr.LocalValidator)
+
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
 
 	// Return all validators
 	validators := make([]map[string]interface{}, len(bcs.BlockchainPtr.Validators))
 	for i, v := range bcs.BlockchainPtr.Validators {
+		nodeStatus := "node_offline"
+		syncStatus := ""
+		peerHeight := 0
+		heightLag := 0
+		votingEligible := false
+		peerVerified := false
+		if localValidator != "" && strings.EqualFold(v.Address, localValidator) {
+			nodeStatus = "voting"
+			syncStatus = "active"
+			votingEligible = true
+			peerVerified = true
+		}
+		if peer, ok := peerByValidator[strings.ToLower(strings.TrimSpace(v.Address))]; ok {
+			if value, ok := peer["sync_status"].(string); ok {
+				syncStatus = value
+			}
+			if value, ok := peer["voting_eligible"].(bool); ok {
+				votingEligible = value
+			}
+			if value, ok := peer["validator_verified"].(bool); ok {
+				peerVerified = value
+			}
+			peerHeight = toInt(peer["height"])
+			heightLag = toInt(peer["height_lag"])
+
+			switch {
+			case votingEligible:
+				nodeStatus = "voting"
+			case syncStatus == "active":
+				nodeStatus = "active"
+			case syncStatus == "syncing":
+				nodeStatus = "syncing"
+			case syncStatus == "connected_unverified":
+				nodeStatus = "connected_unverified"
+			default:
+				nodeStatus = "registered"
+			}
+		}
+
 		validators[i] = map[string]interface{}{
 			"address":              v.Address,
 			"stake":                v.LPStakeAmount,
@@ -1161,6 +1208,12 @@ func (bcs *BlockchainServer) GetValidators(w http.ResponseWriter, r *http.Reques
 			"blocks_included":      v.BlocksIncluded,
 			"last_active":          v.LastActive.Format(time.RFC3339),
 			"lock_time":            v.LockTime.Format(time.RFC3339),
+			"node_status":          nodeStatus,
+			"sync_status":          syncStatus,
+			"peer_height":          peerHeight,
+			"height_lag":           heightLag,
+			"voting_eligible":      votingEligible,
+			"peer_verified":        peerVerified,
 		}
 	}
 

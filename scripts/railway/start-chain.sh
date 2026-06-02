@@ -30,6 +30,10 @@ if [ -n "${REMOTE_NODE:-}" ]; then
   set -- "$@" -remote_node "$REMOTE_NODE"
 fi
 
+if [ -n "${VALIDATOR_PRIVATE_KEY:-}" ]; then
+  set -- "$@" -validator_private_key "$VALIDATOR_PRIVATE_KEY"
+fi
+
 if [ -n "${DEX_ADDRESS:-}" ] && [ -n "${LP_TOKEN_AMOUNT:-}" ]; then
   set -- "$@" -dex_address "$DEX_ADDRESS" -lp_token_amount "$LP_TOKEN_AMOUNT"
 fi

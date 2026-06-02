@@ -2,6 +2,7 @@ package blockchaincomponent
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
+	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
@@ -36,26 +39,32 @@ const (
 )
 
 type Peer struct {
-	Address     string    `json:"address"`
-	Port        int       `json:"port"`
-	HTTPPort    int       `json:"http_port"`
-	LastSeen    time.Time `json:"last_seen"`
-	Protocol    int       `json:"protocol"`
-	IsActive    bool      `json:"is_active"`
-	Reputation  float64   `json:"reputation"`
-	LastUpdated time.Time `json:"last_updated"`
-	Height      int       `json:"height"`
+	Address           string    `json:"address"`
+	Port              int       `json:"port"`
+	HTTPPort          int       `json:"http_port"`
+	LastSeen          time.Time `json:"last_seen"`
+	Protocol          int       `json:"protocol"`
+	IsActive          bool      `json:"is_active"`
+	Reputation        float64   `json:"reputation"`
+	LastUpdated       time.Time `json:"last_updated"`
+	Height            int       `json:"height"`
+	ValidatorAddress  string    `json:"validator_address,omitempty"`
+	ValidatorVerified bool      `json:"validator_verified"`
+	SyncStatus        string    `json:"sync_status,omitempty"`
+	HeightLag         int       `json:"height_lag"`
 }
 
 type NetworkService struct {
-	Peers      map[string]*Peer   `json:"peers"`
-	Blockchain *Blockchain_struct `json:"blockchain"`
-	Listener   net.Listener       `json:"-"`
-	ListenPort string             `json:"-"`
-	HTTPPort   int                `json:"-"`
-	Mutex      sync.Mutex         `json:"-"`
-	PeerEvents chan PeerEvent     `json:"-"`
-	Wg         sync.WaitGroup     `json:"-"`
+	Peers               map[string]*Peer   `json:"peers"`
+	Blockchain          *Blockchain_struct `json:"blockchain"`
+	Listener            net.Listener       `json:"-"`
+	ListenPort          string             `json:"-"`
+	HTTPPort            int                `json:"-"`
+	ValidatorAddress    string             `json:"-"`
+	ValidatorPrivateKey string             `json:"-"`
+	Mutex               sync.Mutex         `json:"-"`
+	PeerEvents          chan PeerEvent     `json:"-"`
+	Wg                  sync.WaitGroup     `json:"-"`
 }
 type PeerEvent struct {
 	Type string `json:"type"`
@@ -71,6 +80,13 @@ func NewNetworkService(bc *Blockchain_struct) *NetworkService {
 	return newService
 }
 
+func (ns *NetworkService) SetValidatorIdentity(address, privateKey string) {
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+	ns.ValidatorAddress = strings.TrimSpace(address)
+	ns.ValidatorPrivateKey = strings.TrimSpace(privateKey)
+}
+
 func (ns *NetworkService) syncWithPeer(peer *Peer, ourHeight int) error {
 	conn, err := net.DialTimeout("tcp",
 		fmt.Sprintf("%s:%d", peer.Address, peer.Port),
@@ -83,12 +99,12 @@ func (ns *NetworkService) syncWithPeer(peer *Peer, ourHeight int) error {
 	decoder := json.NewDecoder(conn)
 	if peerVersion, err := ns.sendVersionHandshake(conn, decoder); err != nil {
 		return err
-	} else if httpPort, ok := peerVersion["http_port"].(float64); ok {
-		peer.HTTPPort = int(httpPort)
+	} else {
+		ns.applyPeerVersion(peer, peerVersion)
 	}
 
-	for start := ourHeight; start < peer.Height; start += SyncBatchSize {
-		end := start + SyncBatchSize
+	for start := ourHeight + 1; start <= peer.Height; start += SyncBatchSize {
+		end := start + SyncBatchSize - 1
 		if end > peer.Height {
 			end = peer.Height
 		}
@@ -103,18 +119,18 @@ func (ns *NetworkService) syncWithPeer(peer *Peer, ourHeight int) error {
 			return fmt.Errorf("encode failed: %v", err)
 		}
 
-		blocks := make([]*Block, 0, end-start)
-		for i := start; i < end; i++ {
+		blocks := make([]*Block, 0, end-start+1)
+		for height := start; height <= end; height++ {
 			_ = conn.SetReadDeadline(time.Now().Add(PeerResponseThreshold))
 			var block Block
 			if err := decoder.Decode(&block); err != nil {
-				return fmt.Errorf("decode failed at height %d: %v", i, err)
+				return fmt.Errorf("decode failed at height %d: %v", height, err)
 			}
 			_ = conn.SetReadDeadline(time.Time{})
 			blocks = append(blocks, &block)
 		}
 
-		if err := ns.applySyncedBlocks(blocks, start); err != nil {
+		if err := ns.applySyncedBlocks(blocks); err != nil {
 			return err
 		}
 	}
@@ -122,7 +138,7 @@ func (ns *NetworkService) syncWithPeer(peer *Peer, ourHeight int) error {
 	return nil
 }
 
-func (ns *NetworkService) applySyncedBlocks(blocks []*Block, start int) error {
+func (ns *NetworkService) applySyncedBlocks(blocks []*Block) error {
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -130,19 +146,19 @@ func (ns *NetworkService) applySyncedBlocks(blocks []*Block, start int) error {
 	ns.Blockchain.Mutex.Lock()
 	defer ns.Blockchain.Mutex.Unlock()
 
-	if start > len(ns.Blockchain.Blocks) {
-		return fmt.Errorf("sync start %d beyond local height %d", start, len(ns.Blockchain.Blocks))
-	}
-
-	chain := append([]*Block(nil), ns.Blockchain.Blocks[:start]...)
 	for _, block := range blocks {
-		if err := ns.verifySyncedBlock(chain, block); err != nil {
+		if len(ns.Blockchain.Blocks) > 0 && block.BlockNumber <= ns.Blockchain.Blocks[len(ns.Blockchain.Blocks)-1].BlockNumber {
+			continue
+		}
+		if err := ns.verifySyncedBlock(ns.Blockchain.Blocks, block); err != nil {
 			return err
 		}
-		chain = append(chain, block)
+		ns.Blockchain.Blocks = append(ns.Blockchain.Blocks, block)
+		if err := SaveBlockToDB(block); err != nil {
+			log.Printf("sync: SaveBlockToDB error at height %d: %v", block.BlockNumber, err)
+		}
 	}
 
-	ns.Blockchain.Blocks = chain
 	ns.Blockchain.Transaction_pool = []*Transaction{}
 	return nil
 }
@@ -217,15 +233,7 @@ func (ns *NetworkService) Start(listenPort string) error {
 }
 
 func (ns *NetworkService) sendVersionHandshake(conn net.Conn, decoder *json.Decoder) (map[string]interface{}, error) {
-	ourVersion := map[string]interface{}{
-		"protocol":    protocolVersion,
-		"best_height": len(ns.Blockchain.Blocks),
-		"timestamp":   time.Now().Unix(),
-		"listen_port": toIntPort(ns.ListenPort),
-		"http_port":   ns.HTTPPort,
-	}
-
-	if err := json.NewEncoder(conn).Encode(ourVersion); err != nil {
+	if err := json.NewEncoder(conn).Encode(ns.buildVersionPayload()); err != nil {
 		return nil, fmt.Errorf("handshake send failed: %v", err)
 	}
 
@@ -240,6 +248,235 @@ func (ns *NetworkService) sendVersionHandshake(conn net.Conn, decoder *json.Deco
 	}
 
 	return peerVersion, nil
+}
+
+func (ns *NetworkService) buildVersionPayload() map[string]interface{} {
+	now := time.Now().Unix()
+	payload := map[string]interface{}{
+		"protocol":    protocolVersion,
+		"best_height": ns.bestHeight(),
+		"timestamp":   now,
+		"listen_port": toIntPort(ns.ListenPort),
+		"http_port":   ns.HTTPPort,
+	}
+
+	ns.Mutex.Lock()
+	validatorAddress := strings.TrimSpace(ns.ValidatorAddress)
+	privateKey := strings.TrimSpace(ns.ValidatorPrivateKey)
+	ns.Mutex.Unlock()
+
+	if validatorAddress != "" {
+		message := validatorHandshakeMessage(validatorAddress, toIntPort(ns.ListenPort), ns.HTTPPort, now)
+		payload["validator_address"] = validatorAddress
+		payload["validator_message"] = message
+		if privateKey != "" {
+			signature, err := signValidatorHandshake(privateKey, message)
+			if err != nil {
+				log.Printf("validator handshake signing failed: %v", err)
+			} else {
+				payload["validator_signature"] = signature
+			}
+		}
+	}
+	return payload
+}
+
+func validatorHandshakeMessage(address string, listenPort, httpPort int, timestamp int64) string {
+	return fmt.Sprintf("PODL-P2P:%s:%d:%d:%d", strings.ToLower(strings.TrimSpace(address)), listenPort, httpPort, timestamp)
+}
+
+func signValidatorHandshake(privateKeyHex, message string) (string, error) {
+	keyHex := strings.TrimPrefix(strings.TrimSpace(privateKeyHex), "0x")
+	privateKey, err := crypto.HexToECDSA(keyHex)
+	if err != nil {
+		return "", err
+	}
+	signature, err := crypto.Sign(accounts.TextHash([]byte(message)), privateKey)
+	if err != nil {
+		return "", err
+	}
+	return "0x" + hex.EncodeToString(signature), nil
+}
+
+func verifyValidatorHandshake(address, message, signature string) bool {
+	address = strings.TrimSpace(address)
+	signature = strings.TrimPrefix(strings.TrimSpace(signature), "0x")
+	if address == "" || message == "" || signature == "" {
+		return false
+	}
+	parts := strings.Split(message, ":")
+	if len(parts) != 5 || parts[0] != "PODL-P2P" || !strings.EqualFold(parts[1], address) {
+		return false
+	}
+	timestamp, err := strconv.ParseInt(parts[4], 10, 64)
+	if err != nil {
+		return false
+	}
+	// Keep validator identity proofs fresh enough to avoid simple replay.
+	if math.Abs(float64(time.Now().Unix()-timestamp)) > float64(10*time.Minute/time.Second) {
+		return false
+	}
+	raw, err := hex.DecodeString(signature)
+	if err != nil {
+		return false
+	}
+	pub, err := crypto.SigToPub(accounts.TextHash([]byte(message)), raw)
+	if err != nil {
+		return false
+	}
+	recovered := crypto.PubkeyToAddress(*pub).Hex()
+	return strings.EqualFold(recovered, address)
+}
+
+func (ns *NetworkService) bestHeight() int {
+	if ns == nil || ns.Blockchain == nil {
+		return 0
+	}
+	height := 0
+	ns.Blockchain.Mutex.Lock()
+	if len(ns.Blockchain.Blocks) > 0 {
+		height = int(ns.Blockchain.Blocks[len(ns.Blockchain.Blocks)-1].BlockNumber)
+	}
+	ns.Blockchain.Mutex.Unlock()
+	latest, err := GetLatestBlockNumberFromDB()
+	if err != nil {
+		return height
+	}
+	if int(latest) > height {
+		height = int(latest)
+	}
+	return height
+}
+
+func (ns *NetworkService) applyPeerVersion(peer *Peer, peerVersion map[string]interface{}) {
+	if peer == nil || peerVersion == nil {
+		return
+	}
+	if height, ok := peerVersion["best_height"].(float64); ok {
+		peer.Height = int(height)
+	}
+	if httpPort, ok := peerVersion["http_port"].(float64); ok {
+		peer.HTTPPort = int(httpPort)
+	}
+	if listenPort, ok := peerVersion["listen_port"].(float64); ok {
+		peer.Port = int(listenPort)
+	}
+	if validatorAddress, ok := peerVersion["validator_address"].(string); ok {
+		peer.ValidatorAddress = strings.TrimSpace(validatorAddress)
+		message, _ := peerVersion["validator_message"].(string)
+		signature, _ := peerVersion["validator_signature"].(string)
+		peer.ValidatorVerified = verifyValidatorHandshake(peer.ValidatorAddress, message, signature)
+	}
+	peer.IsActive = true
+	peer.LastSeen = time.Now()
+	peer.LastUpdated = time.Now()
+	ns.updatePeerSyncStatus(peer, ns.bestHeight())
+}
+
+func (ns *NetworkService) blockByNumber(number uint64) (*Block, error) {
+	if ns == nil || ns.Blockchain == nil {
+		return nil, fmt.Errorf("network/blockchain not initialized")
+	}
+	ns.Blockchain.Mutex.Lock()
+	for _, block := range ns.Blockchain.Blocks {
+		if block != nil && block.BlockNumber == number {
+			ns.Blockchain.Mutex.Unlock()
+			return block, nil
+		}
+	}
+	ns.Blockchain.Mutex.Unlock()
+	return GetBlockFromDB(number)
+}
+
+func (ns *NetworkService) updatePeerSyncStatus(peer *Peer, localHeight int) {
+	if peer == nil {
+		return
+	}
+	lag := localHeight - peer.Height
+	if lag < 0 {
+		lag = 0
+	}
+	peer.HeightLag = lag
+	switch {
+	case !peer.IsActive:
+		peer.SyncStatus = "offline"
+	case localHeight > 0 && peer.Height+MaxVotingPeerHeightLag < localHeight:
+		peer.SyncStatus = "syncing"
+	case peer.ValidatorVerified:
+		peer.SyncStatus = "active"
+	default:
+		peer.SyncStatus = "connected_unverified"
+	}
+}
+
+func (ns *NetworkService) peerVotingEligibleLocked(peer *Peer, localHeight int) bool {
+	if peer == nil || ns.isSelfPeer(peer) {
+		return false
+	}
+	if !peer.IsActive || peer.HTTPPort == 0 || peer.Reputation < MinReputationThreshold {
+		return false
+	}
+	if !peer.ValidatorVerified || strings.TrimSpace(peer.ValidatorAddress) == "" {
+		return false
+	}
+	if localHeight > 0 && peer.Height+MaxVotingPeerHeightLag < localHeight {
+		return false
+	}
+	return time.Since(peer.LastSeen) < 2*PingInterval
+}
+
+func (ns *NetworkService) HasVotingPeerForValidator(address string, localHeight int) bool {
+	if ns == nil {
+		return false
+	}
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return false
+	}
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+	for _, peer := range ns.Peers {
+		if peer == nil || !strings.EqualFold(peer.ValidatorAddress, address) {
+			continue
+		}
+		ns.updatePeerSyncStatus(peer, localHeight)
+		if ns.peerVotingEligibleLocked(peer, localHeight) {
+			return true
+		}
+	}
+	return false
+}
+
+func (ns *NetworkService) PeerStatusSnapshot() []map[string]interface{} {
+	if ns == nil {
+		return []map[string]interface{}{}
+	}
+	localHeight := ns.bestHeight()
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+
+	out := make([]map[string]interface{}, 0, len(ns.Peers))
+	for _, p := range ns.Peers {
+		if p == nil {
+			continue
+		}
+		ns.updatePeerSyncStatus(p, localHeight)
+		out = append(out, map[string]interface{}{
+			"address":            p.Address,
+			"port":               p.Port,
+			"http_port":          p.HTTPPort,
+			"last_seen":          p.LastSeen,
+			"reputation":         p.Reputation,
+			"height":             p.Height,
+			"height_lag":         p.HeightLag,
+			"is_active":          p.IsActive,
+			"sync_status":        p.SyncStatus,
+			"validator_address":  p.ValidatorAddress,
+			"validator_verified": p.ValidatorVerified,
+			"voting_eligible":    ns.peerVotingEligibleLocked(p, localHeight),
+		})
+	}
+	return out
 }
 
 func (ns *NetworkService) fetchPeerHeight(peer *Peer) error {
@@ -257,15 +494,7 @@ func (ns *NetworkService) fetchPeerHeight(peer *Peer) error {
 		return err
 	}
 
-	if height, ok := peerVersion["best_height"].(float64); ok {
-		peer.Height = int(height)
-	}
-	if httpPort, ok := peerVersion["http_port"].(float64); ok {
-		peer.HTTPPort = int(httpPort)
-	}
-	peer.IsActive = true
-	peer.LastSeen = time.Now()
-	peer.LastUpdated = time.Now()
+	ns.applyPeerVersion(peer, peerVersion)
 	return nil
 }
 func (ns *NetworkService) processPeerEvents() {
@@ -382,8 +611,8 @@ func (ns *NetworkService) sendData(peer *Peer, data []byte) bool {
 	if peerVersion, err := ns.sendVersionHandshake(conn, decoder); err != nil {
 		log.Printf("Handshake with %s:%d failed: %v", peer.Address, peer.Port, err)
 		return false
-	} else if httpPort, ok := peerVersion["http_port"].(float64); ok {
-		peer.HTTPPort = int(httpPort)
+	} else {
+		ns.applyPeerVersion(peer, peerVersion)
 	}
 
 	// Set write deadline
@@ -488,31 +717,13 @@ func (ns *NetworkService) handleConnection(conn net.Conn) {
 			return
 		}
 
-		if lp, ok := firstMsg["listen_port"].(float64); ok {
-			peer.Port = int(lp)
-		}
-		if hp, ok := firstMsg["http_port"].(float64); ok {
-			peer.HTTPPort = int(hp)
-		}
-
-		if height, ok := firstMsg["best_height"].(float64); ok {
-			peer.Height = int(height)
-		}
+		ns.applyPeerVersion(peer, firstMsg)
 
 		// Send our version information
-		ourVersion := map[string]interface{}{
-			"protocol":    protocolVersion,
-			"best_height": len(ns.Blockchain.Blocks),
-			"timestamp":   time.Now().Unix(),
-			"listen_port": toIntPort(ns.ListenPort),
-			"http_port":   ns.HTTPPort,
-		}
-
-		if err := json.NewEncoder(conn).Encode(ourVersion); err != nil {
+		if err := json.NewEncoder(conn).Encode(ns.buildVersionPayload()); err != nil {
 			log.Printf("Error sending our version: %v", err)
 			return
 		}
-		peer.IsActive = true
 		handledHandshake = true
 	} else {
 		// No handshake provided; treat first message as regular message.
@@ -576,21 +787,27 @@ func (ns *NetworkService) handleConnection(conn net.Conn) {
 				}
 				s := int(start)
 				e := int(end)
-				ns.Blockchain.Mutex.Lock()
 				if s < 0 {
 					s = 0
 				}
-				if e > len(ns.Blockchain.Blocks) {
-					e = len(ns.Blockchain.Blocks)
+				bestHeight := ns.bestHeight()
+				if e > bestHeight {
+					e = bestHeight
 				}
-				for i := s; i < e; i++ {
-					if err := json.NewEncoder(conn).Encode(ns.Blockchain.Blocks[i]); err != nil {
-						ns.Blockchain.Mutex.Unlock()
-						log.Printf("Error sending block %d: %v", i, err)
+				if e < s {
+					return true
+				}
+				for height := s; height <= e; height++ {
+					block, err := ns.blockByNumber(uint64(height))
+					if err != nil {
+						log.Printf("Error loading block %d for sync: %v", height, err)
+						return false
+					}
+					if err := json.NewEncoder(conn).Encode(block); err != nil {
+						log.Printf("Error sending block %d: %v", height, err)
 						return false
 					}
 				}
-				ns.Blockchain.Mutex.Unlock()
 				return true
 			}
 		}
@@ -872,8 +1089,8 @@ func (ns *NetworkService) SyncValidators(peer *Peer) error {
 	decoder := json.NewDecoder(conn)
 	if peerVersion, err := ns.sendVersionHandshake(conn, decoder); err != nil {
 		return err
-	} else if httpPort, ok := peerVersion["http_port"].(float64); ok {
-		peer.HTTPPort = int(httpPort)
+	} else {
+		ns.applyPeerVersion(peer, peerVersion)
 	}
 
 	// Request validators
@@ -1077,9 +1294,7 @@ func (ns *NetworkService) SyncChain() error {
 	}
 	ns.Mutex.Unlock()
 
-	ns.Blockchain.Mutex.Lock()
-	ourHeight := len(ns.Blockchain.Blocks)
-	ns.Blockchain.Mutex.Unlock()
+	ourHeight := ns.bestHeight()
 	var bestPeer *Peer
 	bestScore := 0.0
 
@@ -1363,16 +1578,8 @@ func (ns *NetworkService) HealthyRemotePeerCountNearHeight(localHeight int) int 
 		if peer == nil || ns.isSelfPeer(peer) {
 			continue
 		}
-		if !peer.IsActive || peer.HTTPPort == 0 {
-			continue
-		}
-		if peer.Reputation < MinReputationThreshold {
-			continue
-		}
-		if localHeight > 0 && peer.Height+MaxVotingPeerHeightLag < localHeight {
-			continue
-		}
-		if time.Since(peer.LastSeen) < 2*PingInterval {
+		ns.updatePeerSyncStatus(peer, localHeight)
+		if ns.peerVotingEligibleLocked(peer, localHeight) {
 			count++
 		}
 	}
