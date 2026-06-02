@@ -77,6 +77,9 @@ func TestNetworkConstants(t *testing.T) {
 	if MinReputationThreshold < 0 || MinReputationThreshold >= 1 {
 		t.Errorf("MinReputationThreshold out of range [0,1): %f", MinReputationThreshold)
 	}
+	if MaxVotingPeerHeightLag < 0 {
+		t.Errorf("MaxVotingPeerHeightLag should be non-negative, got %d", MaxVotingPeerHeightLag)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,9 +112,9 @@ func TestNetworkService_PeersMapOperations(t *testing.T) {
 	// Manually add a peer (simulating discovered peer)
 	peerKey := "127.0.0.1:5001"
 	ns.Peers[peerKey] = &Peer{
-		Address:  "127.0.0.1",
-		Port:     5001,
-		IsActive: true,
+		Address:    "127.0.0.1",
+		Port:       5001,
+		IsActive:   true,
 		Reputation: 1.0,
 	}
 
@@ -144,6 +147,35 @@ func TestNetworkService_PeerReputationTracking(t *testing.T) {
 	}
 	if newRep != PeerReputationDecay {
 		t.Errorf("expected reputation %f after one decay, got %f", PeerReputationDecay, newRep)
+	}
+}
+
+func TestHealthyRemotePeerCountNearHeight_SkipsLaggingPeers(t *testing.T) {
+	bc := newTestBlockchain()
+	ns := NewNetworkService(bc)
+	now := time.Now()
+
+	ns.Peers["synced:6111"] = &Peer{
+		Address:    "synced",
+		Port:       6111,
+		HTTPPort:   6511,
+		IsActive:   true,
+		Reputation: 1,
+		LastSeen:   now,
+		Height:     100,
+	}
+	ns.Peers["lagging:6112"] = &Peer{
+		Address:    "lagging",
+		Port:       6112,
+		HTTPPort:   6512,
+		IsActive:   true,
+		Reputation: 1,
+		LastSeen:   now,
+		Height:     10,
+	}
+
+	if got := ns.HealthyRemotePeerCountNearHeight(100); got != 1 {
+		t.Fatalf("expected only synced peer to count, got %d", got)
 	}
 }
 
