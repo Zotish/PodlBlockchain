@@ -2,6 +2,7 @@ const ext = typeof chrome !== "undefined" ? chrome : browser;
 const PROD_CHAIN_URL = "https://chain.178-105-133-94.sslip.io";
 const PROD_WALLET_URL = "https://wallet.178-105-133-94.sslip.io";
 const PROD_AGGREGATOR_URL = "https://api.178-105-133-94.sslip.io";
+const PROD_DEX_REGISTRY_URL = "https://dex-api.178-105-133-94.sslip.io";
 const PROD_BRIDGE_ADMIN_URL = "https://delightful-churros-767ded.netlify.app";
 const PROD_EXPLORER_URL = "https://warm-dragon-34d6ff.netlify.app";
 const PROD_DEX_URL = "https://bright-crisp-91fe94.netlify.app";
@@ -133,6 +134,54 @@ function tokenIconHtml(token = {}) {
   const fallback = escapeHtml((token.symbol || "?").slice(0, 1).toUpperCase() || "?");
   if (!logo) return fallback;
   return `<img src="${escapeHtml(logo)}" alt="${symbol}" onerror="this.remove();this.parentElement.textContent='${fallback}'" />`;
+}
+
+function tokenAddressOf(token) {
+  return typeof token === "string"
+    ? token
+    : (token?.contract || token?.address || token?.contract_address || "");
+}
+
+async function dexRegistryGet(path) {
+  const res = await fetch(`${PROD_DEX_REGISTRY_URL}${path}`);
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  if (!res.ok) throw new Error(json.error || text || "DEX registry request failed");
+  return json;
+}
+
+function normalizeRegistryToken(token = {}) {
+  const address = String(token.address || token.contract || token.contract_address || "").trim();
+  if (!address) return null;
+  return {
+    contract: address,
+    address,
+    name: token.name || token.symbol || "Token",
+    symbol: token.symbol || address.slice(2, 6).toUpperCase(),
+    decimals: parseInt(token.decimals, 10) || 8,
+    logo_url: readTokenLogo(token),
+    price_usd: readTokenPrice(token),
+    price_change_24h: readTokenChange(token),
+    official: token.official !== false,
+    registry: true,
+    verified: token.verified !== false,
+  };
+}
+
+async function syncDexRegistryTokens(currentList = []) {
+  const registry = await dexRegistryGet("/tokens").catch(() => []);
+  const officialTokens = (Array.isArray(registry) ? registry : []).map(normalizeRegistryToken).filter(Boolean);
+  if (!officialTokens.length) return currentList;
+
+  const merged = [...currentList];
+  officialTokens.forEach((official) => {
+    const idx = merged.findIndex((token) => tokenAddressOf(token).toLowerCase() === official.address.toLowerCase());
+    if (idx >= 0) merged[idx] = { ...(typeof merged[idx] === "object" ? merged[idx] : {}), ...official };
+    else merged.push(official);
+  });
+  await ext.storage.local.set({ tokenWatchlist: merged });
+  return merged;
 }
 
 function setStatus(locked, address) {
@@ -433,7 +482,8 @@ async function load() {
     showScreen("onboarding");
   }
 
-  renderTokens(data.tokenWatchlist || []);
+  const tokenWatchlist = await syncDexRegistryTokens(data.tokenWatchlist || []);
+  renderTokens(tokenWatchlist);
   renderActivity(data.txActivity || []);
 
   // ── Auto-show dApps tab if there are pending approvals ──────────────────
@@ -885,7 +935,7 @@ async function renderTokens(watchlist) {
 
   container.innerHTML = "";
   for (const token of watchlist) {
-    const contractAddr = typeof token === "string" ? token : (token.contract || token.address || token.contract_address || "");
+    const contractAddr = tokenAddressOf(token);
     if (!contractAddr) continue;
     const savedMeta = typeof token === "object" ? token : {};
 
@@ -926,7 +976,7 @@ async function renderTokens(watchlist) {
     removeBtn.onclick = async () => {
       const d = await ext.storage.local.get(["tokenWatchlist"]);
       const list = (d.tokenWatchlist || []).filter((t) =>
-        (typeof t === "string" ? t : (t.contract || t.address || t.contract_address)) !== contractAddr
+        tokenAddressOf(t) !== contractAddr
       );
       await ext.storage.local.set({ tokenWatchlist: list });
       renderTokens(list);
@@ -943,7 +993,7 @@ on("addToken", "click", async () => {
   if (!addr) return;
   const data = await ext.storage.local.get(["tokenWatchlist"]);
   const list = data.tokenWatchlist || [];
-  const exists = list.some((t) => (typeof t === "string" ? t : t.contract).toLowerCase() === addr.toLowerCase());
+  const exists = list.some((t) => tokenAddressOf(t).toLowerCase() === addr.toLowerCase());
   if (exists) { setError("Token already added"); return; }
   list.push(addr);
   await ext.storage.local.set({ tokenWatchlist: list });
