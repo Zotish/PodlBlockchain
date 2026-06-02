@@ -17,6 +17,7 @@ import {
   AppState,
   Dimensions,
   FlatList,
+  Image,
   Keyboard,
   Linking,
   KeyboardAvoidingView,
@@ -1172,6 +1173,42 @@ function App() {
     const symbol = String(token?.symbol || "").trim().toUpperCase();
     const name = String(token?.name || "").trim().toUpperCase();
     return !symbol || symbol === "TOKEN" || symbol === "UNKNOWN" || name === "TOKEN" || name === "UNKNOWN TOKEN";
+  }
+
+  function tokenLogoUri(token = {}) {
+    return token.logoUrl || token.logo_url || token.logo || "";
+  }
+
+  function tokenMarketNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const n = Number(String(value).replace("%", "").trim());
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function tokenPriceLabel(token = {}) {
+    const price = tokenMarketNumber(token.priceUsd ?? token.price_usd ?? token.price ?? token.usd_price);
+    if (price === null) return "Price unavailable";
+    const digits = price >= 1 ? 2 : 6;
+    return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: digits })}`;
+  }
+
+  function tokenChangeLabel(token = {}) {
+    const change = tokenMarketNumber(token.priceChange24h ?? token.price_change_24h ?? token.change24h ?? token.change_24h);
+    if (change === null) return "24h --";
+    const sign = change > 0 ? "+" : "";
+    return `${sign}${change.toFixed(2)}%`;
+  }
+
+  function tokenChangeStyle(token = {}) {
+    const change = tokenMarketNumber(token.priceChange24h ?? token.price_change_24h ?? token.change24h ?? token.change_24h);
+    if (change === null) return styles.walletTokenChangeNeutral;
+    if (change > 0) return styles.walletTokenChangePositive;
+    if (change < 0) return styles.walletTokenChangeNegative;
+    return styles.walletTokenChangeNeutral;
+  }
+
+  function isOfficialToken(token = {}) {
+    return Boolean(token.official || token.registry || token.detectedFrom === "dex-registry");
   }
 
   function healthDotColor() {
@@ -2671,10 +2708,13 @@ function App() {
       detectedFrom: "dex-registry",
       verified: token.verified !== false,
       registry: true,
+      official: true,
       networkId: "lqd",
       family: "evm",
       holderAddress: wallet?.address || "",
       logoUrl: token.logo_url || token.logoUrl || "",
+      priceUsd: token.price_usd ?? token.priceUsd ?? token.price ?? token.usd_price ?? "",
+      priceChange24h: token.price_change_24h ?? token.priceChange24h ?? token.change_24h ?? token.change24h ?? "",
     };
   }
 
@@ -6500,30 +6540,44 @@ function App() {
                       </View>
                     </View>
                     {/* Custom Tokens */}
-                    {visibleTokens.map((token, i) => (
-                      <TouchableOpacity
-                        key={i}
-                        onPress={() => setSelectedTokenForSend(token)}
-                        onLongPress={() => setTokenActionTarget(token)}
-                        delayLongPress={400}
-                        style={styles.mmTokenRow}
-                      >
-                        <View style={styles.mmTokenIcon}>
-                          <Text style={{ fontSize: scale(16) }}>{isGenericTokenMeta(token) ? "?" : "💎"}</Text>
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.mmTokenName}>{isGenericTokenMeta(token) ? "Unknown Token" : token.name}</Text>
-                          <Text style={styles.mmTokenSymbol}>{formatUnits(token.balance, token.decimals || 8, 2)} {token.symbol}</Text>
-                          <Text style={styles.walletTokenMeta}>
-                            {shortAddress(token.address)} · {token.networkId === activeNetworkId ? currentNetwork.name : token.networkId}
-                          </Text>
-                          {isGenericTokenMeta(token) && (
-                            <Text style={styles.walletWarningText}>Metadata incomplete. Re-import with symbol/decimals if needed.</Text>
-                          )}
-                        </View>
-                        <Text style={{ color: '#8a78ff', fontSize: scale(18), paddingHorizontal: scale(4) }}>⋮</Text>
-                      </TouchableOpacity>
-                    ))}
+                    {visibleTokens.map((token, i) => {
+                      const logoUri = tokenLogoUri(token);
+                      return (
+                        <TouchableOpacity
+                          key={i}
+                          onPress={() => setSelectedTokenForSend(token)}
+                          onLongPress={() => setTokenActionTarget(token)}
+                          delayLongPress={400}
+                          style={styles.mmTokenRow}
+                        >
+                          <View style={styles.mmTokenIcon}>
+                            {logoUri ? (
+                              <Image source={{ uri: logoUri }} style={styles.mmTokenLogo} resizeMode="cover" />
+                            ) : (
+                              <Text style={{ fontSize: scale(16) }}>{isGenericTokenMeta(token) ? "?" : "💎"}</Text>
+                            )}
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <View style={styles.mmTokenTitleRow}>
+                              <Text style={styles.mmTokenName} numberOfLines={1}>{isGenericTokenMeta(token) ? "Unknown Token" : token.name}</Text>
+                              {isOfficialToken(token) && <Text style={styles.walletOfficialBadge}>Official</Text>}
+                            </View>
+                            <Text style={styles.mmTokenSymbol}>{formatUnits(token.balance, token.decimals || 8, 2)} {token.symbol}</Text>
+                            <View style={styles.walletTokenMarketRow}>
+                              <Text style={styles.walletTokenPrice}>{tokenPriceLabel(token)}</Text>
+                              <Text style={[styles.walletTokenChange, tokenChangeStyle(token)]}>{tokenChangeLabel(token)}</Text>
+                            </View>
+                            <Text style={styles.walletTokenMeta}>
+                              {shortAddress(token.address)} · {token.networkId === activeNetworkId ? currentNetwork.name : token.networkId}
+                            </Text>
+                            {isGenericTokenMeta(token) && (
+                              <Text style={styles.walletWarningText}>Metadata incomplete. Re-import with symbol/decimals if needed.</Text>
+                            )}
+                          </View>
+                          <Text style={{ color: '#8a78ff', fontSize: scale(18), paddingHorizontal: scale(4) }}>⋮</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
 
                     {/* Hidden tokens toggle */}
                     {hiddenCurrentTokens.length > 0 && (
@@ -8874,6 +8928,40 @@ const styles = StyleSheet.create({
     paddingVertical: scale(4),
     overflow: 'hidden',
   },
+  walletOfficialBadge: {
+    color: '#91f7bf',
+    fontSize: scale(9),
+    fontWeight: '900',
+    backgroundColor: 'rgba(16,185,129,0.12)',
+    borderRadius: scale(8),
+    paddingHorizontal: scale(6),
+    paddingVertical: scale(2),
+    overflow: 'hidden',
+  },
+  walletTokenMarketRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: scale(8),
+    marginTop: scale(3),
+  },
+  walletTokenPrice: {
+    color: '#aeb8d8',
+    fontSize: scale(11),
+    fontWeight: '800',
+  },
+  walletTokenChange: {
+    fontSize: scale(11),
+    fontWeight: '900',
+  },
+  walletTokenChangePositive: {
+    color: '#91f7bf',
+  },
+  walletTokenChangeNegative: {
+    color: '#ff7b7b',
+  },
+  walletTokenChangeNeutral: {
+    color: '#717da4',
+  },
   walletTokenMeta: {
     color: '#5f6a91',
     fontSize: scale(10),
@@ -9072,6 +9160,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: scale(12),
+    overflow: 'hidden',
+  },
+  mmTokenLogo: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 20,
+  },
+  mmTokenTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: scale(6),
+    minWidth: 0,
   },
   mmTokenName: {
     color: '#f4f7ff',
