@@ -30,6 +30,14 @@ function isLqdNodeUrl(urlOrUrls) {
   );
 }
 
+function contractOutput(data, fallback = "") {
+  if (data == null) return fallback;
+  if (typeof data === "string" || typeof data === "number" || typeof data === "bigint") return String(data);
+  const value = data.output ?? data.Output ?? data.result?.output ?? data.result?.Output ?? data.data?.output ?? data.data?.Output ?? data.result;
+  if (value == null || typeof value === "object") return fallback;
+  return String(value);
+}
+
 async function tryUrls(urlOrUrls, runner, accept = (result) => result !== null && result !== undefined) {
   const urls = normalizeUrlList(urlOrUrls);
   let lastError = null;
@@ -398,7 +406,7 @@ export async function resolveTokenMeta(nodeUrl, contract, holder) {
     const calls = async (fn) => {
       try {
         const res = await nodeCallContract(url, { address: contract, caller: holder, fn, args: [], value: 0 });
-        return res?.output || res?.Output || "";
+        return contractOutput(res);
       } catch {
         return "";
       }
@@ -454,7 +462,7 @@ export async function resolveTokenBalance(nodeUrl, walletUrl, contract, holder) 
           args: [holder],
           value: 0,
         });
-        const out = res?.output || res?.Output || res?.result || "";
+        const out = contractOutput(res);
         if (out !== "" && out != null) return String(out);
       } catch {
         // continue
@@ -467,7 +475,7 @@ export async function resolveTokenBalance(nodeUrl, walletUrl, contract, holder) 
 
   try {
     const res = await walletTokenBalance(walletUrl || defaultWalletUrl, contract, holder);
-    return String(res?.output || res?.Output || "0");
+    return contractOutput(res, "0");
   } catch {
     return "0";
   }

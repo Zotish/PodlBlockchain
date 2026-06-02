@@ -268,6 +268,14 @@ async function dexRegistryGet(path) {
   return data;
 }
 
+function contractOutput(data, fallback = "") {
+  if (data == null) return fallback;
+  if (typeof data === "string" || typeof data === "number" || typeof data === "bigint") return String(data);
+  const value = data.output ?? data.Output ?? data.result?.output ?? data.result?.Output ?? data.data?.output ?? data.data?.Output ?? data.result;
+  if (value == null || typeof value === "object") return fallback;
+  return String(value);
+}
+
 async function contractCall(contractAddr, fn, args = []) {
   return nodePost("/contract/call", {
     address: contractAddr, caller: state.address,
@@ -543,7 +551,7 @@ async function syncDexRegistryTokens() {
 
 async function fetchTokenMeta(addr) {
   const tryCall = async (fn) => {
-    try { const r = await contractCall(addr, fn); return r.output || ""; } catch { return ""; }
+    try { const r = await contractCall(addr, fn); return contractOutput(r); } catch { return ""; }
   };
   const [name, symbol, decimals, balance] = await Promise.all([
     tryCall("Name"), tryCall("Symbol"), tryCall("Decimals"),
@@ -551,7 +559,7 @@ async function fetchTokenMeta(addr) {
   ]);
   // BalanceOf needs arg
   let bal = "0";
-  try { const r = await contractCall(addr, "BalanceOf", [state.address]); bal = r.output || "0"; } catch { }
+  try { const r = await contractCall(addr, "BalanceOf", [state.address]); bal = contractOutput(r, "0"); } catch { }
   return { name: name || "Unknown", symbol: symbol || addr.slice(2, 6).toUpperCase(), decimals: parseInt(decimals) || 8, balance: bal };
 }
 
@@ -596,7 +604,7 @@ async function refreshTokenBal(addr) {
   try {
     const r = await contractCall(addr, "BalanceOf", [state.address]);
     const idx = state.tokens.findIndex(t => t.address.toLowerCase() === addr.toLowerCase());
-    if (idx >= 0) { state.tokens[idx].balance = r.output || "0"; saveTokens(); renderTokenList(); }
+    if (idx >= 0) { state.tokens[idx].balance = contractOutput(r, "0"); saveTokens(); renderTokenList(); }
   } catch { }
 }
 

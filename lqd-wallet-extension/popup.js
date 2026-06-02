@@ -142,6 +142,14 @@ function tokenAddressOf(token) {
     : (token?.contract || token?.address || token?.contract_address || "");
 }
 
+function contractOutput(data, fallback = "") {
+  if (data == null) return fallback;
+  if (typeof data === "string" || typeof data === "number" || typeof data === "bigint") return String(data);
+  const value = data.output ?? data.Output ?? data.result?.output ?? data.result?.Output ?? data.data?.output ?? data.data?.Output ?? data.result;
+  if (value == null || typeof value === "object") return fallback;
+  return String(value);
+}
+
 async function dexRegistryGet(path) {
   const res = await fetch(`${PROD_DEX_REGISTRY_URL}${path}`);
   const text = await res.text();
@@ -153,7 +161,7 @@ async function dexRegistryGet(path) {
 
 function normalizeRegistryToken(token = {}) {
   const address = String(token.address || token.contract || token.contract_address || "").trim();
-  if (!address) return null;
+  if (!address || address.toLowerCase() === "lqd") return null;
   return {
     contract: address,
     address,
@@ -884,8 +892,9 @@ async function fetchTokenMeta(contractAddr, nodeUrl) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ address: contractAddr, fn, args: [], caller: contractAddr, value: 0 })
       });
-      const json = await res.json();
-      return json.output || "";
+      const text = await res.text();
+      let json; try { json = JSON.parse(text); } catch { json = text; }
+      return contractOutput(json);
     } catch { return ""; }
   };
   const [symbol, name, decimalsStr] = await Promise.all([
@@ -910,8 +919,9 @@ async function fetchTokenBalance(contractAddr, walletAddr, nodeUrl) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ address: contractAddr, fn, args: [walletAddr], caller: walletAddr, value: 0 })
       });
-      const json = await res.json();
-      return json.output || "0";
+      const text = await res.text();
+      let json; try { json = JSON.parse(text); } catch { json = text; }
+      return contractOutput(json, "0");
     } catch { return "0"; }
   };
   try {
