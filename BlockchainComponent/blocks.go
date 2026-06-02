@@ -350,9 +350,9 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	bc.AddBlockVote(newBlock.CurrentHash, validator.Address)
 	bc.AddPendingBlock(&newBlock)
 	// TryFinalizePending handles txpool cleanup and DB save.
-	// On a single-validator node this finalizes immediately (1/1 votes met).
-	// On multi-validator nodes finalization waits for peer votes via network.go.
-	bc.TryFinalizePending(newBlock.CurrentHash, 0.67)
+	// Bootstrap nodes finalize against the active voting set; remote validators
+	// join that set only after their P2P connection is healthy.
+	finalized := bc.TryFinalizePending(newBlock.CurrentHash, 0.67)
 
 	// Dynamic Liquidity Engine — runs every EpochBlocks, no-op otherwise.
 	if bc.DLEngine != nil {
@@ -361,13 +361,21 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 
 	bc.LastBlockMiningTime = time.Since(start)
 
-	log.Printf("⛏ Merged Block #%d | tx=%d  | time=%d | gas=%d | reward=%+v",
-		newBlock.BlockNumber,
-		len(finalTxs),
-		bc.LastBlockMiningTime,
-		newBlock.GasUsed,
-		newBlock.RewardBreakdown,
-	)
+	if finalized {
+		log.Printf("⛏ Merged Block #%d | tx=%d  | time=%d | gas=%d | reward=%+v",
+			newBlock.BlockNumber,
+			len(finalTxs),
+			bc.LastBlockMiningTime,
+			newBlock.GasUsed,
+			newBlock.RewardBreakdown,
+		)
+	} else {
+		log.Printf("⏳ Block #%d mined but waiting for validator votes | tx=%d | gas=%d",
+			newBlock.BlockNumber,
+			len(finalTxs),
+			newBlock.GasUsed,
+		)
+	}
 	log.Printf("Winner %s | validator_participants=%d | participant_txs=%d",
 		newBlock.RewardBreakdown.Validator,
 		len(newBlock.RewardBreakdown.ValidatorPartRewards),

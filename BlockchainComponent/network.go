@@ -1348,3 +1348,25 @@ func (ns *NetworkService) HasHealthyRemotePeer() bool {
 	}
 	return false
 }
+
+func (ns *NetworkService) HealthyRemotePeerCount() int {
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+
+	count := 0
+	for _, peer := range ns.Peers {
+		if peer == nil || ns.isSelfPeer(peer) {
+			continue
+		}
+		if !peer.IsActive || peer.HTTPPort == 0 {
+			continue
+		}
+		if peer.Reputation < MinReputationThreshold {
+			continue
+		}
+		if time.Since(peer.LastSeen) < 2*PingInterval {
+			count++
+		}
+	}
+	return count
+}
