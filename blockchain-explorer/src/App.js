@@ -25,6 +25,16 @@ import {
   ContractTrackerPage,
   PendingTransactionsPage,
   InternalTransactionsPage,
+  TokenTransfersPage,
+  TokenFlowPage,
+  NFTTrackerPage,
+  NFTActivityPage,
+  BridgeTransactionsPage,
+  TopAccountsPage,
+  ChartsStatsPage,
+  ApiDocsPage,
+  BroadcastTransactionPage,
+  DeveloperContractToolsPage,
 } from './pages/ExplorerTrackers';
 
 function App() {
@@ -41,20 +51,34 @@ function App() {
             <Route path="/transactions" element={<TransactionsPage />} />
             <Route path="/transactions/pending" element={<PendingTransactionsPage />} />
             <Route path="/transactions/internal" element={<InternalTransactionsPage />} />
+            <Route path="/transactions/token-transfers" element={<TokenTransfersPage />} />
             <Route path="/tx/:hash" element={<TransactionPage />} />
             <Route path="/validators" element={<ValidatorsPage />} />
             <Route path="/validator/:address" element={<ValidatorPage />} />
+            <Route path="/accounts" element={<TopAccountsPage />} />
             <Route path="/address/:address" element={<AddressPage />} />
             <Route path="/wallet" element={<WalletPage />} />
             <Route path="/rewards" element={<RewardsPage />} />
+            <Route path="/stats" element={<ChartsStatsPage />} />
             <Route path="/liquidity" element={<LiquidityPage />} />
             <Route path="/pools" element={<PoolsPage />} />
             <Route path="/tokens" element={<TokenTrackerPage />} />
+            <Route path="/tokens/flow" element={<TokenFlowPage />} />
+            <Route path="/nfts" element={<NFTTrackerPage />} />
+            <Route path="/nfts/mints" element={<NFTActivityPage mode="mints" />} />
+            <Route path="/nfts/trades" element={<NFTActivityPage mode="trades" />} />
+            <Route path="/nfts/transfers" element={<NFTActivityPage mode="transfers" />} />
+            <Route path="/nfts/latest-mints" element={<NFTActivityPage mode="mints" />} />
             <Route path="/pools/tracker" element={<PoolTrackerPage />} />
             <Route path="/lp-tracker" element={<LPTrackerPage />} />
             <Route path="/liquidity/providers" element={<LPTrackerPage />} />
             <Route path="/contracts" element={<ContractTrackerPage />} />
             <Route path="/bridge" element={<BridgePage />} />
+            <Route path="/bridge/transactions" element={<BridgeTransactionsPage />} />
+            <Route path="/developers/api" element={<ApiDocsPage />} />
+            <Route path="/developers/verify-contract" element={<DeveloperContractToolsPage mode="verify" />} />
+            <Route path="/developers/contracts/search" element={<DeveloperContractToolsPage mode="search" />} />
+            <Route path="/developers/broadcast" element={<BroadcastTransactionPage />} />
 
           </Routes>
         </div>
