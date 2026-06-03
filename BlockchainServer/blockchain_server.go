@@ -72,6 +72,29 @@ func NewBlockchainServer(port uint, blockchainPtr *blockchaincomponent.Blockchai
 	}
 }
 
+func (b *BlockchainServer) currentChainTip() (uint64, string) {
+	var height uint64
+	var latestHash string
+	if b != nil && b.BlockchainPtr != nil {
+		b.BlockchainPtr.Mutex.Lock()
+		if len(b.BlockchainPtr.Blocks) > 0 && b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1] != nil {
+			tip := b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1]
+			height = tip.BlockNumber
+			latestHash = tip.CurrentHash
+		}
+		b.BlockchainPtr.Mutex.Unlock()
+	}
+
+	dbHeight, err := blockchaincomponent.GetLatestBlockNumberFromDB()
+	if err == nil && dbHeight > height {
+		height = dbHeight
+		if blk, err := blockchaincomponent.GetBlockFromDB(dbHeight); err == nil && blk != nil {
+			latestHash = blk.CurrentHash
+		}
+	}
+	return height, latestHash
+}
+
 func (b *BlockchainServer) getBlockchain(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
@@ -81,16 +104,15 @@ func (b *BlockchainServer) getBlockchain(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
+		height, latestHash := b.currentChainTip()
 		b.BlockchainPtr.Mutex.Lock()
-		height := len(b.BlockchainPtr.Blocks)
-		peers := len(b.BlockchainPtr.Network.Peers)
+		peers := 0
+		if b.BlockchainPtr.Network != nil {
+			peers = len(b.BlockchainPtr.Network.Peers)
+		}
 		mempool := len(b.BlockchainPtr.Transaction_pool)
 		validators := len(b.BlockchainPtr.Validators)
 		baseFee := b.BlockchainPtr.BaseFee
-		var latestHash string
-		if height > 0 && b.BlockchainPtr.Blocks[height-1] != nil {
-			latestHash = b.BlockchainPtr.Blocks[height-1].CurrentHash
-		}
 		b.BlockchainPtr.Mutex.Unlock()
 
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4077,16 +4099,20 @@ func (rl *rateLimiter) middleware(next http.HandlerFunc) http.HandlerFunc {
 func (b *BlockchainServer) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
+	height, latestHash := b.currentChainTip()
 	b.BlockchainPtr.Mutex.Lock()
-	height := len(b.BlockchainPtr.Blocks)
-	peers := len(b.BlockchainPtr.Network.Peers)
+	peers := 0
+	if b.BlockchainPtr.Network != nil {
+		peers = len(b.BlockchainPtr.Network.Peers)
+	}
 	b.BlockchainPtr.Mutex.Unlock()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":    "ok",
-		"height":    height,
-		"peers":     peers,
-		"version":   "1.0.0",
-		"timestamp": time.Now().Unix(),
+		"status":            "ok",
+		"height":            height,
+		"peers":             peers,
+		"latest_block_hash": latestHash,
+		"version":           "1.0.0",
+		"timestamp":         time.Now().Unix(),
 	})
 }
 

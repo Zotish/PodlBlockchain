@@ -271,6 +271,47 @@ func (bc *Blockchain_struct) TrimInMemoryBlocks(keepLastN int) {
 	log.Printf("Trimmed in-memory blocks, keeping last %d blocks", keepLastN)
 }
 
+// HydrateInMemoryBlocksFromDB restores the in-memory tail from LevelDB after
+// process restarts. The serialized chain object may be older than latest_block
+// because finalized blocks are stored individually for performance.
+func (bc *Blockchain_struct) HydrateInMemoryBlocksFromDB(keepLastN int) {
+	if bc == nil {
+		return
+	}
+	if keepLastN < 2 {
+		keepLastN = 512
+	}
+
+	recent, latest, err := GetRecentBlocksFromDB(keepLastN)
+	if err != nil {
+		log.Printf("Warning: failed to hydrate block tail from DB: %v", err)
+		return
+	}
+	if len(recent) == 0 {
+		return
+	}
+
+	hydrated := make([]*Block, 0, len(recent))
+	for i := len(recent) - 1; i >= 0; i-- {
+		if recent[i] != nil {
+			hydrated = append(hydrated, recent[i])
+		}
+	}
+	if len(hydrated) == 0 {
+		return
+	}
+
+	currentTip := uint64(0)
+	if len(bc.Blocks) > 0 && bc.Blocks[len(bc.Blocks)-1] != nil {
+		currentTip = bc.Blocks[len(bc.Blocks)-1].BlockNumber
+	}
+	dbTip := hydrated[len(hydrated)-1].BlockNumber
+	if dbTip >= currentTip {
+		bc.Blocks = hydrated
+		log.Printf("Hydrated in-memory block tail from DB: kept %d blocks, tip #%d (latest marker #%d)", len(hydrated), dbTip, latest)
+	}
+}
+
 // Efficient transaction pool cleanup
 func (bc *Blockchain_struct) CleanTransactionPool() {
 	bc.Mutex.Lock()
@@ -303,6 +344,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 			log.Printf("Error loading blockchain from DB: %v", err)
 			return nil
 		}
+		blockchainStruct.HydrateInMemoryBlocksFromDB(1024)
 		// Restart network service for loaded blockchain
 		blockchainStruct.Network = NewNetworkService(blockchainStruct)
 		if blockchainStruct.BridgeRequests == nil {
