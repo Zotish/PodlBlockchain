@@ -419,6 +419,9 @@ func (ns *NetworkService) peerVotingEligibleLocked(peer *Peer, localHeight int) 
 	if !peer.ValidatorVerified || strings.TrimSpace(peer.ValidatorAddress) == "" {
 		return false
 	}
+	if peer.Reputation < MinReputationThreshold {
+		return false
+	}
 	if localHeight > 0 && peer.Height+MaxVotingPeerHeightLag < localHeight {
 		return false
 	}
