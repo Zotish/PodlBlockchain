@@ -538,6 +538,10 @@ func (bc *Blockchain_struct) MonitorValidators() {
 	}
 
 	for _, v := range bc.Validators {
+		if isDEXBackedValidator(v) && !bc.validatorEligibleForParticipantReward(v) {
+			continue
+		}
+
 		// Skip newly added validators
 		if currentTime.Sub(v.LastActive) < minActiveTime {
 			continue
@@ -637,6 +641,19 @@ func (bc *Blockchain_struct) validatorSelectableOnThisNode(v *Validator, localVa
 		return false
 	}
 	return bc.Network.HasVotingPeerForValidator(address, bc.latestBlockNumberForVoting())
+}
+
+func (bc *Blockchain_struct) validatorEligibleForParticipantReward(v *Validator) bool {
+	if v == nil {
+		return false
+	}
+	localValidator := strings.TrimSpace(bc.LocalValidator)
+	if localValidator == "" && bc.Network == nil {
+		// Preserve in-memory/unit-test behavior where there is no configured
+		// canonical node or P2P service to verify remote validators.
+		return true
+	}
+	return bc.validatorSelectableOnThisNode(v, localValidator)
 }
 
 func (bc *Blockchain_struct) SelectValidator() (Validator, error) {

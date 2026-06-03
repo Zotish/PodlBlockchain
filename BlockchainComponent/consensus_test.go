@@ -253,6 +253,31 @@ func TestSlashValidator_DoesNotRemoveDEXBackedValidator(t *testing.T) {
 	}
 }
 
+func TestMonitorValidators_DoesNotPenalizeOfflineDEXValidator(t *testing.T) {
+	local := makeValidator("0x1111111111111111111111111111111111111111", 1e12, 365)
+	remote := &Validator{
+		Address:            "0x2222222222222222222222222222222222222222",
+		DEXAddress:         "0xpool",
+		PairKey:            "LQD/USDT",
+		LPTokenAmount:      "100000000",
+		LockedLiquidityUSD: 100000,
+		LiquidityPower:     100000,
+		LPStakeAmount:      0,
+		LockTime:           time.Now().Add(365 * 24 * time.Hour),
+		LastActive:         time.Now().Add(-2 * InactivityThreshold),
+		PenaltyScore:       0,
+	}
+	bc := newBCWithValidators([]*Validator{local, remote})
+	bc.LocalValidator = local.Address
+	bc.Network = NewNetworkService(bc)
+
+	bc.MonitorValidators()
+
+	if remote.PenaltyScore != 0 {
+		t.Fatalf("offline DEX-backed validator should not be penalized by monitor, got %.2f", remote.PenaltyScore)
+	}
+}
+
 func TestSlashValidator_UnknownAddress_Noop(t *testing.T) {
 	v := makeValidator("0x1111111111111111111111111111111111111111", 1e12, 365)
 	bc := newBCWithValidators([]*Validator{v})

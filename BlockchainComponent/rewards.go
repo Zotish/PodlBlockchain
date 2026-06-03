@@ -411,7 +411,7 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 		if power <= 0 {
 			power = v.LPStakeAmount
 		}
-		if v.Address != validator && power > 0 {
+		if v.Address != validator && power > 0 && bc.validatorEligibleForParticipantReward(v) {
 			otherValWeightSum += math.Sqrt(power)
 		}
 	}
@@ -422,6 +422,9 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 				power = v.LPStakeAmount
 			}
 			if v.Address == validator || power <= 0 {
+				continue
+			}
+			if !bc.validatorEligibleForParticipantReward(v) {
 				continue
 			}
 			portion := portionFromWeight(otherValShare, math.Sqrt(power), otherValWeightSum)
