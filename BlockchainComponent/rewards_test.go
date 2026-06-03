@@ -185,6 +185,59 @@ func TestCalculateBlockRewards_TxParticipants(t *testing.T) {
 	}
 }
 
+func TestCalculateBlockRewards_ExcludesOfflineValidatorParticipants(t *testing.T) {
+	localAddr := "0x1111111111111111111111111111111111111111"
+	remoteAddr := "0x2222222222222222222222222222222222222222"
+	bc := newTestBlockchain()
+	bc.LocalValidator = localAddr
+	local := makeValidator(localAddr, 1e12, 365)
+	remote := makeValidator(remoteAddr, 1e12, 365)
+	remote.DEXAddress = "0xpool"
+	remote.PairKey = "LQD/USDT"
+	remote.LPTokenAmount = "100000000"
+	remote.LockedLiquidityUSD = 100000
+	bc.Validators = []*Validator{local, remote}
+	bc.Network = NewNetworkService(bc)
+	bc.UpdateLiquidityPower()
+
+	breakdown := bc.CalculateBlockRewards(localAddr, []*Transaction{}, 0, 1)
+	if _, ok := breakdown.ValidatorPartRewards[remoteAddr]; ok {
+		t.Fatal("offline remote validator must not receive validator participant rewards")
+	}
+}
+
+func TestCalculateBlockRewards_IncludesVerifiedActiveValidatorParticipant(t *testing.T) {
+	localAddr := "0x1111111111111111111111111111111111111111"
+	remoteAddr := "0x2222222222222222222222222222222222222222"
+	bc := newTestBlockchain()
+	bc.LocalValidator = localAddr
+	local := makeValidator(localAddr, 1e12, 365)
+	remote := makeValidator(remoteAddr, 1e12, 365)
+	remote.DEXAddress = "0xpool"
+	remote.PairKey = "LQD/USDT"
+	remote.LPTokenAmount = "100000000"
+	remote.LockedLiquidityUSD = 100000
+	bc.Validators = []*Validator{local, remote}
+	bc.Network = NewNetworkService(bc)
+	bc.Network.Peers["verified:6111"] = &Peer{
+		Address:           "verified",
+		Port:              6111,
+		HTTPPort:          6511,
+		IsActive:          true,
+		Reputation:        1,
+		LastSeen:          time.Now(),
+		Height:            int(bc.Blocks[len(bc.Blocks)-1].BlockNumber),
+		ValidatorAddress:  remoteAddr,
+		ValidatorVerified: true,
+	}
+	bc.UpdateLiquidityPower()
+
+	breakdown := bc.CalculateBlockRewards(localAddr, []*Transaction{}, 0, 1)
+	if got := NewAmountFromStringOrZero(breakdown.ValidatorPartRewards[remoteAddr]); got.Sign() <= 0 {
+		t.Fatal("verified active remote validator should receive validator participant rewards")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CalculateRewardForLiquidity
 // ─────────────────────────────────────────────────────────────────────────────
