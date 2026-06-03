@@ -192,17 +192,20 @@ func (c *ContractDB) LoadAllStorage(addr string) (map[string]string, error) {
 //  CORE TYPES
 
 type ContractMetadata struct {
-	Address            string `json:"address"`
-	Type               string `json:"type"` // plugin | gocode | dsl | builtin
-	Owner              string `json:"owner"`
-	ABI                []byte `json:"abi"`
-	Timestamp          int64  `json:"timestamp"`
-	Pool               bool   `json:"pool"`
-	PoolType           string `json:"pool_type,omitempty"`
-	PluginPath         string `json:"plugin_path,omitempty"`
-	RuntimeFingerprint string `json:"runtime_fingerprint,omitempty"`
-	Code               []byte `json:"code,omitempty"`
-	BuiltinName        string `json:"builtin_name,omitempty"`
+	Address             string   `json:"address"`
+	Type                string   `json:"type"` // plugin | gocode | dsl | builtin
+	Owner               string   `json:"owner"`
+	ABI                 []byte   `json:"abi"`
+	Timestamp           int64    `json:"timestamp"`
+	Pool                bool     `json:"pool"`
+	PoolType            string   `json:"pool_type,omitempty"`
+	PluginPath          string   `json:"plugin_path,omitempty"`
+	RuntimeFingerprint  string   `json:"runtime_fingerprint,omitempty"`
+	RuntimeFingerprints []string `json:"runtime_fingerprints,omitempty"`
+	RuntimeMigratedFrom string   `json:"runtime_migrated_from,omitempty"`
+	RuntimeMigratedAt   int64    `json:"runtime_migrated_at,omitempty"`
+	Code                []byte   `json:"code,omitempty"`
+	BuiltinName         string   `json:"builtin_name,omitempty"`
 }
 
 var (
@@ -1288,17 +1291,56 @@ func (r *ContractRegistry) EnsurePluginLoaded(addr string, meta *ContractMetadat
 	if err != nil {
 		return fmt.Errorf("runtime fingerprint: %w", err)
 	}
-	if meta.RuntimeFingerprint != "" && meta.RuntimeFingerprint != currentFingerprint {
-		return fmt.Errorf("plugin runtime fingerprint mismatch for %s; redeploy or recompile the plugin against the current node runtime", addr)
+	previousFingerprint := meta.RuntimeFingerprint
+
+	if err := r.PluginVM.LoadPlugin(addr, meta.PluginPath); err != nil {
+		if previousFingerprint != "" && previousFingerprint != currentFingerprint {
+			return fmt.Errorf("legacy plugin load failed after runtime compatibility check for %s (stored runtime %s, current runtime %s): %w", addr, previousFingerprint, currentFingerprint, err)
+		}
+		return err
 	}
-	if meta.RuntimeFingerprint == "" {
+
+	if currentFingerprint != "" && (previousFingerprint == "" || previousFingerprint != currentFingerprint || !hasRuntimeFingerprint(meta, currentFingerprint)) {
+		if previousFingerprint != "" && previousFingerprint != currentFingerprint {
+			meta.RuntimeFingerprints = appendRuntimeFingerprint(meta.RuntimeFingerprints, previousFingerprint)
+			meta.RuntimeMigratedFrom = previousFingerprint
+			meta.RuntimeMigratedAt = time.Now().Unix()
+		}
+		meta.RuntimeFingerprints = appendRuntimeFingerprint(meta.RuntimeFingerprints, currentFingerprint)
 		meta.RuntimeFingerprint = currentFingerprint
 		if err := r.DB.SaveContractMetadata(addr, meta); err != nil {
-			return fmt.Errorf("persist runtime fingerprint: %w", err)
+			return fmt.Errorf("persist runtime compatibility metadata: %w", err)
 		}
 	}
 
-	return r.PluginVM.LoadPlugin(addr, meta.PluginPath)
+	return nil
+}
+
+func hasRuntimeFingerprint(meta *ContractMetadata, fingerprint string) bool {
+	if fingerprint == "" {
+		return true
+	}
+	if meta.RuntimeFingerprint == fingerprint {
+		return true
+	}
+	for _, existing := range meta.RuntimeFingerprints {
+		if existing == fingerprint {
+			return true
+		}
+	}
+	return false
+}
+
+func appendRuntimeFingerprint(fingerprints []string, fingerprint string) []string {
+	if fingerprint == "" {
+		return fingerprints
+	}
+	for _, existing := range fingerprints {
+		if existing == fingerprint {
+			return fingerprints
+		}
+	}
+	return append(fingerprints, fingerprint)
 }
 
 // EXECUTION PIPELINE

@@ -26,7 +26,7 @@ func TestCurrentPluginRuntimeFingerprintStableAndNonEmpty(t *testing.T) {
 	}
 }
 
-func TestEnsurePluginLoadedRejectsFingerprintMismatch(t *testing.T) {
+func TestEnsurePluginLoadedDoesNotRejectLegacyFingerprintBeforeLoad(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
@@ -49,9 +49,9 @@ func TestEnsurePluginLoadedRejectsFingerprintMismatch(t *testing.T) {
 
 	err = reg.EnsurePluginLoaded(meta.Address, meta)
 	if err == nil {
-		t.Fatal("expected fingerprint mismatch error")
+		t.Fatal("expected plugin load error")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "fingerprint mismatch") {
-		t.Fatalf("expected fingerprint mismatch error, got %v", err)
+	if strings.Contains(strings.ToLower(err.Error()), "fingerprint mismatch") {
+		t.Fatalf("legacy fingerprint should not hard-fail before plugin load, got %v", err)
 	}
 }
