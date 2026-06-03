@@ -3137,7 +3137,6 @@ func (b *BlockchainServer) CurrentDEXFactory(w http.ResponseWriter, r *http.Requ
 		timestamp int64
 	}
 	best := candidate{}
-	currentFingerprint, _ := blockchaincomponent.CurrentPluginRuntimeFingerprint()
 
 	for _, addr := range addrs {
 		rec, err := b.BlockchainPtr.ContractEngine.Registry.LoadContract(addr)
@@ -3163,9 +3162,6 @@ func (b *BlockchainServer) CurrentDEXFactory(w http.ResponseWriter, r *http.Requ
 			}
 		}
 		if !isFactory {
-			continue
-		}
-		if meta.RuntimeFingerprint != "" && currentFingerprint != "" && meta.RuntimeFingerprint != currentFingerprint {
 			continue
 		}
 		if meta.Timestamp >= best.timestamp {
