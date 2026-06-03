@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
+  API_BASE,
+  CHAIN_BASE,
+  DEX_REGISTRY_BASE,
   fetchHistoricalTransactionPage,
   fetchDexRegistryPools,
   fetchDexRegistryTokens,
@@ -415,6 +418,14 @@ export const PendingTransactionsPage = () => {
   const load = useCallback(async () => {
     try {
       setError('');
+      try {
+        const data = await fetchJSON('/transactions/pending?page=1&size=80', { cacheTtlMs: 1000, timeoutMs: 8000 });
+        const list = Array.isArray(data) ? data : data.transactions || mergeArrayResults(data, 'tx_hash');
+        setTxs(list.map(normalizeTx));
+        return;
+      } catch {
+        // Older nodes may not expose the dedicated endpoint yet; fall back to live mempool + recent merge.
+      }
       const [mempool, recent] = await Promise.allSettled([
         fetchJSON('/mempool', { cacheTtlMs: 1000, timeoutMs: 8000 }),
         fetchJSON('/transactions/recent', { cacheTtlMs: 1000, timeoutMs: 8000 }),
@@ -464,6 +475,14 @@ export const InternalTransactionsPage = () => {
   const load = useCallback(async () => {
     try {
       setError('');
+      try {
+        const data = await fetchJSON('/transactions/internal?page=1&size=80', { cacheTtlMs: 4000, timeoutMs: 10000 });
+        const list = Array.isArray(data) ? data : data.transactions || mergeArrayResults(data, 'tx_hash');
+        setTxs(list.map(normalizeTx));
+        return;
+      } catch {
+        // Keep explorer compatible with older backend builds.
+      }
       const result = await fetchHistoricalTransactionPage(1, 80, { timeoutMs: 12000 });
       setTxs(result.transactions.filter(isInternalTx).map(normalizeTx));
     } catch (err) {
@@ -491,6 +510,371 @@ export const InternalTransactionsPage = () => {
     />
   );
 };
+
+const isTokenTransferTx = (tx = {}) => {
+  const item = normalizeTx(tx);
+  const type = String(item.type || '').toLowerCase();
+  const fn = String(item.functionName || '').toLowerCase();
+  return type.includes('token') || fn.includes('transfer') || fn.includes('approve') || item.isContract;
+};
+
+const isNftTx = (tx = {}, mode = '') => {
+  const item = normalizeTx(tx);
+  const haystack = `${item.type} ${item.functionName}`.toLowerCase();
+  if (!haystack.includes('nft') && !haystack.includes('mint') && !haystack.includes('trade')) return false;
+  if (mode === 'mints') return haystack.includes('mint');
+  if (mode === 'trades') return haystack.includes('trade') || haystack.includes('sale');
+  if (mode === 'transfers') return haystack.includes('transfer') || haystack.includes('nft');
+  return true;
+};
+
+const InfoCard = ({ title, value, children }) => (
+  <div className="tracker-info-card">
+    <span>{title}</span>
+    {value && <strong>{value}</strong>}
+    {children}
+  </div>
+);
+
+export const TokenTransfersPage = () => {
+  const [txs, setTxs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setError('');
+      const data = await fetchJSON('/transactions?page=1&size=150&include_pending=false', { cacheTtlMs: 3000, timeoutMs: 12000 });
+      const list = Array.isArray(data) ? data : data.transactions || mergeArrayResults(data, 'tx_hash');
+      setTxs(list.filter(isTokenTransferTx).map(normalizeTx));
+    } catch (err) {
+      setError(err.message || 'Failed to load token transfers');
+      setTxs([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 15000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  return (
+    <TransactionTracker
+      title="Token Transfers"
+      subtitle="Token contract transfer, approve, and contract-call activity from the live chain."
+      txs={txs}
+      loading={loading}
+      error={error}
+      empty="No token transfers found in the latest indexed range"
+    />
+  );
+};
+
+export const TokenFlowPage = () => {
+  const [tokens, setTokens] = useState([]);
+  const [pools, setPools] = useState([]);
+  const [txs, setTxs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setError('');
+      const [registryTokens, registryPools, recent] = await Promise.all([
+        fetchDexRegistryTokens().catch(() => []),
+        fetchDexRegistryPools().catch(() => []),
+        fetchJSON('/transactions/recent', { cacheTtlMs: 2000, timeoutMs: 10000 }).catch(() => []),
+      ]);
+      const recentList = Array.isArray(recent) ? recent : mergeArrayResults(recent, 'tx_hash');
+      setTokens(registryTokens);
+      setPools(registryPools);
+      setTxs(recentList.filter(isTokenTransferTx).map(normalizeTx).slice(0, 20));
+    } catch (err) {
+      setError(err.message || 'Failed to load token flow');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 15000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  return (
+    <TrackerShell title="Token Flow Visualizer" subtitle="Registry tokens, pool coverage, and recent token movement." count={tokens.length} loading={loading} error={error}>
+      <div className="tracker-card-grid">
+        <InfoCard title="Registry Tokens" value={tokens.length.toLocaleString()} />
+        <InfoCard title="Approved Pools" value={pools.filter((p) => p.approved !== false).length.toLocaleString()} />
+        <InfoCard title="Recent Token Events" value={txs.length.toLocaleString()} />
+      </div>
+      <TransactionTracker title="Recent Token Flow" subtitle="Latest token-like transactions" txs={txs} loading={false} error="" empty="No token flow found yet" />
+    </TrackerShell>
+  );
+};
+
+export const NFTTrackerPage = () => {
+  const { contracts, loading, error } = useContracts();
+  const nfts = contracts.filter((contract) => String(contract.type || '').toLowerCase().includes('nft'));
+
+  return (
+    <TrackerShell title="NFT Tracker" subtitle="NFT collection contracts discovered on LQD." count={nfts.length} loading={loading} error={error}>
+      <div className="tracker-table-wrap">
+        <table className="tracker-table">
+          <thead>
+            <tr><th>#</th><th>Collection</th><th>Symbol</th><th>Contract</th><th>Owner</th></tr>
+          </thead>
+          <tbody>
+            {nfts.length === 0 ? <EmptyRow colSpan={5} label="No NFT collections found yet" /> : nfts.map((nft, index) => (
+              <tr key={nft.address || index}>
+                <td>{index + 1}</td>
+                <td>{nft.name || 'NFT Collection'}</td>
+                <td>{nft.symbol || '-'}</td>
+                <td><Link to={`/address/${nft.address}`}>{shortHash(nft.address)}</Link></td>
+                <td>{nft.owner ? shortHash(nft.owner) : '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </TrackerShell>
+  );
+};
+
+export const NFTActivityPage = ({ mode = 'activity' }) => {
+  const [txs, setTxs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setError('');
+      const data = await fetchJSON('/transactions?page=1&size=150&include_pending=false', { cacheTtlMs: 3000, timeoutMs: 12000 });
+      const list = Array.isArray(data) ? data : data.transactions || mergeArrayResults(data, 'tx_hash');
+      setTxs(list.filter((tx) => isNftTx(tx, mode)).map(normalizeTx));
+    } catch (err) {
+      setError(err.message || 'Failed to load NFT activity');
+      setTxs([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 15000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  const title = mode === 'mints' ? 'NFT Mints' : mode === 'trades' ? 'NFT Trades' : mode === 'transfers' ? 'NFT Transfers' : 'NFT Activity';
+  return <TransactionTracker title={title} subtitle="NFT-related transactions from indexed chain data." txs={txs} loading={loading} error={error} empty="No NFT activity found yet" />;
+};
+
+export const BridgeTransactionsPage = () => {
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setError('');
+      const data = await fetchJSON('/bridge/requests', { cacheTtlMs: 4000, timeoutMs: 10000 });
+      setRequests(Array.isArray(data) ? data : mergeArrayResults(data, 'request_id'));
+    } catch (err) {
+      setError(err.message || 'Failed to load bridge transactions');
+      setRequests([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  return (
+    <TrackerShell title="Cross-Chain Transactions" subtitle="Bridge request queue, status, source, and target chain metadata." count={requests.length} loading={loading} error={error}>
+      <div className="tracker-table-wrap">
+        <table className="tracker-table">
+          <thead>
+            <tr><th>#</th><th>Request</th><th>Direction</th><th>Token</th><th>Amount</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {requests.length === 0 ? <EmptyRow colSpan={6} label="No bridge requests found yet" /> : requests.map((req, index) => (
+              <tr key={req.request_id || req.id || index}>
+                <td>{index + 1}</td>
+                <td>{shortHash(req.request_id || req.id || req.tx_hash)}</td>
+                <td>{req.direction || `${req.source_chain || 'LQD'} → ${req.target_chain || 'External'}`}</td>
+                <td>{req.token || req.symbol || '-'}</td>
+                <td>{req.amount || '-'}</td>
+                <td><span className="badge badge-yellow">{req.status || 'queued'}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </TrackerShell>
+  );
+};
+
+export const TopAccountsPage = () => {
+  const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setError('');
+      const [validators, lps] = await Promise.all([
+        fetchJSON('/validators', { cacheTtlMs: 4000, timeoutMs: 10000 }).catch(() => []),
+        fetchJSON('/liquidity/all', { cacheTtlMs: 4000, timeoutMs: 10000 }).catch(() => []),
+      ]);
+      const byAddress = new Map();
+      (Array.isArray(validators) ? validators : []).forEach((v) => {
+        const address = v.address || '';
+        if (!address) return;
+        byAddress.set(address.toLowerCase(), { address, role: 'Validator', score: v.liquidity_power || v.stake || 0, status: v.node_status || 'registered' });
+      });
+      (Array.isArray(lps) ? lps : mergeArrayResults(lps, 'address')).forEach((lp) => {
+        const address = lp.address || lp.Address || '';
+        if (!address) return;
+        const existing = byAddress.get(address.toLowerCase()) || { address, role: 'LP Provider', score: 0, status: 'active' };
+        existing.role = existing.role === 'Validator' ? 'Validator + LP' : 'LP Provider';
+        existing.score = Math.max(Number(existing.score || 0), Number(lp.liquidity_power || lp.LiquidityPower || 0));
+        byAddress.set(address.toLowerCase(), existing);
+      });
+      setAccounts(Array.from(byAddress.values()).sort((a, b) => Number(b.score || 0) - Number(a.score || 0)));
+    } catch (err) {
+      setError(err.message || 'Failed to load accounts');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 15000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  return (
+    <TrackerShell title="Top Accounts" subtitle="Validator and LP provider accounts ranked by available protocol power." count={accounts.length} loading={loading} error={error}>
+      <div className="tracker-table-wrap">
+        <table className="tracker-table">
+          <thead>
+            <tr><th>#</th><th>Address</th><th>Role</th><th>Power</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {accounts.length === 0 ? <EmptyRow colSpan={5} label="No ranked accounts found yet" /> : accounts.map((account, index) => (
+              <tr key={account.address}>
+                <td>{index + 1}</td>
+                <td><Link to={`/address/${account.address}`}>{account.address}</Link></td>
+                <td>{account.role}</td>
+                <td>{formatLQD(account.score)}</td>
+                <td><span className="badge badge-teal">{account.status}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </TrackerShell>
+  );
+};
+
+export const ChartsStatsPage = () => {
+  const [stats, setStats] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      setError('');
+      const [network, summary, basefee, blocktime] = await Promise.allSettled([
+        fetchJSON('/network', { cacheTtlMs: 4000, timeoutMs: 10000 }),
+        fetchJSON('/chain/summary', { cacheTtlMs: 4000, timeoutMs: 10000 }),
+        fetchJSON('/basefee', { cacheTtlMs: 4000, timeoutMs: 10000 }),
+        fetchJSON('/blocktime/latest', { cacheTtlMs: 4000, timeoutMs: 10000 }),
+      ]);
+      setStats({
+        network: network.status === 'fulfilled' ? firstNodeResult(network.value) || network.value : {},
+        summary: summary.status === 'fulfilled' ? firstNodeResult(summary.value) || summary.value : {},
+        basefee: basefee.status === 'fulfilled' ? firstNodeResult(basefee.value) || basefee.value : {},
+        blocktime: blocktime.status === 'fulfilled' ? firstNodeResult(blocktime.value) || blocktime.value : {},
+      });
+    } catch (err) {
+      setError(err.message || 'Failed to load charts and stats');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  return (
+    <TrackerShell title="Charts & Stats" subtitle="Live chain health, block timing, fees, and network summary." loading={loading} error={error}>
+      <div className="tracker-card-grid">
+        <InfoCard title="Height" value={String(stats.summary?.height || stats.network?.height || '-')} />
+        <InfoCard title="Peers" value={String(stats.network?.peers || stats.network?.peer_count || 0)} />
+        <InfoCard title="Base Fee" value={String(stats.basefee?.base_fee || stats.basefee?.baseFee || '-')} />
+        <InfoCard title="Block Time" value={String(stats.blocktime?.block_time || stats.blocktime?.average_block_time || '-')} />
+      </div>
+    </TrackerShell>
+  );
+};
+
+export const ApiDocsPage = () => (
+  <TrackerShell title="API Documentation" subtitle="Production endpoints available to explorer, wallets, DEX, and integrations." loading={false} error="">
+    <div className="tracker-card-grid">
+      <InfoCard title="Chain API" value={CHAIN_BASE}>
+        <code>/health</code><code>/transactions</code><code>/fetch_last_n_block</code><code>/contract/call</code>
+      </InfoCard>
+      <InfoCard title="Aggregator API" value={API_BASE}>
+        <code>/network</code><code>/transactions/recent</code><code>/liquidity/all</code><code>/rewards/latest</code>
+      </InfoCard>
+      <InfoCard title="DEX Registry API" value={DEX_REGISTRY_BASE}>
+        <code>/tokens</code><code>/pools</code><code>/config</code>
+      </InfoCard>
+    </div>
+  </TrackerShell>
+);
+
+export const BroadcastTransactionPage = () => (
+  <TrackerShell title="Broadcast Transaction" subtitle="Wallet-signed transaction submission endpoints for LQD network." loading={false} error="">
+    <div className="tracker-card-grid">
+      <InfoCard title="Single Transaction" value={`${CHAIN_BASE}/send_tx`} />
+      <InfoCard title="Batch Transactions" value={`${CHAIN_BASE}/send_tx/batch`} />
+      <InfoCard title="JSON-RPC" value={`${CHAIN_BASE}/rpc`} />
+    </div>
+    <div className="tracker-warning">For safety, raw broadcast should be done from LQD wallet, extension, mobile wallet, or trusted backend tooling.</div>
+  </TrackerShell>
+);
+
+export const DeveloperContractToolsPage = ({ mode = 'search' }) => (
+  <TrackerShell
+    title={mode === 'verify' ? 'Verify Contract' : 'Smart Contract Search'}
+    subtitle={mode === 'verify' ? 'Compiled/deployed contracts can be inspected through ABI, code, storage, and events APIs.' : 'Search deployed contracts from the registry and inspect runtime metadata.'}
+    loading={false}
+    error=""
+  >
+    <div className="tracker-card-grid">
+      <InfoCard title="Contract Registry" value="/contract/list" />
+      <InfoCard title="ABI Lookup" value="/contract/getAbi?address=0x..." />
+      <InfoCard title="Storage" value="/contract/storage?address=0x..." />
+      <InfoCard title="Code" value="/contract/code?address=0x..." />
+    </div>
+    <ContractTrackerPage />
+  </TrackerShell>
+);
 
 const TransactionTracker = ({ title, subtitle, txs, loading, error, empty }) => (
   <TrackerShell title={title} subtitle={subtitle} count={txs.length} loading={loading} error={error}>

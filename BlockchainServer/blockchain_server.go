@@ -131,11 +131,11 @@ func (bcs *BlockchainServer) GetAccountNonce(w http.ResponseWriter, r *http.Requ
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
 
-	// confirmed (last used) nonce from chain state
-	confirmed := bcs.BlockchainPtr.GetAccountNonce(address) // existing behavior:contentReference[oaicite:2]{index=2}
+	// GetAccountNonce already returns the next usable nonce.
+	confirmed := bcs.BlockchainPtr.GetAccountNonce(address)
 
 	// compute next free nonce including pending txs from this address
-	next := confirmed + 1
+	next := confirmed
 	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
 		if tx.From == address && tx.Nonce >= next {
 			next = tx.Nonce + 1
@@ -585,6 +585,18 @@ func (bcs *BlockchainServer) UpsertBridgeChain(w http.ResponseWriter, r *http.Re
 	var cfg blockchaincomponent.BridgeChainConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if cfg.Family == "" {
+		cfg.Family = "evm"
+	}
+	adapter := blockchaincomponent.BridgeAdapterByFamily(cfg.Family)
+	if adapter == nil {
+		http.Error(w, fmt.Sprintf(`{"error":"unsupported bridge family %q"}`, cfg.Family), http.StatusBadRequest)
+		return
+	}
+	if err := adapter.ValidateConfig(&cfg); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err), http.StatusBadRequest)
 		return
 	}
 	reg, err := blockchaincomponent.LoadBridgeChainRegistry()
@@ -1335,6 +1347,83 @@ func transactionListItem(tx *blockchaincomponent.Transaction, source string, blo
 	return item
 }
 
+func parseExplorerPagination(r *http.Request, defaultSize int) (int, int) {
+	q := r.URL.Query()
+	page := 1
+	pageSize := defaultSize
+	if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
+		page = p
+	}
+	sizeParam := q.Get("size")
+	if sizeParam == "" {
+		sizeParam = q.Get("page_size")
+	}
+	if ps, err := strconv.Atoi(sizeParam); err == nil && ps > 0 {
+		pageSize = ps
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	return page, pageSize
+}
+
+func writeExplorerPage(w http.ResponseWriter, items []map[string]interface{}, page, pageSize int) {
+	total := len(items)
+	totalPages := 1
+	if total > 0 {
+		totalPages = int(math.Ceil(float64(total) / float64(pageSize)))
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"transactions": items[start:end],
+		"total":        total,
+		"page":         page,
+		"page_size":    pageSize,
+		"total_pages":  totalPages,
+	})
+}
+
+func explorerInt64(value interface{}) int64 {
+	switch v := value.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case uint64:
+		return int64(v)
+	case float64:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+
+func isExplorerInternalTx(tx *blockchaincomponent.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	from := strings.ToLower(strings.TrimSpace(tx.From))
+	txType := strings.ToLower(strings.TrimSpace(tx.Type))
+	fn := strings.ToLower(strings.TrimSpace(tx.Function))
+	return tx.IsSystem ||
+		from == "0x0000000000000000000000000000000000000000" ||
+		strings.Contains(txType, "reward") ||
+		strings.Contains(txType, "internal") ||
+		strings.Contains(txType, "contract") ||
+		fn == "constructor" ||
+		fn == "deploy"
+}
+
 func (bcs *BlockchainServer) GetTransactions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
@@ -1429,6 +1518,80 @@ func (bcs *BlockchainServer) GetTransactions(w http.ResponseWriter, r *http.Requ
 		"page_size":    pageSize,
 		"total_pages":  totalPages,
 	})
+}
+
+func (bcs *BlockchainServer) GetPendingTransactions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	page, pageSize := parseExplorerPagination(r, 80)
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	items := make([]map[string]interface{}, 0, len(bcs.BlockchainPtr.Transaction_pool))
+	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
+		if tx == nil || strings.TrimSpace(tx.TxHash) == "" {
+			continue
+		}
+		items = append(items, transactionListItem(tx, "mempool", nil, -1))
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return explorerInt64(items[i]["timestamp"]) > explorerInt64(items[j]["timestamp"])
+	})
+	writeExplorerPage(w, items, page, pageSize)
+}
+
+func (bcs *BlockchainServer) GetInternalTransactions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	page, pageSize := parseExplorerPagination(r, 80)
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+
+	items := make([]map[string]interface{}, 0)
+	if !strings.EqualFold(r.URL.Query().Get("include_pending"), "false") {
+		for _, tx := range bcs.BlockchainPtr.Transaction_pool {
+			if tx == nil || strings.TrimSpace(tx.TxHash) == "" || !isExplorerInternalTx(tx) {
+				continue
+			}
+			items = append(items, transactionListItem(tx, "mempool", nil, -1))
+		}
+	}
+	for i := len(bcs.BlockchainPtr.Blocks) - 1; i >= 0; i-- {
+		blk := bcs.BlockchainPtr.Blocks[i]
+		if blk == nil {
+			continue
+		}
+		for idx := len(blk.Transactions) - 1; idx >= 0; idx-- {
+			tx := blk.Transactions[idx]
+			if tx == nil || strings.TrimSpace(tx.TxHash) == "" || !isExplorerInternalTx(tx) {
+				continue
+			}
+			items = append(items, transactionListItem(tx, "block", blk, idx))
+		}
+	}
+	writeExplorerPage(w, items, page, pageSize)
 }
 
 func (bcs *BlockchainServer) LiquidityLock(w http.ResponseWriter, r *http.Request) {
@@ -4052,6 +4215,8 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/validators", b.GetValidators)
 	http.HandleFunc("/transactions", b.GetTransactions)
 	http.HandleFunc("/transactions/recent", b.GetRecentTransactions)
+	http.HandleFunc("/transactions/pending", b.GetPendingTransactions)
+	http.HandleFunc("/transactions/internal", b.GetInternalTransactions)
 	http.HandleFunc("/liquidity/lock", b.limiter.middleware(maxBytesMiddleware(b.LiquidityLock, maxBodySize)))
 	http.HandleFunc("/liquidity/unlock", b.limiter.middleware(maxBytesMiddleware(b.LiquidityUnlock, maxBodySize)))
 	http.HandleFunc("/liquidity", b.LiquidityView)
