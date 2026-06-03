@@ -1332,6 +1332,313 @@ tr:hover td {
   color: var(--text-primary);
 }
 
+.address-portfolio {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.address-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.address-hero h2 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.address-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.status-pill.success {
+  background: var(--green-bg);
+  border-color: rgba(53, 208, 127, 0.28);
+  color: var(--green);
+}
+
+.status-pill.info {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.28);
+  color: var(--blue);
+}
+
+.status-pill.muted {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+}
+
+.address-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--space-4);
+}
+
+.address-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 128px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.address-metric.primary {
+  background: linear-gradient(135deg, rgba(83, 126, 231, 0.22), rgba(133, 96, 246, 0.18));
+  border-color: rgba(99, 139, 255, 0.45);
+}
+
+.address-metric span,
+.muted-label {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.address-metric strong {
+  color: var(--text-primary);
+  font-size: 1.25rem;
+  word-break: break-word;
+}
+
+.address-metric small,
+.asset-cell small,
+.address-nft-card small {
+  color: var(--text-secondary);
+}
+
+.address-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-3);
+}
+
+.address-tab {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-weight: 700;
+  padding: 9px 14px;
+  transition: all var(--transition);
+}
+
+.address-tab:hover,
+.address-tab.active {
+  background: var(--bg-badge);
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.address-panel {
+  background: rgba(15, 23, 42, 0.32);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+}
+
+.address-panel h3 {
+  margin-top: 0;
+  color: var(--text-primary);
+}
+
+.address-token-table {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.address-token-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 180px 120px 110px;
+  align-items: center;
+  gap: var(--space-4);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.asset-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.asset-cell img,
+.asset-fallback {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.asset-cell img {
+  object-fit: cover;
+  background: var(--bg-card);
+}
+
+.asset-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  color: white;
+  font-weight: 800;
+}
+
+.asset-cell strong,
+.address-token-row strong {
+  display: block;
+  color: var(--text-primary);
+}
+
+.address-nft-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+}
+
+.address-nft-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  color: var(--text-primary);
+}
+
+.nft-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(83, 126, 231, 0.28), rgba(133, 96, 246, 0.26));
+  color: var(--blue);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.nft-token-ids {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.nft-token-ids span {
+  background: var(--bg-badge);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  padding: 3px 8px;
+}
+
+.contract-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+
+.contract-info-grid div {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+
+.contract-info-grid span {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.contract-info-grid strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.outline-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-input);
+  border: 1px solid var(--blue);
+  border-radius: var(--radius-sm);
+  color: var(--blue);
+  font-weight: 700;
+  padding: var(--space-3);
+  text-decoration: none;
+}
+
+.empty-state {
+  background: var(--bg-input);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  padding: var(--space-5);
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .address-hero {
+    flex-direction: column;
+  }
+
+  .address-token-row {
+    grid-template-columns: 1fr;
+  }
+
+  .address-panel {
+    padding: var(--space-4);
+  }
+}
+
 /* ─── Validator Stats ────────────────────────────────────────────────── */
 .validator-stats,
 .stats-card {
