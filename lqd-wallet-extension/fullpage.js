@@ -276,6 +276,15 @@ function contractOutput(data, fallback = "") {
   return String(value);
 }
 
+function normalizeTokenRawBalance(value, fallback = "0") {
+  const raw = String(value ?? "").trim();
+  if (/^\d+$/.test(raw)) return raw;
+  if (/^0x[0-9a-f]+$/i.test(raw) && raw.length < 42) {
+    try { return BigInt(raw).toString(); } catch { return fallback; }
+  }
+  return fallback;
+}
+
 async function contractCall(contractAddr, fn, args = []) {
   return nodePost("/contract/call", {
     address: contractAddr, caller: state.address,
@@ -559,7 +568,7 @@ async function fetchTokenMeta(addr) {
   ]);
   // BalanceOf needs arg
   let bal = "0";
-  try { const r = await contractCall(addr, "BalanceOf", [state.address]); bal = contractOutput(r, "0"); } catch { }
+  try { const r = await contractCall(addr, "BalanceOf", [state.address]); bal = normalizeTokenRawBalance(contractOutput(r, "0")); } catch { }
   return { name: name || "Unknown", symbol: symbol || addr.slice(2, 6).toUpperCase(), decimals: parseInt(decimals) || 8, balance: bal };
 }
 
@@ -604,7 +613,7 @@ async function refreshTokenBal(addr) {
   try {
     const r = await contractCall(addr, "BalanceOf", [state.address]);
     const idx = state.tokens.findIndex(t => t.address.toLowerCase() === addr.toLowerCase());
-    if (idx >= 0) { state.tokens[idx].balance = contractOutput(r, "0"); saveTokens(); renderTokenList(); }
+    if (idx >= 0) { state.tokens[idx].balance = normalizeTokenRawBalance(contractOutput(r, "0")); saveTokens(); renderTokenList(); }
   } catch { }
 }
 

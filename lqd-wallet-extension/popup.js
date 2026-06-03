@@ -150,6 +150,15 @@ function contractOutput(data, fallback = "") {
   return String(value);
 }
 
+function normalizeTokenRawBalance(value, fallback = "0") {
+  const raw = String(value ?? "").trim();
+  if (/^\d+$/.test(raw)) return raw;
+  if (/^0x[0-9a-f]+$/i.test(raw) && raw.length < 42) {
+    try { return BigInt(raw).toString(); } catch { return fallback; }
+  }
+  return fallback;
+}
+
 async function dexRegistryGet(path) {
   const res = await fetch(`${PROD_DEX_REGISTRY_URL}${path}`);
   const text = await res.text();
@@ -921,7 +930,7 @@ async function fetchTokenBalance(contractAddr, walletAddr, nodeUrl) {
       });
       const text = await res.text();
       let json; try { json = JSON.parse(text); } catch { json = text; }
-      return contractOutput(json, "0");
+      return normalizeTokenRawBalance(contractOutput(json, "0"));
     } catch { return "0"; }
   };
   try {
