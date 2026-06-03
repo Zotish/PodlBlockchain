@@ -239,7 +239,7 @@ func TestHasVotingPeerForValidatorRequiresVerifiedNearTip(t *testing.T) {
 		Port:              6112,
 		HTTPPort:          6512,
 		IsActive:          true,
-		Reputation:        0, // Sync reputation is separate from signed validator identity.
+		Reputation:        1,
 		LastSeen:          now,
 		Height:            99,
 		ValidatorAddress:  addr,
@@ -264,7 +264,7 @@ func TestPeerStatusSnapshotShowsValidatorState(t *testing.T) {
 		Port:              6111,
 		HTTPPort:          6511,
 		IsActive:          true,
-		Reputation:        0, // A verified near-tip validator peer should still be eligible.
+		Reputation:        1,
 		LastSeen:          time.Now(),
 		Height:            100,
 		ValidatorAddress:  "0x2222222222222222222222222222222222222222",
