@@ -96,6 +96,17 @@ func (p *Pair) pullToken(ctx *bc.Context, token, from string, amt *big.Int) {
 	}
 }
 
+func (p *Pair) pullTokenFromCallerBalance(ctx *bc.Context, token string, amt *big.Int) {
+	if isNative(token) {
+		ctx.ReceiveNativeFromCaller(amt)
+		return
+	}
+	from := strings.ToLower(strings.TrimSpace(ctx.CallerAddr))
+	if _, err := ctx.Call(token, "TransferFrom", []string{from, ctx.ContractAddr, amt.String()}); err != nil {
+		ctx.Revert("TransferFrom caller balance failed: " + err.Error())
+	}
+}
+
 func (p *Pair) pushToken(ctx *bc.Context, token, to string, amt *big.Int) {
 	if isNative(token) {
 		ctx.SendNative(to, amt)
@@ -110,6 +121,10 @@ func (p *Pair) pushToken(ctx *bc.Context, token, to string, amt *big.Int) {
 
 func (p *Pair) lpBalance(ctx *bc.Context, addr string) *big.Int {
 	return parseBig(ctx.Get("lp:" + strings.ToLower(addr)))
+}
+
+func (p *Pair) lpAllowance(ctx *bc.Context, owner, spender string) *big.Int {
+	return parseBig(ctx.Get("lp_allow:" + strings.ToLower(owner) + ":" + strings.ToLower(spender)))
 }
 
 func (p *Pair) mintLP(ctx *bc.Context, to string, amt *big.Int) {
@@ -127,6 +142,26 @@ func (p *Pair) burnLP(ctx *bc.Context, from string, amt *big.Int) {
 	}
 	ctx.Set("totalLP", new(big.Int).Sub(total, amt).String())
 	ctx.Set("lp:"+strings.ToLower(from), new(big.Int).Sub(bal, amt).String())
+}
+
+func (p *Pair) moveLP(ctx *bc.Context, from, to string, amt *big.Int) {
+	from = strings.ToLower(strings.TrimSpace(from))
+	to = strings.ToLower(strings.TrimSpace(to))
+	if amt == nil || amt.Sign() <= 0 {
+		ctx.Revert("LP amount must be > 0")
+	}
+	if from == "" {
+		ctx.Revert("invalid LP sender")
+	}
+	if to == "" {
+		ctx.Revert("invalid LP recipient")
+	}
+	bal := p.lpBalance(ctx, from)
+	if bal.Cmp(amt) < 0 {
+		ctx.Revert("insufficient LP balance")
+	}
+	ctx.Set("lp:"+from, new(big.Int).Sub(bal, amt).String())
+	ctx.Set("lp:"+to, new(big.Int).Add(p.lpBalance(ctx, to), amt).String())
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -212,6 +247,63 @@ func (p *Pair) AddLiquidity(ctx *bc.Context, amountA string, amountB string) {
 		"amount1":  amtB.String(),
 		"lpMinted": minted.String(),
 	})
+	ctx.Set("output", minted.String())
+}
+
+func (p *Pair) AddLiquidityFromContract(ctx *bc.Context, receiver string, amountA string, amountB string) {
+	t0 := ctx.Get("token0")
+	t1 := ctx.Get("token1")
+	if t0 == "" {
+		ctx.Revert("pair not initialized")
+	}
+
+	receiver = strings.ToLower(strings.TrimSpace(receiver))
+	if receiver == "" {
+		ctx.Revert("invalid receiver")
+	}
+	amtA := parseBig(amountA)
+	amtB := parseBig(amountB)
+	if amtA.Sign() == 0 || amtB.Sign() == 0 {
+		ctx.Revert("amounts must be > 0")
+	}
+
+	p.pullTokenFromCallerBalance(ctx, t0, amtA)
+	p.pullTokenFromCallerBalance(ctx, t1, amtB)
+
+	res0 := parseBig(ctx.Get("reserve0"))
+	res1 := parseBig(ctx.Get("reserve1"))
+	totalLP := parseBig(ctx.Get("totalLP"))
+
+	var minted *big.Int
+	minLiq := big.NewInt(minLiquidity)
+	if res0.Sign() == 0 && res1.Sign() == 0 {
+		sqrtLP := sqrtBig(new(big.Int).Mul(amtA, amtB))
+		if sqrtLP.Cmp(minLiq) <= 0 {
+			ctx.Revert("initial liquidity too small")
+		}
+		minted = new(big.Int).Sub(sqrtLP, minLiq)
+		p.mintLP(ctx, "0x0000000000000000000000000000000000000000", minLiq)
+	} else {
+		lpFromA := new(big.Int).Div(new(big.Int).Mul(amtA, totalLP), res0)
+		lpFromB := new(big.Int).Div(new(big.Int).Mul(amtB, totalLP), res1)
+		minted = minBig(lpFromA, lpFromB)
+	}
+	if minted.Sign() == 0 {
+		ctx.Revert("zero LP minted")
+	}
+
+	p.mintLP(ctx, receiver, minted)
+	ctx.Set("reserve0", new(big.Int).Add(res0, amtA).String())
+	ctx.Set("reserve1", new(big.Int).Add(res1, amtB).String())
+	ctx.Set("output", minted.String())
+	ctx.Commit()
+	ctx.Emit("Mint", map[string]interface{}{
+		"sender":   strings.ToLower(ctx.CallerAddr),
+		"receiver": receiver,
+		"amount0":  amtA.String(),
+		"amount1":  amtB.String(),
+		"lpMinted": minted.String(),
+	})
 }
 
 // ─── RemoveLiquidity ──────────────────────────────────────────────────────────
@@ -255,6 +347,53 @@ func (p *Pair) RemoveLiquidity(ctx *bc.Context, lpAmount string) {
 		"amount0": out0.String(),
 		"amount1": out1.String(),
 		"lpBurnt": lpAmt.String(),
+	})
+	ctx.Set("output", out0.String()+","+out1.String())
+}
+
+func (p *Pair) RemoveLiquidityTo(ctx *bc.Context, receiver string, lpAmount string) {
+	t0 := ctx.Get("token0")
+	t1 := ctx.Get("token1")
+	if t0 == "" {
+		ctx.Revert("pair not initialized")
+	}
+	receiver = strings.ToLower(strings.TrimSpace(receiver))
+	if receiver == "" {
+		ctx.Revert("invalid receiver")
+	}
+
+	lpAmt := parseBig(lpAmount)
+	if lpAmt.Sign() == 0 {
+		ctx.Revert("LP amount must be > 0")
+	}
+	res0 := parseBig(ctx.Get("reserve0"))
+	res1 := parseBig(ctx.Get("reserve1"))
+	totalLP := parseBig(ctx.Get("totalLP"))
+	if totalLP.Sign() == 0 {
+		ctx.Revert("no liquidity")
+	}
+
+	out0 := new(big.Int).Div(new(big.Int).Mul(lpAmt, res0), totalLP)
+	out1 := new(big.Int).Div(new(big.Int).Mul(lpAmt, res1), totalLP)
+	if out0.Sign() == 0 && out1.Sign() == 0 {
+		ctx.Revert("insufficient output")
+	}
+
+	from := strings.ToLower(strings.TrimSpace(ctx.CallerAddr))
+	p.burnLP(ctx, from, lpAmt)
+	ctx.Set("reserve0", new(big.Int).Sub(res0, out0).String())
+	ctx.Set("reserve1", new(big.Int).Sub(res1, out1).String())
+	ctx.Set("output", out0.String()+","+out1.String())
+	ctx.Commit()
+
+	p.pushToken(ctx, t0, receiver, out0)
+	p.pushToken(ctx, t1, receiver, out1)
+	ctx.Emit("Burn", map[string]interface{}{
+		"sender":   from,
+		"receiver": receiver,
+		"amount0":  out0.String(),
+		"amount1":  out1.String(),
+		"lpBurnt":  lpAmt.String(),
 	})
 }
 
@@ -432,14 +571,43 @@ func (p *Pair) Transfer(ctx *bc.Context, to string, amount string) {
 	from := strings.ToLower(ctx.CallerAddr)
 	to = strings.ToLower(strings.TrimSpace(to))
 	amt := parseBig(amount)
-	bal := p.lpBalance(ctx, from)
-	if bal.Cmp(amt) < 0 {
-		ctx.Revert("insufficient LP balance")
-	}
-	ctx.Set("lp:"+from, new(big.Int).Sub(bal, amt).String())
-	ctx.Set("lp:"+to, new(big.Int).Add(p.lpBalance(ctx, to), amt).String())
+	p.moveLP(ctx, from, to, amt)
 	ctx.Commit()
 	ctx.Emit("Transfer", map[string]interface{}{"from": from, "to": to, "amount": amount})
+}
+
+func (p *Pair) Approve(ctx *bc.Context, spender string, amount string) {
+	owner := strings.ToLower(strings.TrimSpace(ctx.CallerAddr))
+	spender = strings.ToLower(strings.TrimSpace(spender))
+	if owner == "" || spender == "" {
+		ctx.Revert("invalid approval")
+	}
+	amt := parseBig(amount)
+	if amt.Sign() < 0 {
+		ctx.Revert("amount must be >= 0")
+	}
+	ctx.Set("lp_allow:"+owner+":"+spender, amt.String())
+	ctx.Commit()
+	ctx.Emit("Approval", map[string]interface{}{"owner": owner, "spender": spender, "amount": amt.String()})
+}
+
+func (p *Pair) Allowance(ctx *bc.Context, owner string, spender string) {
+	ctx.Set("output", p.lpAllowance(ctx, owner, spender).String())
+}
+
+func (p *Pair) TransferFrom(ctx *bc.Context, from string, to string, amount string) {
+	spender := strings.ToLower(strings.TrimSpace(ctx.CallerAddr))
+	from = strings.ToLower(strings.TrimSpace(from))
+	to = strings.ToLower(strings.TrimSpace(to))
+	amt := parseBig(amount)
+	allowed := p.lpAllowance(ctx, from, spender)
+	if allowed.Cmp(amt) < 0 {
+		ctx.Revert("allowance exceeded")
+	}
+	p.moveLP(ctx, from, to, amt)
+	ctx.Set("lp_allow:"+from+":"+spender, new(big.Int).Sub(allowed, amt).String())
+	ctx.Commit()
+	ctx.Emit("Transfer", map[string]interface{}{"from": from, "to": to, "amount": amt.String()})
 }
 
 // ─── Proof of Dynamic Liquidity — validator LP locking ───────────────────────

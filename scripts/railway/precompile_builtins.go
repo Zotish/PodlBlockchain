@@ -22,6 +22,7 @@ var builtinTemplates = []string{
 	"lending_pool",
 	"lqd20",
 	"nft_collection",
+	"strategy_vault",
 }
 
 func main() {
