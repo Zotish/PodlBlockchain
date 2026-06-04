@@ -11,6 +11,7 @@ import BlockRewardsPage from './pages/BlockRewardsPage';
 import TransactionPage from './pages/TransactionPage';
 import ValidatorPage from './pages/ValidatorPage';
 import AddressPage from './pages/AddressPage';
+import TokenPage from './pages/TokenPage';
 import WalletPage from './pages/WalletPage'; // Add this import
 import RewardsPage from './pages/RewardsPage';
 
@@ -63,6 +64,8 @@ function App() {
             <Route path="/liquidity" element={<LiquidityPage />} />
             <Route path="/pools" element={<PoolsPage />} />
             <Route path="/tokens" element={<TokenTrackerPage />} />
+            <Route path="/token/:address" element={<TokenPage />} />
+            <Route path="/tokens/:address" element={<TokenPage />} />
             <Route path="/tokens/flow" element={<TokenFlowPage />} />
             <Route path="/nfts" element={<NFTTrackerPage />} />
             <Route path="/nfts/mints" element={<NFTActivityPage mode="mints" />} />

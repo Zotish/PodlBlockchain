@@ -190,13 +190,18 @@ export const TokenTrackerPage = () => {
               <tr key={token.address || index}>
                 <td>{index + 1}</td>
                 <td>
-                  <strong>{token.name || token.symbol || 'LQD Token'}</strong>
-                  <small>{token.symbol || 'metadata pending'}</small>
+                  <Link to={`/token/${token.address}`} className="tracker-token-link">
+                    <strong>{token.name || token.symbol || 'LQD Token'}</strong>
+                    <small>{token.symbol || 'metadata pending'}</small>
+                  </Link>
                 </td>
                 <td><span className={`badge ${token.registry ? 'badge-teal' : 'badge-blue'}`}>{token.registry ? 'verified registry' : token.type}</span></td>
                 <td>{token.decimals || '-'}</td>
                 <td>{token.totalSupply || '-'}</td>
-                <td><Link to={`/address/${token.address}`}>{shortHash(token.address)}</Link></td>
+                <td>
+                  <Link to={`/token/${token.address}`}>{shortHash(token.address)}</Link>
+                  <small><Link to={`/address/${token.address}`}>address view</Link></small>
+                </td>
                 <td>{token.owner ? shortHash(token.owner) : '-'}</td>
               </tr>
             ))}
