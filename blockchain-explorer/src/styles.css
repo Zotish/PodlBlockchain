@@ -716,10 +716,274 @@ code, pre, .monospace {
   margin-top: 2px;
 }
 
+.tracker-token-link {
+  color: var(--text-primary);
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tracker-token-link:hover {
+  color: var(--accent-blue);
+}
+
 .tracker-empty {
   color: var(--text-muted);
   padding: var(--space-8);
   text-align: center;
+}
+
+/* ─── Token Detail Page ─────────────────────────────────────────────── */
+.token-detail-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.token-hero-card {
+  align-items: stretch;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(139, 92, 246, 0.08)), var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  gap: var(--space-5);
+  justify-content: space-between;
+  padding: var(--space-6);
+}
+
+.token-identity {
+  align-items: flex-start;
+  display: flex;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.token-logo-xl {
+  align-items: center;
+  background: var(--primary-gradient);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 22px;
+  box-shadow: var(--shadow-md);
+  color: #fff;
+  display: flex;
+  flex: 0 0 auto;
+  font-size: 1.6rem;
+  font-weight: 800;
+  height: 72px;
+  justify-content: center;
+  overflow: hidden;
+  width: 72px;
+}
+
+.token-logo-xl img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.token-identity h1 {
+  align-items: center;
+  color: var(--text-primary);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: clamp(1.7rem, 4vw, 2.6rem);
+  gap: 10px;
+  line-height: 1.05;
+  margin: 0;
+}
+
+.token-identity h1 span {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.token-identity h1 em {
+  background: var(--teal-bg);
+  border: 1px solid rgba(45, 212, 191, 0.22);
+  border-radius: 999px;
+  color: var(--teal);
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 5px 10px;
+  text-transform: uppercase;
+}
+
+.token-contract-line {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: var(--space-4);
+}
+
+.token-contract-line span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.token-contract-line code,
+.token-pool-card code {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  padding: 7px 10px;
+}
+
+.token-price-panel {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 240px;
+  padding: var(--space-5);
+}
+
+.token-price-panel span,
+.token-metric-card span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.token-price-panel strong {
+  color: var(--text-primary);
+  font-size: 1.8rem;
+  margin: 8px 0 4px;
+}
+
+.token-price-panel small.positive { color: var(--green); }
+.token-price-panel small.negative { color: var(--red); }
+
+.token-overview-grid,
+.token-contract-grid {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.token-metric-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.token-metric-card strong {
+  color: var(--text-primary);
+  display: block;
+  font-size: 1.15rem;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.token-metric-card small {
+  color: var(--text-muted);
+  display: block;
+  margin-top: 4px;
+}
+
+.token-tabs {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+  width: fit-content;
+}
+
+.token-tabs button {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  padding: 10px 14px;
+}
+
+.token-tabs button.active,
+.token-tabs button:hover {
+  background: var(--primary-subtle);
+  color: var(--primary-light);
+}
+
+.token-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+}
+
+.token-panel-heading {
+  margin-bottom: var(--space-4);
+}
+
+.token-panel-heading h2 {
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+
+.token-panel-heading p {
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.token-storage-preview {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  margin: var(--space-4) 0 0;
+  max-height: 380px;
+  overflow: auto;
+  padding: var(--space-4);
+  white-space: pre-wrap;
+}
+
+.token-pool-grid {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.token-pool-card {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: var(--space-4);
+}
+
+.token-pool-card span {
+  color: var(--accent-blue);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.token-pool-card strong {
+  color: var(--text-primary);
+  font-size: 1.1rem;
+}
+
+.token-pool-card small {
+  color: var(--text-secondary);
 }
 
 /* ─── Rewards & LP Analytics ─────────────────────────────────────────── */
@@ -2152,9 +2416,37 @@ pre {
   .block-page,
   .transaction-page,
   .validator-page,
-  .address-page {
+  .address-page,
+  .token-panel {
     padding: var(--space-4);
     border-radius: var(--radius-md);
+  }
+
+  .token-hero-card {
+    flex-direction: column;
+    padding: var(--space-4);
+  }
+
+  .token-identity {
+    flex-direction: column;
+  }
+
+  .token-logo-xl {
+    width: 56px;
+    height: 56px;
+    border-radius: 18px;
+  }
+
+  .token-price-panel {
+    min-width: 0;
+  }
+
+  .token-tabs {
+    width: 100%;
+  }
+
+  .token-tabs button {
+    flex: 1 1 calc(50% - 6px);
   }
 
   .detail-row {
