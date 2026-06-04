@@ -611,6 +611,30 @@ func (ctx *Context) ReceiveNative(amt *big.Int) {
 	ctx.txBuffer.creditNative(ctx.ContractAddr, amt)
 }
 
+// ReceiveNativeFromCaller queues a native LQD transfer from the immediate caller
+// contract/account into the current contract. It enables safe contract-to-contract
+// native flows, for example a strategy vault moving native LQD from its balance
+// into a target DEX pair during an atomic rebalance.
+func (ctx *Context) ReceiveNativeFromCaller(amt *big.Int) {
+	ctx.consumeGas(5000)
+	if ctx.txBuffer == nil {
+		ctx.Revert("ReceiveNativeFromCaller only available in state-changing TX mode")
+	}
+	if amt == nil || amt.Sign() <= 0 {
+		ctx.Revert("ReceiveNativeFromCaller: amount must be > 0")
+	}
+	from := strings.ToLower(strings.TrimSpace(ctx.CallerAddr))
+	to := strings.ToLower(strings.TrimSpace(ctx.ContractAddr))
+	if from == "" || to == "" {
+		ctx.Revert("ReceiveNativeFromCaller: invalid native flow")
+	}
+	ctx.txBuffer.nativeSends = append(ctx.txBuffer.nativeSends, nativeSend{
+		from: from,
+		to:   to,
+		amt:  new(big.Int).Set(amt),
+	})
+}
+
 // SendNative queues a native LQD transfer from the contract to `to`.
 // The transfer is applied atomically after the entire TX succeeds.
 // Reverts if amount exceeds the contract's available native balance.

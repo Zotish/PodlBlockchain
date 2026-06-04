@@ -3714,7 +3714,7 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 
 	// Validate template name (whitelist)
 	validTemplates := map[string]bool{
-		"lqd20": true, "wlqd": true, "dex_swap": true, "dex_factory": true, "dex_router": true, "dex_pair": true,
+		"lqd20": true, "wlqd": true, "dex_swap": true, "dex_factory": true, "dex_router": true, "dex_pair": true, "strategy_vault": true,
 		"bridge_token": true, "lending_pool": true, "nft_collection": true, "dao_treasury": true,
 	}
 	if !validTemplates[req.Template] {
