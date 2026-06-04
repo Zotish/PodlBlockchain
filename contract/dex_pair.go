@@ -485,6 +485,92 @@ func (p *Pair) Swap(ctx *bc.Context, amountIn string, minAmountOut string, token
 	})
 }
 
+// SwapFromContract swaps tokens held by the calling contract and sends output
+// to receiver. Strategy/vault contracts use this for routed liquidity movement.
+func (p *Pair) SwapFromContract(ctx *bc.Context, receiver string, amountIn string, minAmountOut string, tokenIn string) {
+	t0 := ctx.Get("token0")
+	t1 := ctx.Get("token1")
+	if t0 == "" {
+		ctx.Revert("pair not initialized")
+	}
+
+	receiver = strings.ToLower(strings.TrimSpace(receiver))
+	if receiver == "" {
+		ctx.Revert("invalid receiver")
+	}
+
+	tIn := strings.ToLower(strings.TrimSpace(tokenIn))
+	if tIn != t0 && tIn != t1 {
+		ctx.Revert("tokenIn not in pair")
+	}
+
+	amtIn := parseBig(amountIn)
+	minOut := parseBig(minAmountOut)
+	if amtIn.Sign() == 0 {
+		ctx.Revert("amountIn must be > 0")
+	}
+
+	res0 := parseBig(ctx.Get("reserve0"))
+	res1 := parseBig(ctx.Get("reserve1"))
+
+	var resIn, resOut *big.Int
+	var tOut string
+	if tIn == t0 {
+		resIn, resOut, tOut = res0, res1, t1
+	} else {
+		resIn, resOut, tOut = res1, res0, t0
+	}
+
+	amtOut := calcAmountOut(amtIn, resIn, resOut)
+	if amtOut.Cmp(minOut) < 0 {
+		ctx.Revert("slippage: insufficient output amount")
+	}
+	if amtOut.Cmp(resOut) >= 0 {
+		ctx.Revert("insufficient reserves")
+	}
+
+	p.pullTokenFromCallerBalance(ctx, tIn, amtIn)
+
+	newResIn := new(big.Int).Add(resIn, amtIn)
+	newResOut := new(big.Int).Sub(resOut, amtOut)
+	lhs := new(big.Int).Mul(
+		new(big.Int).Sub(new(big.Int).Mul(newResIn, big.NewInt(1000)), new(big.Int).Mul(amtIn, big.NewInt(3))),
+		new(big.Int).Mul(newResOut, big.NewInt(1000)),
+	)
+	rhs := new(big.Int).Mul(
+		new(big.Int).Mul(resIn, big.NewInt(1000)),
+		new(big.Int).Mul(resOut, big.NewInt(1000)),
+	)
+	if lhs.Cmp(rhs) < 0 {
+		ctx.Revert("k-invariant violated")
+	}
+
+	if tIn == t0 {
+		ctx.Set("reserve0", newResIn.String())
+		ctx.Set("reserve1", newResOut.String())
+	} else {
+		ctx.Set("reserve1", newResIn.String())
+		ctx.Set("reserve0", newResOut.String())
+	}
+
+	epochSwaps := new(big.Int).Add(parseBig(ctx.Get("epoch_swaps")), big.NewInt(1))
+	epochVol := new(big.Int).Add(parseBig(ctx.Get("epoch_volume")), amtIn)
+	ctx.Set("epoch_swaps", epochSwaps.String())
+	ctx.Set("epoch_volume", epochVol.String())
+	ctx.Set("output", amtOut.String())
+	ctx.Commit()
+
+	p.pushToken(ctx, tOut, receiver, amtOut)
+	ctx.Emit("SwapFromContract", map[string]interface{}{
+		"sender":    strings.ToLower(strings.TrimSpace(ctx.CallerAddr)),
+		"receiver":  receiver,
+		"tokenIn":   tIn,
+		"tokenOut":  tOut,
+		"amountIn":  amtIn.String(),
+		"amountOut": amtOut.String(),
+	})
+}
+
 // ─── View helpers ─────────────────────────────────────────────────────────────
 
 func (p *Pair) GetReserves(ctx *bc.Context) {

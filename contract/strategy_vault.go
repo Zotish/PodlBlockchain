@@ -138,6 +138,109 @@ func (v *StrategyVault) parseAmounts(ctx *bc.Context, out string) (*big.Int, *bi
 	return parseBig(parts[0]), parseBig(parts[1])
 }
 
+func (v *StrategyVault) redeemLPAmount(ctx *bc.Context, pair string, shares *big.Int) *big.Int {
+	total := v.totalShares(ctx)
+	position := v.positionOf(ctx, pair)
+	if total.Sign() <= 0 || position.Sign() <= 0 {
+		ctx.Revert("empty vault position")
+	}
+	lpAmt := new(big.Int).Div(new(big.Int).Mul(shares, position), total)
+	if lpAmt.Sign() <= 0 {
+		ctx.Revert("shares too small for selected position")
+	}
+	if position.Cmp(lpAmt) < 0 {
+		ctx.Revert("insufficient vault position in pair")
+	}
+	return lpAmt
+}
+
+func (v *StrategyVault) addIdle(ctx *bc.Context, token string, amt *big.Int) {
+	token = norm(token)
+	if token == "" || amt == nil || amt.Sign() <= 0 {
+		return
+	}
+	key := "idle:" + token
+	ctx.Set(key, new(big.Int).Add(parseBig(ctx.Get(key)), amt).String())
+}
+
+func (v *StrategyVault) pairOtherToken(ctx *bc.Context, pair string, tokenIn string) string {
+	tokenIn = norm(tokenIn)
+	t0 := v.pairToken(ctx, pair, "Token0")
+	t1 := v.pairToken(ctx, pair, "Token1")
+	switch tokenIn {
+	case t0:
+		return t1
+	case t1:
+		return t0
+	default:
+		ctx.Revert("route pair does not contain token")
+	}
+	return ""
+}
+
+func (v *StrategyVault) routePairs(ctx *bc.Context, tokenIn string, tokenOut string) []string {
+	router := norm(ctx.Get("router"))
+	if router == "" {
+		ctx.Revert("router required for cross-asset movement")
+	}
+	res, err := ctx.Call(router, "GetBestRoute", []string{norm(tokenIn), norm(tokenOut)})
+	if err != nil || !res.Success {
+		ctx.Revert("route lookup failed")
+	}
+	raw := strings.TrimSpace(res.Output)
+	if raw == "" {
+		ctx.Revert("no swap route")
+	}
+	out := []string{}
+	for _, part := range strings.Split(raw, ",") {
+		pair := norm(part)
+		if pair != "" {
+			out = append(out, pair)
+		}
+	}
+	if len(out) == 0 || len(out) > 2 {
+		ctx.Revert("unsupported swap route")
+	}
+	return out
+}
+
+func (v *StrategyVault) swapVaultToken(ctx *bc.Context, tokenIn string, tokenOut string, amountIn *big.Int, minAmountOut *big.Int) *big.Int {
+	tokenIn = norm(tokenIn)
+	tokenOut = norm(tokenOut)
+	if amountIn == nil || amountIn.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	if tokenIn == tokenOut {
+		return new(big.Int).Set(amountIn)
+	}
+	if minAmountOut == nil {
+		minAmountOut = big.NewInt(0)
+	}
+
+	currentToken := tokenIn
+	currentAmount := new(big.Int).Set(amountIn)
+	route := v.routePairs(ctx, tokenIn, tokenOut)
+	for i, pair := range route {
+		nextToken := v.pairOtherToken(ctx, pair, currentToken)
+		minOut := big.NewInt(0)
+		if i == len(route)-1 {
+			minOut = minAmountOut
+		}
+		v.approveIfNeeded(ctx, currentToken, pair, currentAmount)
+		swapped, err := ctx.Call(pair, "SwapFromContract", []string{ctx.ContractAddr, currentAmount.String(), minOut.String(), currentToken})
+		if err != nil || !swapped.Success {
+			ctx.Revert("vault swap failed")
+		}
+		currentAmount = parseBig(swapped.Output)
+		requirePositive(ctx, "swap output", currentAmount)
+		currentToken = nextToken
+	}
+	if currentToken != tokenOut {
+		ctx.Revert("swap route ended with wrong token")
+	}
+	return currentAmount
+}
+
 // Init configures the strategy vault. router is optional metadata for UIs;
 // manager controls rebalances. If manager is empty, the deploy owner is used.
 func (v *StrategyVault) Init(ctx *bc.Context, router string, manager string) {
@@ -187,7 +290,7 @@ func (v *StrategyVault) DepositLP(ctx *bc.Context, pair string, amount string) {
 	})
 }
 
-// WithdrawLP returns LP tokens from a selected pool and burns 1:1 vault shares.
+// WithdrawLP returns the user's pro-rata LP tokens from a selected pool.
 func (v *StrategyVault) WithdrawLP(ctx *bc.Context, pair string, shares string) {
 	pair = norm(pair)
 	user := actorAddr(ctx)
@@ -196,21 +299,19 @@ func (v *StrategyVault) WithdrawLP(ctx *bc.Context, pair string, shares string) 
 	if v.shareOf(ctx, user).Cmp(amt) < 0 {
 		ctx.Revert("insufficient vault shares")
 	}
-	if v.positionOf(ctx, pair).Cmp(amt) < 0 {
-		ctx.Revert("insufficient vault position in pair")
-	}
+	lpAmt := v.redeemLPAmount(ctx, pair, amt)
 
-	if _, err := ctx.Call(pair, "Transfer", []string{user, amt.String()}); err != nil {
+	if _, err := ctx.Call(pair, "Transfer", []string{user, lpAmt.String()}); err != nil {
 		ctx.Revert("LP withdraw failed: " + err.Error())
 	}
 
 	v.setShare(ctx, user, new(big.Int).Sub(v.shareOf(ctx, user), amt))
 	ctx.Set("totalShares", new(big.Int).Sub(v.totalShares(ctx), amt).String())
-	v.setPosition(ctx, pair, new(big.Int).Sub(v.positionOf(ctx, pair), amt))
-	ctx.Set("output", amt.String())
+	v.setPosition(ctx, pair, new(big.Int).Sub(v.positionOf(ctx, pair), lpAmt))
+	ctx.Set("output", lpAmt.String())
 	ctx.Commit()
 	ctx.Emit("VaultWithdrawLP", map[string]interface{}{
-		"user": user, "pair": pair, "shares": amt.String(),
+		"user": user, "pair": pair, "shares": amt.String(), "lpAmount": lpAmt.String(),
 	})
 }
 
@@ -224,22 +325,20 @@ func (v *StrategyVault) WithdrawToTokens(ctx *bc.Context, pair string, shares st
 	if v.shareOf(ctx, user).Cmp(amt) < 0 {
 		ctx.Revert("insufficient vault shares")
 	}
-	if v.positionOf(ctx, pair).Cmp(amt) < 0 {
-		ctx.Revert("insufficient vault position in pair")
-	}
+	lpAmt := v.redeemLPAmount(ctx, pair, amt)
 
-	res, err := ctx.Call(pair, "RemoveLiquidityTo", []string{user, amt.String()})
+	res, err := ctx.Call(pair, "RemoveLiquidityTo", []string{user, lpAmt.String()})
 	if err != nil || !res.Success {
 		ctx.Revert("remove liquidity failed")
 	}
 
 	v.setShare(ctx, user, new(big.Int).Sub(v.shareOf(ctx, user), amt))
 	ctx.Set("totalShares", new(big.Int).Sub(v.totalShares(ctx), amt).String())
-	v.setPosition(ctx, pair, new(big.Int).Sub(v.positionOf(ctx, pair), amt))
+	v.setPosition(ctx, pair, new(big.Int).Sub(v.positionOf(ctx, pair), lpAmt))
 	ctx.Set("output", res.Output)
 	ctx.Commit()
 	ctx.Emit("VaultWithdrawTokens", map[string]interface{}{
-		"user": user, "pair": pair, "shares": amt.String(), "amounts": res.Output,
+		"user": user, "pair": pair, "shares": amt.String(), "lpAmount": lpAmt.String(), "amounts": res.Output,
 	})
 }
 
@@ -254,10 +353,14 @@ func (v *StrategyVault) rebalance(ctx *bc.Context, fromPair string, toPair strin
 	if v.positionOf(ctx, fromPair).Cmp(amt) < 0 {
 		ctx.Revert("insufficient vault source position")
 	}
-	if !v.sameTokenSet(ctx, fromPair, toPair) {
-		ctx.Revert("rebalance requires matching token pair; use swap-route strategy for cross-asset movement")
+	if v.sameTokenSet(ctx, fromPair, toPair) {
+		v.rebalanceSameAsset(ctx, fromPair, toPair, amt)
+		return
 	}
+	v.rebalanceCrossAsset(ctx, fromPair, toPair, amt, big.NewInt(0))
+}
 
+func (v *StrategyVault) rebalanceSameAsset(ctx *bc.Context, fromPair string, toPair string, amt *big.Int) {
 	from0 := v.pairToken(ctx, fromPair, "Token0")
 	from1 := v.pairToken(ctx, fromPair, "Token1")
 	to0 := v.pairToken(ctx, toPair, "Token0")
@@ -293,15 +396,131 @@ func (v *StrategyVault) rebalance(ctx *bc.Context, fromPair string, toPair strin
 	ctx.Set("output", minted.String())
 	ctx.Commit()
 	ctx.Emit("VaultRebalanced", map[string]interface{}{
-		"fromPair": fromPair, "toPair": toPair, "burnedLP": amt.String(), "mintedLP": minted.String(),
+		"type": "same_asset", "fromPair": fromPair, "toPair": toPair, "burnedLP": amt.String(), "mintedLP": minted.String(),
 	})
 }
 
-// Rebalance moves vault-owned liquidity from one pair to another compatible
-// pair. Compatible means the same two underlying assets, possibly reversed.
+func (v *StrategyVault) rebalanceCrossAsset(ctx *bc.Context, fromPair string, toPair string, amt *big.Int, minSwapOut *big.Int) {
+	from0 := v.pairToken(ctx, fromPair, "Token0")
+	from1 := v.pairToken(ctx, fromPair, "Token1")
+	to0 := v.pairToken(ctx, toPair, "Token0")
+	to1 := v.pairToken(ctx, toPair, "Token1")
+
+	removed, err := ctx.Call(fromPair, "RemoveLiquidityTo", []string{ctx.ContractAddr, amt.String()})
+	if err != nil || !removed.Success {
+		ctx.Revert("remove source liquidity failed")
+	}
+	out0, out1 := v.parseAmounts(ctx, removed.Output)
+
+	balances := map[string]*big.Int{}
+	addBalance := func(token string, amount *big.Int) {
+		token = norm(token)
+		if amount == nil || amount.Sign() <= 0 {
+			return
+		}
+		if balances[token] == nil {
+			balances[token] = big.NewInt(0)
+		}
+		balances[token] = new(big.Int).Add(balances[token], amount)
+	}
+	addBalance(from0, out0)
+	addBalance(from1, out1)
+
+	target0 := big.NewInt(0)
+	target1 := big.NewInt(0)
+	if balances[to0] != nil {
+		target0 = balances[to0]
+		delete(balances, to0)
+	}
+	if balances[to1] != nil {
+		target1 = balances[to1]
+		delete(balances, to1)
+	}
+
+	for token, amount := range balances {
+		if amount.Sign() <= 0 {
+			continue
+		}
+		if target0.Sign() == 0 {
+			target0 = new(big.Int).Add(target0, v.swapVaultToken(ctx, token, to0, amount, big.NewInt(0)))
+			continue
+		}
+		if target1.Sign() == 0 {
+			target1 = new(big.Int).Add(target1, v.swapVaultToken(ctx, token, to1, amount, big.NewInt(0)))
+			continue
+		}
+		v.addIdle(ctx, token, amount)
+	}
+
+	if target0.Sign() == 0 && target1.Cmp(big.NewInt(1)) > 0 {
+		half := new(big.Int).Div(new(big.Int).Set(target1), big.NewInt(2))
+		target1.Sub(target1, half)
+		target0.Add(target0, v.swapVaultToken(ctx, to1, to0, half, minSwapOut))
+	}
+	if target1.Sign() == 0 && target0.Cmp(big.NewInt(1)) > 0 {
+		half := new(big.Int).Div(new(big.Int).Set(target0), big.NewInt(2))
+		target0.Sub(target0, half)
+		target1.Add(target1, v.swapVaultToken(ctx, to0, to1, half, minSwapOut))
+	}
+	requirePositive(ctx, "target token0 amount", target0)
+	requirePositive(ctx, "target token1 amount", target1)
+
+	v.approveIfNeeded(ctx, to0, toPair, target0)
+	v.approveIfNeeded(ctx, to1, toPair, target1)
+	added, err := ctx.Call(toPair, "AddLiquidityFromContract", []string{ctx.ContractAddr, target0.String(), target1.String()})
+	if err != nil || !added.Success {
+		ctx.Revert("add target liquidity failed")
+	}
+	minted := parseBig(added.Output)
+	requirePositive(ctx, "minted LP", minted)
+
+	v.setPosition(ctx, fromPair, new(big.Int).Sub(v.positionOf(ctx, fromPair), amt))
+	v.setPosition(ctx, toPair, new(big.Int).Add(v.positionOf(ctx, toPair), minted))
+	ctx.Set("current_pair", toPair)
+	ctx.Set("last_rebalance", big.NewInt(ctx.BlockTime).String())
+	ctx.Set("output", minted.String())
+	ctx.Commit()
+	ctx.Emit("VaultRebalanced", map[string]interface{}{
+		"type":          "cross_asset",
+		"fromPair":      fromPair,
+		"toPair":        toPair,
+		"burnedLP":      amt.String(),
+		"mintedLP":      minted.String(),
+		"sourceToken0":  from0,
+		"sourceToken1":  from1,
+		"targetToken0":  to0,
+		"targetToken1":  to1,
+		"targetAmount0": target0.String(),
+		"targetAmount1": target1.String(),
+	})
+}
+
+// Rebalance moves vault-owned liquidity from one pool to another. If assets
+// differ, it uses the configured DEX router's direct or two-hop swap route.
 func (v *StrategyVault) Rebalance(ctx *bc.Context, fromPair string, toPair string, lpAmount string) {
 	v.requireManager(ctx)
 	v.rebalance(ctx, fromPair, toPair, lpAmount)
+}
+
+// RebalanceWithMinOut is the slippage-aware variant for cross-asset movement.
+func (v *StrategyVault) RebalanceWithMinOut(ctx *bc.Context, fromPair string, toPair string, lpAmount string, minSwapOut string) {
+	v.requireManager(ctx)
+	fromPair = norm(fromPair)
+	toPair = norm(toPair)
+	amt := parseBig(lpAmount)
+	minOut := parseBig(minSwapOut)
+	requirePositive(ctx, "LP amount", amt)
+	if fromPair == "" || toPair == "" || fromPair == toPair {
+		ctx.Revert("invalid rebalance pair")
+	}
+	if v.positionOf(ctx, fromPair).Cmp(amt) < 0 {
+		ctx.Revert("insufficient vault source position")
+	}
+	if v.sameTokenSet(ctx, fromPair, toPair) {
+		v.rebalanceSameAsset(ctx, fromPair, toPair, amt)
+		return
+	}
+	v.rebalanceCrossAsset(ctx, fromPair, toPair, amt, minOut)
 }
 
 // AutoRebalance picks the highest scoring pair from a comma-separated candidate
