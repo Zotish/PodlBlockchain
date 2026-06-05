@@ -64,6 +64,18 @@ func (a *amountField) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func sumAmountStrings(values map[string]string) string {
+	total := big.NewInt(0)
+	for _, raw := range values {
+		amt, err := blockchaincomponent.NewAmountFromString(raw)
+		if err != nil {
+			continue
+		}
+		total.Add(total, amt)
+	}
+	return blockchaincomponent.AmountString(total)
+}
+
 func NewBlockchainServer(port uint, blockchainPtr *blockchaincomponent.Blockchain_struct) *BlockchainServer {
 	return &BlockchainServer{
 		Port:          port,
@@ -1743,6 +1755,73 @@ func (bcs *BlockchainServer) RewardsLatest(w http.ResponseWriter, r *http.Reques
 		"participant_rewards":    last.RewardBreakdown.ParticipantRewards,
 	}
 	json.NewEncoder(w).Encode(out)
+}
+
+func (bcs *BlockchainServer) RewardsSummary(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	height, latestHash := bcs.currentChainTip()
+	emission := blockchaincomponent.EmissionReward(height)
+
+	latest := map[string]interface{}{}
+	if bcs.BlockchainPtr != nil {
+		bcs.BlockchainPtr.Mutex.Lock()
+		if len(bcs.BlockchainPtr.Blocks) > 0 {
+			last := bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1]
+			if last != nil {
+				latest = map[string]interface{}{
+					"block_number":           last.BlockNumber,
+					"hash":                   last.CurrentHash,
+					"gas_used":               last.GasUsed,
+					"base_fee":               last.BaseFee,
+					"validator":              last.RewardBreakdown.Validator,
+					"validator_reward":       last.RewardBreakdown.ValidatorReward,
+					"validator_rewards":      last.RewardBreakdown.ValidatorRewards,
+					"validator_part_rewards": last.RewardBreakdown.ValidatorPartRewards,
+					"liquidity_rewards":      last.RewardBreakdown.LiquidityRewards,
+					"participant_rewards":    last.RewardBreakdown.ParticipantRewards,
+					"totals": map[string]string{
+						"validator_rewards":      sumAmountStrings(last.RewardBreakdown.ValidatorRewards),
+						"validator_part_rewards": sumAmountStrings(last.RewardBreakdown.ValidatorPartRewards),
+						"liquidity_rewards":      sumAmountStrings(last.RewardBreakdown.LiquidityRewards),
+						"participant_rewards":    sumAmountStrings(last.RewardBreakdown.ParticipantRewards),
+					},
+				}
+			}
+		}
+		bcs.BlockchainPtr.Mutex.Unlock()
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":            "ok",
+		"height":            height,
+		"latest_block_hash": latestHash,
+		"policy": map[string]interface{}{
+			"unit":             "raw LQD amount, decimals=8",
+			"emission_reward":  emission.String(),
+			"gas_fees":         "added to the same per-block reward pool",
+			"treasury_address": constantset.LiquidityPoolAddress,
+			"distribution": []map[string]interface{}{
+				{"bucket": "proposer_validator", "percent": 40, "settlement": "credited_to_balance_each_block", "claim_required": false},
+				{"bucket": "lp_providers_sqrt_curve", "percent": 30, "settlement": "pending_lp_rewards", "claim_required": true},
+				{"bucket": "long_lock_lp_365_2000_days", "percent": 5, "settlement": "pending_lp_rewards", "claim_required": true, "note": "currently legacy long-lock LP positions only"},
+				{"bucket": "validator_participants", "percent": 12, "settlement": "credited_to_balance_each_block", "claim_required": false},
+				{"bucket": "tx_participants", "percent": 2, "settlement": "participant_reward_accounting", "claim_required": true},
+				{"bucket": "treasury", "percent": 11, "settlement": "credited_to_treasury_each_block", "claim_required": false},
+			},
+		},
+		"latest_block": latest,
+		"timestamp":    time.Now().Unix(),
+	})
 }
 
 func (bcs *BlockchainServer) ActiveValidatorsLatest(w http.ResponseWriter, r *http.Request) {
@@ -4116,6 +4195,138 @@ func (b *BlockchainServer) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	height, latestHash := b.currentChainTip()
+	dbHeight, dbErr := blockchaincomponent.GetLatestBlockNumberFromDB()
+
+	var memoryHeight uint64
+	mempool := 0
+	validatorsTotal := 0
+	rewardHistory := 0
+	pendingBlocks := 0
+	localValidator := ""
+	baseFee := uint64(0)
+	peers := []map[string]interface{}{}
+
+	if b.BlockchainPtr != nil {
+		b.BlockchainPtr.Mutex.Lock()
+		if len(b.BlockchainPtr.Blocks) > 0 && b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1] != nil {
+			memoryHeight = b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1].BlockNumber
+		}
+		mempool = len(b.BlockchainPtr.Transaction_pool)
+		validatorsTotal = len(b.BlockchainPtr.Validators)
+		rewardHistory = len(b.BlockchainPtr.RewardHistory)
+		pendingBlocks = len(b.BlockchainPtr.PendingBlocks)
+		localValidator = strings.TrimSpace(b.BlockchainPtr.LocalValidator)
+		baseFee = b.BlockchainPtr.BaseFee
+		if b.BlockchainPtr.Network != nil {
+			peers = b.BlockchainPtr.Network.PeerStatusSnapshot()
+		}
+		b.BlockchainPtr.Mutex.Unlock()
+	}
+
+	activePeers := 0
+	verifiedPeers := 0
+	votingPeers := 0
+	syncingPeers := 0
+	for _, peer := range peers {
+		if v, _ := peer["is_active"].(bool); v {
+			activePeers++
+		}
+		if v, _ := peer["validator_verified"].(bool); v {
+			verifiedPeers++
+		}
+		if v, _ := peer["voting_eligible"].(bool); v {
+			votingPeers++
+		}
+		if status, _ := peer["sync_status"].(string); status == "syncing" {
+			syncingPeers++
+		}
+	}
+
+	checks := []map[string]interface{}{}
+	criticalFailures := 0
+	warnings := 0
+	addCheck := func(name string, ok bool, critical bool, message string) {
+		severity := "ok"
+		if !ok {
+			if critical {
+				severity = "critical"
+				criticalFailures++
+			} else {
+				severity = "warning"
+				warnings++
+			}
+		}
+		checks = append(checks, map[string]interface{}{
+			"name":     name,
+			"ok":       ok,
+			"critical": critical,
+			"severity": severity,
+			"message":  message,
+		})
+	}
+
+	addCheck("chain_tip", height > 0 && latestHash != "", true, fmt.Sprintf("height=%d latest_hash=%s", height, latestHash))
+	addCheck("db_persistence", dbErr == nil && dbHeight > 0, true, fmt.Sprintf("db_height=%d", dbHeight))
+	addCheck("db_tip_alignment", dbErr == nil && dbHeight >= memoryHeight, false, fmt.Sprintf("memory_height=%d db_height=%d", memoryHeight, dbHeight))
+	addCheck("validator_set", validatorsTotal > 0, true, fmt.Sprintf("validators=%d", validatorsTotal))
+	addCheck("voting_capacity", localValidator != "" || votingPeers > 0, true, fmt.Sprintf("local_validator=%s peer_voting=%d", localValidator, votingPeers))
+	addCheck("peer_handshake", len(peers) == 0 || verifiedPeers == len(peers), false, fmt.Sprintf("verified=%d total=%d", verifiedPeers, len(peers)))
+	addCheck("reward_history", rewardHistory > 0, false, fmt.Sprintf("reward_history=%d", rewardHistory))
+	addCheck("pending_block_pressure", pendingBlocks < 100, false, fmt.Sprintf("pending_blocks=%d", pendingBlocks))
+	addCheck("mempool_pressure", mempool < 50000, false, fmt.Sprintf("mempool=%d", mempool))
+	addCheck("base_fee_floor", baseFee >= uint64(constantset.MinBaseFee), false, fmt.Sprintf("base_fee=%d min=%d", baseFee, constantset.MinBaseFee))
+
+	status := "ready_for_testnet_observation"
+	recommendation := "Run 30-60 days of testnet soak, validator onboarding, restore drills, and external audit before mainnet."
+	if criticalFailures > 0 {
+		status = "action_required"
+		recommendation = "Fix critical readiness checks before extending public validator/testnet usage."
+	} else if warnings > 0 {
+		status = "ready_with_warnings"
+	}
+
+	out := map[string]interface{}{
+		"status":                           status,
+		"mainnet_compatible_checks_passed": criticalFailures == 0,
+		"recommendation":                   recommendation,
+		"height":                           height,
+		"latest_block_hash":                latestHash,
+		"memory_height":                    memoryHeight,
+		"db_height":                        dbHeight,
+		"db_path":                          constantset.BLOCKCHAIN_DB_PATH,
+		"mempool":                          mempool,
+		"base_fee":                         baseFee,
+		"validators": map[string]interface{}{
+			"total":           validatorsTotal,
+			"local_validator": localValidator,
+			"peer_active":     activePeers,
+			"peer_verified":   verifiedPeers,
+			"peer_voting":     votingPeers,
+			"peer_syncing":    syncingPeers,
+		},
+		"peers":     peers,
+		"checks":    checks,
+		"timestamp": time.Now().Unix(),
+	}
+	if dbErr != nil {
+		out["db_error"] = dbErr.Error()
+	}
+	json.NewEncoder(w).Encode(out)
+}
+
 // GetMempool returns all pending (unconfirmed) transactions so other nodes
 // can pull the mempool on start-up or after reconnecting.
 func (b *BlockchainServer) GetMempool(w http.ResponseWriter, r *http.Request) {
@@ -4235,6 +4446,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/peers", b.GetPeers)
 	http.HandleFunc("/peers/add", b.AddPeer)
 	http.HandleFunc("/health", b.HealthCheck)
+	http.HandleFunc("/readiness/mainnet", b.MainnetReadiness)
 	http.HandleFunc("/mempool", b.GetMempool)
 	http.HandleFunc("/faucet", b.limiter.middleware(b.Faucet))
 	http.HandleFunc("/block/{id}", b.GetBlock)
@@ -4248,6 +4460,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/liquidity", b.LiquidityView)
 	http.HandleFunc("/rewards/recent", b.RewardsRecent)
 	http.HandleFunc("/rewards/latest", b.RewardsLatest)
+	http.HandleFunc("/rewards/summary", b.RewardsSummary)
 	http.HandleFunc("/validators/active", b.ActiveValidatorsLatest)
 	http.HandleFunc("/validators/sync", b.SyncValidatorsAll)
 	http.HandleFunc("/chain/summary", b.ChainSummary)
