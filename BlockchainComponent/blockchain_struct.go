@@ -65,6 +65,35 @@ type RewardSnapshot struct {
 	Dist        map[string]string `json:"dist"`
 }
 
+type StrategyVaultMovement struct {
+	ID         string   `json:"id"`
+	VaultID    string   `json:"vault_id"`
+	FromPool   string   `json:"from_pool"`
+	ToPool     string   `json:"to_pool"`
+	Reason     string   `json:"reason"`
+	Status     string   `json:"status"`
+	MinOutBps  int      `json:"min_out_bps"`
+	AmountA    *big.Int `json:"amount_a"`
+	AmountB    *big.Int `json:"amount_b"`
+	Shares     *big.Int `json:"shares"`
+	ExecutedAt int64    `json:"executed_at"`
+}
+
+type StrategyVaultPosition struct {
+	ID          string                 `json:"id"`
+	Owner       string                 `json:"owner"`
+	CurrentPool string                 `json:"current_pool"`
+	TokenA      string                 `json:"token_a"`
+	TokenB      string                 `json:"token_b"`
+	AmountA     *big.Int               `json:"amount_a"`
+	AmountB     *big.Int               `json:"amount_b"`
+	Shares      *big.Int               `json:"shares"`
+	Status      string                 `json:"status"`
+	CreatedAt   int64                  `json:"created_at"`
+	UpdatedAt   int64                  `json:"updated_at"`
+	LastMove    *StrategyVaultMovement `json:"last_move,omitempty"`
+}
+
 type Blockchain_struct struct {
 	Blocks           []*Block            `json:"blocks"`
 	Transaction_pool []*Transaction      `json:"transaction_pool"`
@@ -94,10 +123,12 @@ type Blockchain_struct struct {
 	FixedBlockReward    uint64
 	GasRewardMultiplier uint64
 
-	MinLiquidityStake *big.Int
-	LocalValidator    string
-	BlockVotes        map[string]map[string]bool
-	PendingBlocks     map[string]*Block
+	MinLiquidityStake  *big.Int
+	LocalValidator     string
+	BlockVotes         map[string]map[string]bool
+	PendingBlocks      map[string]*Block
+	StrategyVaults     map[string]*StrategyVaultPosition `json:"strategy_vaults,omitempty"`
+	StrategyVaultMoves []StrategyVaultMovement           `json:"strategy_vault_moves,omitempty"`
 
 	DLEngine *DynamicLiquidityEngine `json:"-"`
 }
@@ -365,6 +396,12 @@ func (bc *Blockchain_struct) EnsureRuntimeState() {
 	}
 	if bc.PendingBlocks == nil {
 		bc.PendingBlocks = make(map[string]*Block)
+	}
+	if bc.StrategyVaults == nil {
+		bc.StrategyVaults = make(map[string]*StrategyVaultPosition)
+	}
+	if bc.StrategyVaultMoves == nil {
+		bc.StrategyVaultMoves = []StrategyVaultMovement{}
 	}
 	if bc.ContractEngine != nil && bc.ContractEngine.Registry != nil {
 		bc.ContractEngine.Registry.Blockchain = bc
@@ -860,7 +897,11 @@ func (bc *Blockchain_struct) AddNewTxBatch(txs []*Transaction) (int, int) {
 func (bc *Blockchain_struct) getAccountBalance(address string) (*big.Int, bool) {
 	bc.AccountsMu.RLock()
 	defer bc.AccountsMu.RUnlock()
-	bal, ok := bc.Accounts[address]
+	key, ok := bc.accountKeyForReadLocked(address)
+	if !ok {
+		return nil, false
+	}
+	bal := bc.Accounts[key]
 	if !ok || bal == nil {
 		return nil, false
 	}
@@ -872,7 +913,8 @@ func (bc *Blockchain_struct) setAccountBalance(address string, value *big.Int) {
 	if bc.Accounts == nil {
 		bc.Accounts = make(map[string]*big.Int)
 	}
-	bc.Accounts[address] = CopyAmount(value)
+	key := bc.accountKeyForWriteLocked(address)
+	bc.Accounts[key] = CopyAmount(value)
 	bc.AccountsMu.Unlock()
 }
 
@@ -881,12 +923,13 @@ func (bc *Blockchain_struct) addAccountBalance(address string, delta *big.Int) {
 	if bc.Accounts == nil {
 		bc.Accounts = make(map[string]*big.Int)
 	}
-	cur := bc.Accounts[address]
+	key := bc.accountKeyForWriteLocked(address)
+	cur := bc.Accounts[key]
 	if cur == nil {
 		cur = big.NewInt(0)
 	}
 	cur.Add(cur, delta)
-	bc.Accounts[address] = cur
+	bc.Accounts[key] = cur
 	bc.AccountsMu.Unlock()
 }
 
@@ -898,7 +941,8 @@ func (bc *Blockchain_struct) AddAccountBalance(address string, delta *big.Int) {
 func (bc *Blockchain_struct) subAccountBalance(address string, delta *big.Int) bool {
 	bc.AccountsMu.Lock()
 	defer bc.AccountsMu.Unlock()
-	bal := bc.Accounts[address]
+	key := bc.accountKeyForWriteLocked(address)
+	bal := bc.Accounts[key]
 	if bal == nil {
 		return false
 	}
@@ -906,8 +950,49 @@ func (bc *Blockchain_struct) subAccountBalance(address string, delta *big.Int) b
 		return false
 	}
 	bal.Sub(bal, delta)
-	bc.Accounts[address] = bal
+	bc.Accounts[key] = bal
 	return true
+}
+
+func normalizeAccountAddress(address string) string {
+	address = strings.TrimSpace(address)
+	if ValidateAddress(address) {
+		return strings.ToLower(address)
+	}
+	return address
+}
+
+func (bc *Blockchain_struct) accountKeyForReadLocked(address string) (string, bool) {
+	if bc == nil || bc.Accounts == nil {
+		return "", false
+	}
+	if _, ok := bc.Accounts[address]; ok {
+		return address, true
+	}
+	normalized := normalizeAccountAddress(address)
+	if _, ok := bc.Accounts[normalized]; ok {
+		return normalized, true
+	}
+	for key := range bc.Accounts {
+		if strings.EqualFold(key, address) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+func (bc *Blockchain_struct) accountKeyForWriteLocked(address string) string {
+	if bc != nil && bc.Accounts != nil {
+		if _, ok := bc.Accounts[address]; ok {
+			return address
+		}
+		for key := range bc.Accounts {
+			if strings.EqualFold(key, address) {
+				return key
+			}
+		}
+	}
+	return normalizeAccountAddress(address)
 }
 
 func (bc *Blockchain_struct) GetWalletBalance(address string) (*big.Int, error) {

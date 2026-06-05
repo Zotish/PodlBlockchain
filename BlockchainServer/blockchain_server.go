@@ -76,6 +76,42 @@ func sumAmountStrings(values map[string]string) string {
 	return blockchaincomponent.AmountString(total)
 }
 
+func requestAddressFromPathOrQuery(r *http.Request) string {
+	address := strings.TrimSpace(r.PathValue("address"))
+	if address == "" {
+		address = strings.TrimSpace(r.URL.Query().Get("address"))
+	}
+	if address == "" {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) > 0 {
+			address = strings.TrimSpace(parts[len(parts)-1])
+		}
+	}
+	return address
+}
+
+func addRawReward(total *big.Int, raw string) {
+	amt, err := blockchaincomponent.NewAmountFromString(raw)
+	if err == nil && amt != nil {
+		total.Add(total, amt)
+	}
+}
+
+func lookupLiquidityProviderLocked(bc *blockchaincomponent.Blockchain_struct, address string) *blockchaincomponent.LiquidityProvider {
+	if bc == nil {
+		return nil
+	}
+	if lp := bc.LiquidityProviders[address]; lp != nil {
+		return lp
+	}
+	for key, candidate := range bc.LiquidityProviders {
+		if strings.EqualFold(key, address) {
+			return candidate
+		}
+	}
+	return nil
+}
+
 func NewBlockchainServer(port uint, blockchainPtr *blockchaincomponent.Blockchain_struct) *BlockchainServer {
 	return &BlockchainServer{
 		Port:          port,
@@ -1813,7 +1849,7 @@ func (bcs *BlockchainServer) RewardsSummary(w http.ResponseWriter, r *http.Reque
 			"distribution": []map[string]interface{}{
 				{"bucket": "proposer_validator", "percent": 40, "settlement": "credited_to_balance_each_block", "claim_required": false},
 				{"bucket": "lp_providers_sqrt_curve", "percent": 30, "settlement": "pending_lp_rewards", "claim_required": true},
-				{"bucket": "long_lock_lp_365_2000_days", "percent": 5, "settlement": "pending_lp_rewards", "claim_required": true, "note": "currently legacy long-lock LP positions only"},
+				{"bucket": "long_lock_lp_365_2000_days", "percent": 5, "settlement": "pending_lp_rewards", "claim_required": true, "note": "legacy LP plus DEX locked LP positions"},
 				{"bucket": "validator_participants", "percent": 12, "settlement": "credited_to_balance_each_block", "claim_required": false},
 				{"bucket": "tx_participants", "percent": 2, "settlement": "participant_reward_accounting", "claim_required": true},
 				{"bucket": "treasury", "percent": 11, "settlement": "credited_to_treasury_each_block", "claim_required": false},
@@ -1822,6 +1858,250 @@ func (bcs *BlockchainServer) RewardsSummary(w http.ResponseWriter, r *http.Reque
 		"latest_block": latest,
 		"timestamp":    time.Now().Unix(),
 	})
+}
+
+func (bcs *BlockchainServer) RewardAddressStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	address := requestAddressFromPathOrQuery(r)
+	if !wallet.ValidateAddress(address) {
+		http.Error(w, "invalid address", http.StatusBadRequest)
+		return
+	}
+
+	balance := "0"
+	if bcs.BlockchainPtr != nil {
+		balance = bcs.BlockchainPtr.AccountBalanceString(address)
+	}
+
+	totals := map[string]*big.Int{
+		"proposer_validator":      big.NewInt(0),
+		"validator_participant":   big.NewInt(0),
+		"liquidity":               big.NewInt(0),
+		"transaction_participant": big.NewInt(0),
+	}
+	recent := make([]map[string]interface{}, 0)
+	var lpInfo map[string]interface{}
+	var latestHeight uint64
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	if lp := lookupLiquidityProviderLocked(bcs.BlockchainPtr, address); lp != nil {
+		lpInfo = map[string]interface{}{
+			"stake_amount":    blockchaincomponent.AmountString(lp.StakeAmount),
+			"pending_rewards": blockchaincomponent.AmountString(lp.PendingRewards),
+			"total_rewards":   blockchaincomponent.AmountString(lp.TotalRewards),
+			"lock_days":       lp.LockDays,
+			"lock_time":       lp.LockTime,
+		}
+	}
+	start := 0
+	if len(bcs.BlockchainPtr.Blocks) > 0 {
+		latestHeight = bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1].BlockNumber
+	}
+	if len(bcs.BlockchainPtr.Blocks) > 500 {
+		start = len(bcs.BlockchainPtr.Blocks) - 500
+	}
+	for i := start; i < len(bcs.BlockchainPtr.Blocks); i++ {
+		block := bcs.BlockchainPtr.Blocks[i]
+		if block == nil {
+			continue
+		}
+		appendReward := func(bucket string, claimRequired bool, values map[string]string) {
+			for key, amount := range values {
+				if !strings.EqualFold(key, address) {
+					continue
+				}
+				switch bucket {
+				case "proposer_validator":
+					addRawReward(totals["proposer_validator"], amount)
+				case "validator_participant":
+					addRawReward(totals["validator_participant"], amount)
+				case "liquidity":
+					addRawReward(totals["liquidity"], amount)
+				case "transaction_participant":
+					addRawReward(totals["transaction_participant"], amount)
+				}
+				recent = append(recent, map[string]interface{}{
+					"block_number":   block.BlockNumber,
+					"hash":           block.CurrentHash,
+					"bucket":         bucket,
+					"amount":         amount,
+					"claim_required": claimRequired,
+				})
+			}
+		}
+		appendReward("proposer_validator", false, block.RewardBreakdown.ValidatorRewards)
+		appendReward("validator_participant", false, block.RewardBreakdown.ValidatorPartRewards)
+		appendReward("liquidity", true, block.RewardBreakdown.LiquidityRewards)
+		appendReward("transaction_participant", true, block.RewardBreakdown.ParticipantRewards)
+	}
+	bcs.BlockchainPtr.Mutex.Unlock()
+
+	sort.SliceStable(recent, func(i, j int) bool {
+		return recent[i]["block_number"].(uint64) > recent[j]["block_number"].(uint64)
+	})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"address":       address,
+		"balance":       balance,
+		"latest_height": latestHeight,
+		"lp":            lpInfo,
+		"totals": map[string]string{
+			"proposer_validator":      blockchaincomponent.AmountString(totals["proposer_validator"]),
+			"validator_participant":   blockchaincomponent.AmountString(totals["validator_participant"]),
+			"liquidity":               blockchaincomponent.AmountString(totals["liquidity"]),
+			"transaction_participant": blockchaincomponent.AmountString(totals["transaction_participant"]),
+		},
+		"recent_rewards": recent,
+		"timestamp":      time.Now().Unix(),
+	})
+}
+
+func (bcs *BlockchainServer) StrategyVaultStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+	positions := bcs.BlockchainPtr.StrategyVaultStatus(owner)
+	vaultIDs := map[string]bool{}
+	for _, pos := range positions {
+		if pos != nil {
+			vaultIDs[pos.ID] = true
+		}
+	}
+
+	moves := make([]blockchaincomponent.StrategyVaultMovement, 0)
+	bcs.BlockchainPtr.Mutex.Lock()
+	for i := len(bcs.BlockchainPtr.StrategyVaultMoves) - 1; i >= 0 && len(moves) < 100; i-- {
+		move := bcs.BlockchainPtr.StrategyVaultMoves[i]
+		if owner != "" && !vaultIDs[move.VaultID] {
+			continue
+		}
+		moves = append(moves, move)
+	}
+	bcs.BlockchainPtr.Mutex.Unlock()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"positions": positions,
+		"movements": moves,
+		"count":     len(positions),
+		"timestamp": time.Now().Unix(),
+	})
+}
+
+func (bcs *BlockchainServer) StrategyVaultDeposit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Owner   string `json:"owner"`
+		Pool    string `json:"pool"`
+		TokenA  string `json:"token_a"`
+		TokenB  string `json:"token_b"`
+		AmountA string `json:"amount_a"`
+		AmountB string `json:"amount_b"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	amountA, err := blockchaincomponent.NewAmountFromString(req.AmountA)
+	if err != nil {
+		http.Error(w, "invalid amount_a", http.StatusBadRequest)
+		return
+	}
+	amountB, err := blockchaincomponent.NewAmountFromString(req.AmountB)
+	if err != nil {
+		http.Error(w, "invalid amount_b", http.StatusBadRequest)
+		return
+	}
+	pos, err := bcs.BlockchainPtr.StrategyVaultDeposit(req.Owner, req.Pool, req.TokenA, req.TokenB, amountA, amountB)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "position": pos})
+}
+
+func (bcs *BlockchainServer) StrategyVaultRebalance(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		VaultID    string `json:"vault_id"`
+		TargetPool string `json:"target_pool"`
+		MinOutBps  int    `json:"min_out_bps"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	move, err := bcs.BlockchainPtr.StrategyVaultRebalance(req.VaultID, req.TargetPool, req.MinOutBps, req.Reason)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "movement": move})
+}
+
+func (bcs *BlockchainServer) StrategyVaultWithdraw(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		VaultID string `json:"vault_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	pos, err := bcs.BlockchainPtr.StrategyVaultWithdraw(req.VaultID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "position": pos})
 }
 
 func (bcs *BlockchainServer) ActiveValidatorsLatest(w http.ResponseWriter, r *http.Request) {
@@ -4615,6 +4895,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/rewards/recent", b.RewardsRecent)
 	http.HandleFunc("/rewards/latest", b.RewardsLatest)
 	http.HandleFunc("/rewards/summary", b.RewardsSummary)
+	http.HandleFunc("/rewards/address/{address}", b.RewardAddressStatus)
 	http.HandleFunc("/validators/active", b.ActiveValidatorsLatest)
 	http.HandleFunc("/validators/sync", b.SyncValidatorsAll)
 	http.HandleFunc("/chain/summary", b.ChainSummary)
@@ -4648,6 +4929,10 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/liquidity/all", b.GetAllLiquidityProviders)
 	http.HandleFunc("/liquidity/pools", b.GetPoolLiquidity)
 	http.HandleFunc("/liquidity/rebalance", b.limiter.middleware(b.RebalancePools))
+	http.HandleFunc("/liquidity/vault/status", b.StrategyVaultStatus)
+	http.HandleFunc("/liquidity/vault/deposit", b.limiter.middleware(maxBytesMiddleware(b.StrategyVaultDeposit, maxBodySize)))
+	http.HandleFunc("/liquidity/vault/rebalance", b.limiter.middleware(maxBytesMiddleware(b.StrategyVaultRebalance, maxBodySize)))
+	http.HandleFunc("/liquidity/vault/withdraw", b.limiter.middleware(maxBytesMiddleware(b.StrategyVaultWithdraw, maxBodySize)))
 	http.HandleFunc("/liquidity/pools/sync", b.SyncPools)
 	http.HandleFunc("/liquidity/pools/register", b.limiter.middleware(maxBytesMiddleware(b.RegisterPoolManual, maxBodySize)))
 	http.HandleFunc("/bridge/requests", b.GetBridgeRequests)

@@ -385,22 +385,37 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 
 	// ── 5. Long-lock LP — 5 % (365–2000 days only, sqrt-curve) ───────────────
 	totalLongWeight := 0.0
+	longLockWeights := make(map[string]float64)
 	for _, lp := range bc.LiquidityProviders {
 		if lp.StakeAmount != nil && lp.StakeAmount.Sign() > 0 &&
 			lp.LockDays >= 365 && lp.LockDays <= 2000 {
-			totalLongWeight += math.Sqrt(AmountToFloat64(lp.StakeAmount))
+			weight := math.Sqrt(AmountToFloat64(lp.StakeAmount))
+			longLockWeights[lp.Address] += weight
+			totalLongWeight += weight
 		}
 	}
+	for _, pos := range dexLPPositions {
+		if !pos.Locked || pos.LiquidityUSD <= 0 {
+			continue
+		}
+		weight := pos.Weight
+		if weight <= 0 {
+			weight = math.Sqrt(pos.LiquidityUSD)
+			if pos.TierWeight > 0 {
+				weight *= pos.TierWeight
+			}
+		}
+		longLockWeights[normalizeAccountAddress(pos.Address)] += weight
+		totalLongWeight += weight
+	}
 	if totalLongWeight > 0 && lpLongLockShare.Sign() > 0 {
-		for _, lp := range bc.LiquidityProviders {
-			if lp.StakeAmount == nil || lp.StakeAmount.Sign() == 0 {
+		for address, weight := range longLockWeights {
+			if weight <= 0 {
 				continue
 			}
-			if lp.LockDays >= 365 && lp.LockDays <= 2000 {
-				share := portionFromWeight(lpLongLockShare, math.Sqrt(AmountToFloat64(lp.StakeAmount)), totalLongWeight)
-				addStringAmount(breakdown.LiquidityRewards, lp.Address, share)
-				bc.AddLPReward(lp.Address, share)
-			}
+			share := portionFromWeight(lpLongLockShare, weight, totalLongWeight)
+			addStringAmount(breakdown.LiquidityRewards, address, share)
+			bc.AddLPReward(address, share)
 		}
 	}
 
