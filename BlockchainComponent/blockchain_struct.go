@@ -312,6 +312,130 @@ func (bc *Blockchain_struct) HydrateInMemoryBlocksFromDB(keepLastN int) {
 	}
 }
 
+// EnsureRuntimeState repairs nil runtime maps/slices after older DB snapshots
+// are loaded. This keeps old chains/contracts usable after backend upgrades.
+func (bc *Blockchain_struct) EnsureRuntimeState() {
+	if bc == nil {
+		return
+	}
+	if bc.Blocks == nil {
+		bc.Blocks = []*Block{}
+	}
+	if bc.Transaction_pool == nil {
+		bc.Transaction_pool = []*Transaction{}
+	}
+	if bc.Validators == nil {
+		bc.Validators = []*Validator{}
+	}
+	if bc.Accounts == nil {
+		bc.Accounts = make(map[string]*big.Int)
+	}
+	if bc.LiquidityLocks == nil {
+		bc.LiquidityLocks = make(map[string][]LockRecord)
+	}
+	if bc.TotalLiquidity == nil {
+		bc.TotalLiquidity = big.NewInt(0)
+	}
+	if bc.RewardHistory == nil {
+		bc.RewardHistory = []RewardSnapshot{}
+	}
+	if bc.RecentTxs == nil {
+		bc.RecentTxs = []*Transaction{}
+	}
+	if bc.PendingFeePool == nil {
+		bc.PendingFeePool = make(map[string]*big.Int)
+	}
+	if bc.LiquidityProviders == nil {
+		bc.LiquidityProviders = make(map[string]*LiquidityProvider)
+	}
+	if bc.PoolLiquidity == nil {
+		bc.PoolLiquidity = make(map[string]*big.Int)
+	}
+	if bc.UnallocatedLiquidity == nil {
+		bc.UnallocatedLiquidity = big.NewInt(0)
+	}
+	if bc.BridgeRequests == nil {
+		bc.BridgeRequests = make(map[string]*BridgeRequest)
+	}
+	if bc.BridgeTokenMap == nil {
+		bc.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
+	}
+	if bc.BlockVotes == nil {
+		bc.BlockVotes = make(map[string]map[string]bool)
+	}
+	if bc.PendingBlocks == nil {
+		bc.PendingBlocks = make(map[string]*Block)
+	}
+	if bc.ContractEngine != nil && bc.ContractEngine.Registry != nil {
+		bc.ContractEngine.Registry.Blockchain = bc
+	}
+}
+
+func (bc *Blockchain_struct) LatestBlockNumber() uint64 {
+	if bc == nil || len(bc.Blocks) == 0 {
+		return 0
+	}
+	for i := len(bc.Blocks) - 1; i >= 0; i-- {
+		if bc.Blocks[i] != nil {
+			return bc.Blocks[i].BlockNumber
+		}
+	}
+	return 0
+}
+
+func (bc *Blockchain_struct) LatestBlockHash() string {
+	if bc == nil || len(bc.Blocks) == 0 {
+		return ""
+	}
+	for i := len(bc.Blocks) - 1; i >= 0; i-- {
+		if bc.Blocks[i] != nil {
+			return bc.Blocks[i].CurrentHash
+		}
+	}
+	return ""
+}
+
+func (bc *Blockchain_struct) PrunePendingBlocksAtOrBelowTip() {
+	if bc == nil {
+		return
+	}
+	tip := bc.LatestBlockNumber()
+	if tip == 0 {
+		return
+	}
+	for hash, pending := range bc.PendingBlocks {
+		if pending == nil || pending.BlockNumber <= tip {
+			delete(bc.PendingBlocks, hash)
+			delete(bc.BlockVotes, hash)
+		}
+	}
+}
+
+// RecoverInMemoryTipFromDB restores the canonical DB tip without allowing
+// height regression. It is safe to call during stuck-block recovery.
+func (bc *Blockchain_struct) RecoverInMemoryTipFromDB(keepLastN int) (bool, error) {
+	if bc == nil {
+		return false, fmt.Errorf("nil blockchain")
+	}
+	before := bc.LatestBlockNumber()
+	bc.HydrateInMemoryBlocksFromDB(keepLastN)
+	bc.EnsureRuntimeState()
+	bc.PrunePendingBlocksAtOrBelowTip()
+	after := bc.LatestBlockNumber()
+	if before > 0 && after < before {
+		return false, fmt.Errorf("refusing in-memory height regression: before=%d after=%d", before, after)
+	}
+	return after > before, nil
+}
+
+func (bc *Blockchain_struct) AccountBalanceString(address string) string {
+	bal, ok := bc.getAccountBalance(address)
+	if !ok || bal == nil {
+		return "0"
+	}
+	return AmountString(bal)
+}
+
 // Efficient transaction pool cleanup
 func (bc *Blockchain_struct) CleanTransactionPool() {
 	bc.Mutex.Lock()
@@ -344,7 +468,10 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 			log.Printf("Error loading blockchain from DB: %v", err)
 			return nil
 		}
+		blockchainStruct.EnsureRuntimeState()
 		blockchainStruct.HydrateInMemoryBlocksFromDB(1024)
+		blockchainStruct.EnsureRuntimeState()
+		blockchainStruct.PrunePendingBlocksAtOrBelowTip()
 		// Restart network service for loaded blockchain
 		blockchainStruct.Network = NewNetworkService(blockchainStruct)
 		if blockchainStruct.BridgeRequests == nil {
@@ -372,6 +499,14 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 
 		// Dynamic Liquidity Engine — always recreated (not persisted)
 		blockchainStruct.DLEngine = NewDynamicLiquidityEngine()
+		blockchainStruct.EnsureRuntimeState()
+		if tip := blockchainStruct.LatestBlockNumber(); tip > 0 {
+			if blk, err := GetBlockFromDB(tip); err == nil && blk != nil {
+				if err := PutChainDBMetadata(metadataForBlock(blk)); err != nil {
+					log.Printf("Warning: failed to refresh chain DB metadata: %v", err)
+				}
+			}
+		}
 
 		// Start auto mempool cleanup
 		go func() {
@@ -426,6 +561,10 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 
 		// Dynamic Liquidity Engine
 		newBlockchain.DLEngine = NewDynamicLiquidityEngine()
+		newBlockchain.EnsureRuntimeState()
+		if err := SaveBlockToDB(&genesisBlock); err != nil {
+			log.Printf("Failed to save genesis block to block DB: %v", err)
+		}
 
 		// Save to DB
 		blockchainCopy := *newBlockchain

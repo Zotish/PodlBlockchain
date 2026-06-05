@@ -4327,6 +4327,157 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(out)
 }
 
+func (b *BlockchainServer) OperationsSnapshot(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	height, latestHash := b.currentChainTip()
+	dbHeight, dbErr := blockchaincomponent.GetLatestBlockNumberFromDB()
+	meta, metaErr := blockchaincomponent.GetChainDBMetadata()
+	snapshot := map[string]interface{}{
+		"status":            "ok",
+		"height":            height,
+		"latest_block_hash": latestHash,
+		"db_height":         dbHeight,
+		"db_aligned":        dbErr == nil && dbHeight >= height,
+		"db_path":           constantset.BLOCKCHAIN_DB_PATH,
+		"timestamp":         time.Now().Unix(),
+	}
+	if dbErr != nil {
+		snapshot["db_error"] = dbErr.Error()
+	}
+	if metaErr != nil {
+		snapshot["metadata_error"] = metaErr.Error()
+	} else {
+		snapshot["metadata"] = meta
+	}
+
+	if b.BlockchainPtr != nil {
+		b.BlockchainPtr.Mutex.Lock()
+		b.BlockchainPtr.EnsureRuntimeState()
+		peers := []map[string]interface{}{}
+		if b.BlockchainPtr.Network != nil {
+			peers = b.BlockchainPtr.Network.PeerStatusSnapshot()
+		}
+		snapshot["memory_height"] = b.BlockchainPtr.LatestBlockNumber()
+		snapshot["memory_hash"] = b.BlockchainPtr.LatestBlockHash()
+		snapshot["mempool_size"] = len(b.BlockchainPtr.Transaction_pool)
+		snapshot["validators_total"] = len(b.BlockchainPtr.Validators)
+		snapshot["reward_history_entries"] = len(b.BlockchainPtr.RewardHistory)
+		snapshot["pending_blocks"] = len(b.BlockchainPtr.PendingBlocks)
+		snapshot["recent_txs"] = len(b.BlockchainPtr.RecentTxs)
+		snapshot["base_fee"] = b.BlockchainPtr.BaseFee
+		snapshot["local_validator"] = strings.TrimSpace(b.BlockchainPtr.LocalValidator)
+		snapshot["peers"] = peers
+		b.BlockchainPtr.Mutex.Unlock()
+	}
+
+	json.NewEncoder(w).Encode(snapshot)
+}
+
+func (b *BlockchainServer) RecoverTipFromDB(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if b.BlockchainPtr == nil {
+		http.Error(w, "blockchain not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	b.BlockchainPtr.Mutex.Lock()
+	recovered, err := b.BlockchainPtr.RecoverInMemoryTipFromDB(1024)
+	memoryTip := b.BlockchainPtr.LatestBlockNumber()
+	memoryHash := b.BlockchainPtr.LatestBlockHash()
+	b.BlockchainPtr.Mutex.Unlock()
+
+	dbTip, dbErr := blockchaincomponent.GetLatestBlockNumberFromDB()
+	resp := map[string]interface{}{
+		"recovered":   recovered,
+		"memory_tip":  memoryTip,
+		"memory_hash": memoryHash,
+		"db_tip":      dbTip,
+		"timestamp":   time.Now().Unix(),
+	}
+	if dbErr != nil {
+		resp["db_error"] = dbErr.Error()
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (b *BlockchainServer) TreasuryStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	height, latestHash := b.currentChainTip()
+	treasuryAddress := constantset.LiquidityPoolAddress
+	balance := "0"
+	pendingLP := big.NewInt(0)
+	totalLP := big.NewInt(0)
+	rewardEntries := 0
+	var latestReward interface{}
+
+	if b.BlockchainPtr != nil {
+		b.BlockchainPtr.Mutex.Lock()
+		b.BlockchainPtr.EnsureRuntimeState()
+		balance = b.BlockchainPtr.AccountBalanceString(treasuryAddress)
+		for _, lp := range b.BlockchainPtr.LiquidityProviders {
+			if lp == nil {
+				continue
+			}
+			if lp.PendingRewards != nil {
+				pendingLP.Add(pendingLP, lp.PendingRewards)
+			}
+			if lp.TotalRewards != nil {
+				totalLP.Add(totalLP, lp.TotalRewards)
+			}
+		}
+		rewardEntries = len(b.BlockchainPtr.RewardHistory)
+		if rewardEntries > 0 {
+			latestReward = b.BlockchainPtr.RewardHistory[rewardEntries-1]
+		}
+		b.BlockchainPtr.Mutex.Unlock()
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"treasury_address":       treasuryAddress,
+		"balance":                balance,
+		"pending_lp_rewards":     blockchaincomponent.AmountString(pendingLP),
+		"total_lp_rewards":       blockchaincomponent.AmountString(totalLP),
+		"reward_history_entries": rewardEntries,
+		"latest_reward_snapshot": latestReward,
+		"height":                 height,
+		"latest_block_hash":      latestHash,
+		"timestamp":              time.Now().Unix(),
+	})
+}
+
 // GetMempool returns all pending (unconfirmed) transactions so other nodes
 // can pull the mempool on start-up or after reconnecting.
 func (b *BlockchainServer) GetMempool(w http.ResponseWriter, r *http.Request) {
@@ -4447,6 +4598,9 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/peers/add", b.AddPeer)
 	http.HandleFunc("/health", b.HealthCheck)
 	http.HandleFunc("/readiness/mainnet", b.MainnetReadiness)
+	http.HandleFunc("/ops/snapshot", b.OperationsSnapshot)
+	http.HandleFunc("/ops/recover-tip", b.limiter.middleware(b.RecoverTipFromDB))
+	http.HandleFunc("/treasury", b.TreasuryStatus)
 	http.HandleFunc("/mempool", b.GetMempool)
 	http.HandleFunc("/faucet", b.limiter.middleware(b.Faucet))
 	http.HandleFunc("/block/{id}", b.GetBlock)
