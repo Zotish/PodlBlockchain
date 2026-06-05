@@ -10,6 +10,8 @@ For launch hardening checks, read [MAINNET_READINESS.md](./MAINNET_READINESS.md)
 
 For backup, restore, and DB safety, read [DB_SNAPSHOT_RESTORE.md](./DB_SNAPSHOT_RESTORE.md).
 
+For safe deploy, rollback, and long-running soak checks, read [MAINNET_OPERATIONS.md](./MAINNET_OPERATIONS.md).
+
 ## Developer Guide
 For smart contract authoring, deployment, and testing instructions, read [DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md).
 
