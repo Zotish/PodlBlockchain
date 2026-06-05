@@ -6,6 +6,10 @@ This document explains how to run the chain, add validators, and upgrade safely.
 ## Production Guide
 For a full operator, developer, miner, and user handbook, read [PRODUCTION_GUIDE.md](./PRODUCTION_GUIDE.md).
 
+For launch hardening checks, read [MAINNET_READINESS.md](./MAINNET_READINESS.md).
+
+For backup, restore, and DB safety, read [DB_SNAPSHOT_RESTORE.md](./DB_SNAPSHOT_RESTORE.md).
+
 ## Developer Guide
 For smart contract authoring, deployment, and testing instructions, read [DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md).
 
