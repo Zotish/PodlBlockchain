@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -19,6 +20,18 @@ var (
 	dbInstance *leveldb.DB
 	dbErr      error
 )
+
+const (
+	chainDBMetaKey       = "chain_meta"
+	chainDBSchemaVersion = 1
+)
+
+type ChainDBMetadata struct {
+	SchemaVersion int    `json:"schema_version"`
+	LatestBlock   uint64 `json:"latest_block"`
+	LatestHash    string `json:"latest_hash"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
 
 func getDB() (*leveldb.DB, error) {
 	dbOnce.Do(func() {
@@ -34,10 +47,57 @@ func getDB() (*leveldb.DB, error) {
 	return dbInstance, dbErr
 }
 
+func metadataForBlock(block *Block) ChainDBMetadata {
+	meta := ChainDBMetadata{
+		SchemaVersion: chainDBSchemaVersion,
+		UpdatedAt:     time.Now().Unix(),
+	}
+	if block != nil {
+		meta.LatestBlock = block.BlockNumber
+		meta.LatestHash = block.CurrentHash
+	}
+	return meta
+}
+
+func GetChainDBMetadata() (ChainDBMetadata, error) {
+	db, err := getDB()
+	if err != nil {
+		return ChainDBMetadata{}, err
+	}
+	data, err := db.Get([]byte(chainDBMetaKey), nil)
+	if err != nil {
+		return ChainDBMetadata{}, err
+	}
+	var meta ChainDBMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ChainDBMetadata{}, err
+	}
+	return meta, nil
+}
+
+func PutChainDBMetadata(meta ChainDBMetadata) error {
+	db, err := getDB()
+	if err != nil {
+		return err
+	}
+	if meta.SchemaVersion == 0 {
+		meta.SchemaVersion = chainDBSchemaVersion
+	}
+	meta.UpdatedAt = time.Now().Unix()
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return db.Put([]byte(chainDBMetaKey), data, &opt.WriteOptions{Sync: true})
+}
+
 func SaveBlockToDB(block *Block) error {
 	db, err := getDB()
 	if err != nil {
 		return fmt.Errorf("failed to open block DB: %v", err)
+	}
+	if block == nil {
+		return fmt.Errorf("cannot save nil block")
 	}
 
 	// Build block key
@@ -52,10 +112,18 @@ func SaveBlockToDB(block *Block) error {
 	// Use batch write
 	batch := new(leveldb.Batch)
 	batch.Put([]byte(blockKey), blockData)
-	batch.Put([]byte("latest_block"), []byte(blockKey))
+	currentLatest, latestErr := GetLatestBlockNumberFromDB()
+	if latestErr != nil || block.BlockNumber >= currentLatest {
+		batch.Put([]byte("latest_block"), []byte(blockKey))
+		metaData, metaErr := json.Marshal(metadataForBlock(block))
+		if metaErr == nil {
+			batch.Put([]byte(chainDBMetaKey), metaData)
+		}
+	}
 
-	// Fast write (no fsync)
-	if err := db.Write(batch, &opt.WriteOptions{Sync: false}); err != nil {
+	// Finalized block writes are consensus-critical; fsync prevents height
+	// regression after process/container crashes.
+	if err := db.Write(batch, &opt.WriteOptions{Sync: true}); err != nil {
 		return fmt.Errorf("failed to write block batch: %v", err)
 	}
 
@@ -218,7 +286,7 @@ func PutIntoDB(bs Blockchain_struct) error {
 	}
 
 	batch.Put([]byte(constantset.BLOCKCHAIN_KEY), data)
-	return db.Write(batch, &opt.WriteOptions{Sync: false})
+	return db.Write(batch, &opt.WriteOptions{Sync: true})
 }
 
 func GetBlockchain() (*Blockchain_struct, error) {

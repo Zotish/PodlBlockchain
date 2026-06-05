@@ -354,14 +354,14 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	// join that set only after their P2P connection is healthy.
 	finalized := bc.TryFinalizePending(newBlock.CurrentHash, 0.67)
 
-	// Dynamic Liquidity Engine — runs every EpochBlocks, no-op otherwise.
-	if bc.DLEngine != nil {
-		bc.DLEngine.RunEpoch(bc, newBlock.BlockNumber)
-	}
-
 	bc.LastBlockMiningTime = time.Since(start)
 
 	if finalized {
+		// Dynamic Liquidity Engine must only run after finalization; otherwise
+		// failed candidate blocks can mutate strategy state.
+		if bc.DLEngine != nil {
+			bc.DLEngine.RunEpoch(bc, newBlock.BlockNumber)
+		}
 		log.Printf("⛏ Merged Block #%d | tx=%d  | time=%d | gas=%d | reward=%+v",
 			newBlock.BlockNumber,
 			len(finalTxs),
@@ -375,6 +375,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 			len(finalTxs),
 			newBlock.GasUsed,
 		)
+		return nil
 	}
 	log.Printf("Winner %s | validator_participants=%d | participant_txs=%d",
 		newBlock.RewardBreakdown.Validator,

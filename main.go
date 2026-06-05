@@ -60,8 +60,9 @@ func main() {
 		chainCmdSet.Parse(os.Args[2:])
 
 		if chainCmdSet.Parsed() {
-			if *validatorAddress == "" || *stakeAmount <= *minStake {
-				fmt.Println("Error: Validator address and stake amount (> min_stake) are required")
+			posDLMode := strings.TrimSpace(*dexAddress) != "" && strings.TrimSpace(*lpTokenAmount) != ""
+			if *validatorAddress == "" || (!posDLMode && *stakeAmount <= *minStake) {
+				fmt.Println("Error: validator address is required; legacy mode also requires stake_amount > min_stake")
 				chainCmdSet.PrintDefaults()
 				os.Exit(1)
 			}
@@ -73,6 +74,10 @@ func main() {
 			}
 			genesisBlock := canonicalGenesisBlock()
 			bc := blockchaincomponent.NewBlockchain(genesisBlock)
+			if bc == nil {
+				log.Fatal("Failed to initialize blockchain")
+			}
+			bc.EnsureRuntimeState()
 			bc.InitLiquiditySystem()
 			bc.MinStake = *minStake
 
@@ -147,6 +152,7 @@ func main() {
 			bc.Network.SyncAllValidators()
 
 			lastValidatorsSync := time.Time{}
+			stalledFinalizeRounds := 0
 			for {
 				bc.CleanStaleTransactions()
 
@@ -184,15 +190,32 @@ func main() {
 					}
 
 					if strings.EqualFold(validator.Address, bc.LocalValidator) {
+						beforeHeight := bc.LatestBlockNumber()
 						newBlock := bc.MineNewBlock()
+						afterHeight := bc.LatestBlockNumber()
 						if newBlock != nil {
+							stalledFinalizeRounds = 0
 							log.Printf("Mined block #%d", newBlock.BlockNumber)
 
 							if err := bc.Network.BroadcastBlock(newBlock); err != nil {
 								log.Printf("Failed to broadcast block: %v", err)
 							}
+						} else if afterHeight <= beforeHeight {
+							stalledFinalizeRounds++
+							if stalledFinalizeRounds >= 3 {
+								recovered, err := bc.RecoverInMemoryTipFromDB(1024)
+								if err != nil {
+									log.Printf("Block finalization recovery failed: %v", err)
+								} else {
+									log.Printf("Block finalization recovery ran: recovered=%v tip=%d", recovered, bc.LatestBlockNumber())
+								}
+								stalledFinalizeRounds = 0
+							}
+						} else {
+							stalledFinalizeRounds = 0
 						}
 					} else {
+						stalledFinalizeRounds = 0
 						log.Printf("Selected validator is remote: %s (local=%s) — waiting for peer block", validator.Address, bc.LocalValidator)
 					}
 
