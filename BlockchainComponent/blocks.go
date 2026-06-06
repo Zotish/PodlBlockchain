@@ -150,11 +150,18 @@ func (bc *Blockchain_struct) verifyTxWorker(
 func (bc *Blockchain_struct) MineNewBlock() *Block {
 	start := time.Now()
 
+	bc.EnsureRuntimeState()
+	bc.PrunePendingBlocksAtOrBelowTip()
+
 	if len(bc.Blocks) == 0 {
 		return nil
 	}
 
 	lastBlock := bc.Blocks[len(bc.Blocks)-1]
+	if lastBlock == nil || strings.TrimSpace(lastBlock.CurrentHash) == "" {
+		log.Printf("MineNewBlock: refusing to mine on invalid in-memory tip")
+		return nil
+	}
 	baseFee := bc.CalculateBaseFee()
 
 	newBlock := NewBlock(lastBlock.BlockNumber, lastBlock.CurrentHash)

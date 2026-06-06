@@ -13,6 +13,7 @@ import (
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 var (
@@ -64,6 +65,19 @@ func GetChainDBMetadata() (ChainDBMetadata, error) {
 	if err != nil {
 		return ChainDBMetadata{}, err
 	}
+	meta, err := getChainDBMetadataRaw(db)
+	if err != nil || meta.SchemaVersion != chainDBSchemaVersion {
+		return repairChainDBMetadataWithDB(db)
+	}
+
+	if markerLatest, markerErr := getLatestBlockMarkerFromDB(db); markerErr == nil && markerLatest > meta.LatestBlock {
+		return repairChainDBMetadataWithDB(db)
+	}
+
+	return meta, nil
+}
+
+func getChainDBMetadataRaw(db *leveldb.DB) (ChainDBMetadata, error) {
 	data, err := db.Get([]byte(chainDBMetaKey), nil)
 	if err != nil {
 		return ChainDBMetadata{}, err
@@ -130,6 +144,107 @@ func SaveBlockToDB(block *Block) error {
 	return nil
 }
 
+func parseLatestBlockMarker(raw []byte) (uint64, error) {
+	key := strings.TrimSpace(string(raw))
+	key = strings.TrimPrefix(key, "block_")
+	if key == "" {
+		return 0, fmt.Errorf("latest block key missing block number")
+	}
+
+	n, err := strconv.ParseUint(key, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid latest block number %q: %w", key, err)
+	}
+	return n, nil
+}
+
+func getLatestBlockMarkerFromDB(db *leveldb.DB) (uint64, error) {
+	raw, err := db.Get([]byte("latest_block"), nil)
+	if err != nil {
+		return 0, err
+	}
+	return parseLatestBlockMarker(raw)
+}
+
+func discoverLatestBlockNumberFromDB(db *leveldb.DB) (uint64, error) {
+	iter := db.NewIterator(util.BytesPrefix([]byte("block_")), nil)
+	defer iter.Release()
+
+	var latest uint64
+	for iter.Next() {
+		n, err := parseLatestBlockMarker(iter.Key())
+		if err != nil {
+			continue
+		}
+		if n > latest {
+			latest = n
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return 0, err
+	}
+	return latest, nil
+}
+
+func repairChainDBMetadataWithDB(db *leveldb.DB) (ChainDBMetadata, error) {
+	var latest uint64
+
+	scannedLatest, scanErr := discoverLatestBlockNumberFromDB(db)
+	if scanErr != nil {
+		return ChainDBMetadata{}, scanErr
+	}
+	latest = scannedLatest
+
+	// If block records exist, they are the canonical source of truth. Metadata
+	// and latest_block can be stale/corrupt after interrupted deploys, so only
+	// use them when no individual block records are present yet.
+	if latest == 0 {
+		if markerLatest, err := getLatestBlockMarkerFromDB(db); err == nil && markerLatest > latest {
+			latest = markerLatest
+		}
+		if meta, err := getChainDBMetadataRaw(db); err == nil && meta.LatestBlock > latest {
+			latest = meta.LatestBlock
+		}
+	}
+
+	meta := ChainDBMetadata{
+		SchemaVersion: chainDBSchemaVersion,
+		LatestBlock:   latest,
+		UpdatedAt:     time.Now().Unix(),
+	}
+	if latest > 0 {
+		if data, err := db.Get([]byte(fmt.Sprintf("block_%d", latest)), nil); err == nil {
+			var block Block
+			if json.Unmarshal(data, &block) == nil {
+				meta.LatestHash = block.CurrentHash
+			}
+		}
+	}
+
+	batch := new(leveldb.Batch)
+	if latest > 0 {
+		batch.Put([]byte("latest_block"), []byte(fmt.Sprintf("block_%d", latest)))
+	}
+	metaData, err := json.Marshal(meta)
+	if err != nil {
+		return ChainDBMetadata{}, err
+	}
+	batch.Put([]byte(chainDBMetaKey), metaData)
+
+	if err := db.Write(batch, &opt.WriteOptions{Sync: true}); err != nil {
+		return ChainDBMetadata{}, err
+	}
+	return meta, nil
+}
+
+func RepairChainDBMetadata() (ChainDBMetadata, error) {
+	db, err := getDB()
+	if err != nil {
+		return ChainDBMetadata{}, err
+	}
+	return repairChainDBMetadataWithDB(db)
+}
+
 func GetBlockFromDB(blockNumber uint64) (*Block, error) {
 	db, err := getDB()
 	if err != nil {
@@ -183,22 +298,17 @@ func GetLatestBlockNumberFromDB() (uint64, error) {
 		return 0, err
 	}
 
-	raw, err := db.Get([]byte("latest_block"), nil)
-	if err != nil {
-		return 0, err
+	latest, latestErr := getLatestBlockMarkerFromDB(db)
+	if meta, metaErr := getChainDBMetadataRaw(db); metaErr == nil && meta.LatestBlock > latest {
+		latest = meta.LatestBlock
 	}
-
-	key := strings.TrimSpace(string(raw))
-	key = strings.TrimPrefix(key, "block_")
-	if key == "" {
-		return 0, fmt.Errorf("latest block key missing block number")
+	if latest > 0 {
+		return latest, nil
 	}
-
-	n, err := strconv.ParseUint(key, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid latest block number %q: %w", key, err)
+	if latestErr != nil {
+		return 0, latestErr
 	}
-	return n, nil
+	return 0, fmt.Errorf("latest block metadata not found")
 }
 
 func GetRecentBlocksFromDB(limit int) ([]*Block, uint64, error) {

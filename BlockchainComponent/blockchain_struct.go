@@ -29,6 +29,14 @@ const (
 	MaxRecentTxs   = 50000000000000000
 )
 
+func shortHash(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:10] + "..."
+}
+
 type LiquidityProvider struct {
 	Address        string   `json:"address"`
 	StakeAmount    *big.Int `json:"stake_amount"`
@@ -197,6 +205,22 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 		return false
 	}
 
+	if len(bc.Blocks) > 0 {
+		last := bc.Blocks[len(bc.Blocks)-1]
+		expectedNumber := last.BlockNumber + 1
+		if block.BlockNumber != expectedNumber || block.PreviousHash != last.CurrentHash {
+			log.Printf("Rejecting non-extending pending block #%d (expected #%d, prev=%s, tip=%s)",
+				block.BlockNumber,
+				expectedNumber,
+				shortHash(block.PreviousHash),
+				shortHash(last.CurrentHash),
+			)
+			delete(bc.PendingBlocks, blockHash)
+			delete(bc.BlockVotes, blockHash)
+			return false
+		}
+	}
+
 	activeVoters := bc.ActiveVotingSetSize()
 	required := int(math.Ceil(float64(activeVoters) * quorumPercent))
 	if required < 1 {
@@ -212,16 +236,6 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 			block.BlockNumber, hashPreview, len(votes), required, activeVoters, len(bc.Validators))
 		return false
 	}
-
-	if len(bc.Blocks) > 0 {
-		last := bc.Blocks[len(bc.Blocks)-1]
-		if block.BlockNumber <= last.BlockNumber {
-			delete(bc.PendingBlocks, blockHash)
-			delete(bc.BlockVotes, blockHash)
-			return false
-		}
-	}
-
 	bc.Blocks = append(bc.Blocks, block)
 	delete(bc.PendingBlocks, blockHash)
 	delete(bc.BlockVotes, blockHash)
@@ -455,6 +469,11 @@ func (bc *Blockchain_struct) RecoverInMemoryTipFromDB(keepLastN int) (bool, erro
 		return false, fmt.Errorf("nil blockchain")
 	}
 	before := bc.LatestBlockNumber()
+	if meta, err := RepairChainDBMetadata(); err != nil {
+		log.Printf("Warning: failed to repair chain DB metadata during recovery: %v", err)
+	} else if meta.LatestBlock > before {
+		log.Printf("Recovered chain DB metadata tip before hydrate: db_tip=%d memory_tip=%d", meta.LatestBlock, before)
+	}
 	bc.HydrateInMemoryBlocksFromDB(keepLastN)
 	bc.EnsureRuntimeState()
 	bc.PrunePendingBlocksAtOrBelowTip()
@@ -500,6 +519,11 @@ func (bc *Blockchain_struct) CleanTransactionPool() {
 func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 	exist, _ := KeyExist()
 	if exist {
+		if meta, err := RepairChainDBMetadata(); err != nil {
+			log.Printf("Warning: failed to repair chain DB metadata on startup: %v", err)
+		} else if meta.LatestBlock > 0 {
+			log.Printf("Chain DB metadata ready: latest_block=%d latest_hash=%s", meta.LatestBlock, shortHash(meta.LatestHash))
+		}
 		blockchainStruct, err := GetBlockchain()
 		if err != nil {
 			log.Printf("Error loading blockchain from DB: %v", err)
