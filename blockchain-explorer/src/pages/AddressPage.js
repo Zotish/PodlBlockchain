@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import TransactionList from '../components/TransactionList';
-import { formatLQD, toBigIntSafe } from "../utils/lqdUnits";
+import { formatLQD } from "../utils/lqdUnits";
 import {
   fetchDexRegistryTokens,
   fetchJSON,
@@ -15,6 +15,12 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const lower = (value = "") => String(value || "").trim().toLowerCase();
 const sameAddress = (a, b) => lower(a) === lower(b);
 const hasAddress = (value = "") => /^0x[a-fA-F0-9]{40}$/.test(String(value || "").trim());
+const hasPositiveBalance = (value = "0") => {
+  const text = String(value ?? "0").trim();
+  if (!text) return false;
+  const numeric = text.startsWith("0x") ? text.slice(2) : text.replace(/[^0-9]/g, "");
+  return /[1-9]/.test(numeric);
+};
 
 const shortHash = (value = "", start = 10, end = 6) => {
   const text = String(value || "");
@@ -181,20 +187,9 @@ const formatTokenAmount = (raw, decimals = 8) => {
 
 async function fetchCombinedBalance(address) {
   const original = String(address || '').trim();
-  const lowercase = original.toLowerCase();
+  if (!original) return null;
   const primary = firstNodeResult(await fetchJSON(`/balance?address=${encodeURIComponent(original)}`));
-  if (!primary || !original || original === lowercase) return primary;
-  const secondary = firstNodeResult(
-    await fetchJSON(`/balance?address=${encodeURIComponent(lowercase)}`).catch(() => null)
-  );
-  if (!secondary) return primary;
-  return {
-    ...primary,
-    balance: (toBigIntSafe(primary.balance ?? primary.confirmed_balance) + toBigIntSafe(secondary.balance ?? secondary.confirmed_balance)).toString(),
-    confirmed_balance: (toBigIntSafe(primary.confirmed_balance ?? primary.balance) + toBigIntSafe(secondary.confirmed_balance ?? secondary.balance)).toString(),
-    pending_balance_change: (toBigIntSafe(primary.pending_balance_change ?? primary.pending) + toBigIntSafe(secondary.pending_balance_change ?? secondary.pending)).toString(),
-    isValidator: primary.isValidator || secondary.isValidator || false
-  };
+  return primary;
 }
 
 const AddressPage = () => {
@@ -293,7 +288,7 @@ const AddressPage = () => {
         });
         setTransactions(mergedTxs);
         setContractInfo(currentContract);
-        setTokenHoldings(tokenResults.filter((token) => toBigIntSafe(token.balance || "0") > 0n));
+        setTokenHoldings(tokenResults.filter((token) => hasPositiveBalance(token.balance || "0")));
         setNftHoldings(nftResults.filter((nft) => nft.count > 0));
       } catch (err) {
         if (!cancelled) setError(err.message || "Failed to load address details");

@@ -349,25 +349,21 @@ func (bcs *BlockchainServer) GetBalance(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
 
-	address := r.URL.Query().Get("address")
+	address := strings.TrimSpace(r.URL.Query().Get("address"))
 
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
 
-	// Get confirmed balance from accounts
-	confirmedBalance := blockchaincomponent.CopyAmount(bcs.BlockchainPtr.Accounts[address])
-	if confirmedBalance == nil {
-		confirmedBalance = big.NewInt(0)
-	}
+	confirmedBalance := bcs.BlockchainPtr.AccountBalanceAmount(address)
 
 	// Calculate pending balance changes from transaction pool
 	pendingBalanceChange := big.NewInt(0)
 	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
-		if tx.From == address && tx.Status == constantset.StatusPending {
+		if strings.EqualFold(strings.TrimSpace(tx.From), address) && tx.Status == constantset.StatusPending {
 			cost := new(big.Int).Add(blockchaincomponent.CopyAmount(tx.Value), blockchaincomponent.NewAmountFromUint64(tx.GasPrice*tx.CalculateGasCost()))
 			pendingBalanceChange.Sub(pendingBalanceChange, cost)
 		}
-		if tx.To == address && tx.Status == constantset.StatusPending {
+		if strings.EqualFold(strings.TrimSpace(tx.To), address) && tx.Status == constantset.StatusPending {
 			pendingBalanceChange.Add(pendingBalanceChange, blockchaincomponent.CopyAmount(tx.Value))
 		}
 	}
@@ -378,7 +374,8 @@ func (bcs *BlockchainServer) GetBalance(w http.ResponseWriter, r *http.Request) 
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"address":                address,
+		"address":                bcs.BlockchainPtr.CanonicalAccountAddress(address),
+		"requested_address":      address,
 		"balance":                blockchaincomponent.AmountString(totalBalance),
 		"confirmed_balance":      blockchaincomponent.AmountString(confirmedBalance),
 		"pending_balance_change": blockchaincomponent.AmountString(pendingBalanceChange),
@@ -2406,10 +2403,7 @@ func (bcs *BlockchainServer) JSONRPC(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		addr, _ := req.Params[0].(string)
-		bal := blockchaincomponent.CopyAmount(bcs.BlockchainPtr.Accounts[addr])
-		if bal == nil {
-			bal = big.NewInt(0)
-		}
+		bal := bcs.BlockchainPtr.AccountBalanceAmount(addr)
 		resp["result"] = fmt.Sprintf("0x%x", bal)
 	case "eth_getTransactionCount":
 		if len(req.Params) < 1 {
