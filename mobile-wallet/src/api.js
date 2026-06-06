@@ -38,6 +38,80 @@ function contractOutput(data, fallback = "") {
   return String(value);
 }
 
+function normalizeTokenRawBalance(value, fallback = "0") {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "object") return normalizeTokenRawBalance(contractOutput(value, fallback), fallback);
+  const text = String(value).trim();
+  if (!text) return fallback;
+  if (/^0x[0-9a-f]+$/i.test(text)) {
+    try {
+      return BigInt(text).toString();
+    } catch {
+      return fallback;
+    }
+  }
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return fallback;
+  const decimal = match[0];
+  return decimal.includes(".") ? (decimal.split(".")[0] || "0") : decimal;
+}
+
+function safeBig(value) {
+  try {
+    return BigInt(normalizeTokenRawBalance(value, "0"));
+  } catch {
+    return 0n;
+  }
+}
+
+function firstNonZeroTokenBalance(...values) {
+  const normalized = values.map((value) => normalizeTokenRawBalance(value));
+  const found = normalized.find((value) => safeBig(value) > 0n);
+  return found || normalized.find((value) => value !== "0") || "0";
+}
+
+function extractStorageMap(data) {
+  if (!data || typeof data !== "object") return {};
+  return data.storage || data.Storage || data.result?.storage || data.result?.Storage || data.data?.storage || data.data?.Storage || data;
+}
+
+function readStorageValue(storage, key) {
+  if (!storage || !key) return undefined;
+  if (storage[key] !== undefined) return storage[key];
+  const found = Object.keys(storage).find((storedKey) => String(storedKey).toLowerCase() === String(key).toLowerCase());
+  return found ? storage[found] : undefined;
+}
+
+function storageTokenBalance(data, holder) {
+  const storage = extractStorageMap(data);
+  const original = String(holder || "").trim();
+  const lower = original.toLowerCase();
+  const nested = storage.balances || storage.Balances || storage.balanceOf || storage.BalanceOf;
+  if (nested && typeof nested === "object") {
+    const direct = readStorageValue(nested, original) ?? readStorageValue(nested, lower);
+    const normalized = normalizeTokenRawBalance(direct);
+    if (safeBig(normalized) > 0n) return normalized;
+  }
+
+  const keys = [
+    `__bal:${original}`,
+    `__bal:${lower}`,
+    `balances:${original}`,
+    `balances:${lower}`,
+    `balance:${original}`,
+    `balance:${lower}`,
+    `bal:${original}`,
+    `bal:${lower}`,
+    original,
+    lower
+  ];
+  for (const key of keys) {
+    const normalized = normalizeTokenRawBalance(readStorageValue(storage, key));
+    if (safeBig(normalized) > 0n) return normalized;
+  }
+  return "0";
+}
+
 async function tryUrls(urlOrUrls, runner, accept = (result) => result !== null && result !== undefined) {
   const urls = normalizeUrlList(urlOrUrls);
   let lastError = null;
@@ -138,21 +212,11 @@ export async function walletImportPrivateKey(walletUrl, privateKey) {
 
 export async function walletBalance(nodeUrl, address) {
   const original = String(address || "").trim();
-  const lower = original.toLowerCase();
+  if (!original) {
+    return { balance: "0", confirmed_balance: "0", pending_balance_change: "0" };
+  }
   const primary = await getJson(`${normalizeUrl(nodeUrl)}/balance?address=${encodeURIComponent(original)}`);
-  if (!original || original === lower) return primary;
-  const secondary = await getJson(`${normalizeUrl(nodeUrl)}/balance?address=${encodeURIComponent(lower)}`).catch(() => null);
-  if (!secondary) return primary;
-  const read = (data, key, fallbackKey) => String(data?.[key] ?? data?.[fallbackKey] ?? "0");
-  const sum = (...values) => values.reduce((total, value) => {
-    try { return total + BigInt(String(value || "0")); } catch { return total; }
-  }, 0n).toString();
-  return {
-    ...primary,
-    balance: sum(read(primary, "balance", "confirmed_balance"), read(secondary, "balance", "confirmed_balance")),
-    confirmed_balance: sum(read(primary, "confirmed_balance", "balance"), read(secondary, "confirmed_balance", "balance")),
-    pending_balance_change: sum(read(primary, "pending_balance_change", "pending"), read(secondary, "pending_balance_change", "pending")),
-  };
+  return primary;
 }
 
 export async function nodeFaucet(nodeUrl, address) {
@@ -453,6 +517,7 @@ export async function resolveTokenBalance(nodeUrl, walletUrl, contract, holder) 
   const defaultWalletUrl = "http://192.168.45.167:8080";
   const tryFns = ["BalanceOf", "balanceOf"];
   const nodeResult = await tryUrls(urls, async (url) => {
+    const balances = [];
     for (const fn of tryFns) {
       try {
         const res = await nodeCallContract(url, {
@@ -462,20 +527,27 @@ export async function resolveTokenBalance(nodeUrl, walletUrl, contract, holder) 
           args: [holder],
           value: 0,
         });
-        const out = contractOutput(res);
-        if (out !== "" && out != null) return String(out);
+        const out = normalizeTokenRawBalance(contractOutput(res, "0"));
+        balances.push(out);
+        if (safeBig(out) > 0n) return out;
       } catch {
         // continue
       }
     }
-    return null;
+    try {
+      const storage = await nodeContractStorage(url, contract);
+      balances.push(storageTokenBalance(storage, holder));
+    } catch {
+      // storage fallback is best-effort
+    }
+    return firstNonZeroTokenBalance(...balances);
   }, (value) => value !== null).catch(() => null);
 
   if (nodeResult !== null && nodeResult !== undefined) return nodeResult;
 
   try {
     const res = await walletTokenBalance(walletUrl || defaultWalletUrl, contract, holder);
-    return contractOutput(res, "0");
+    return normalizeTokenRawBalance(contractOutput(res, "0"));
   } catch {
     return "0";
   }

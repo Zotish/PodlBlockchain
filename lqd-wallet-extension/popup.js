@@ -251,12 +251,7 @@ async function fetchCombinedBalanceRaw(url, address) {
   if (!original) return "0";
   const primaryRes = await fetch(`${url}/balance?address=${encodeURIComponent(original)}`);
   const primary = await primaryRes.json();
-  const lower = original.toLowerCase();
-  if (original === lower) return readBalanceRaw(primary);
-  const secondary = await fetch(`${url}/balance?address=${encodeURIComponent(lower)}`)
-    .then((res) => res.json())
-    .catch(() => null);
-  return (safeBig(readBalanceRaw(primary)) + safeBig(readBalanceRaw(secondary))).toString();
+  return readBalanceRaw(primary);
 }
 
 function parseAmount(human, decimals = 8) {
@@ -918,6 +913,66 @@ async function fetchTokenMeta(contractAddr, nodeUrl) {
   };
 }
 
+function firstNonZeroTokenBalance(...values) {
+  const normalized = values.map((value) => normalizeTokenRawBalance(value));
+  const found = normalized.find((value) => safeBig(value) > 0n);
+  return found || normalized.find((value) => value !== "0") || "0";
+}
+
+function extractStorageMap(data) {
+  if (!data || typeof data !== "object") return {};
+  return data.storage || data.Storage || data.result?.storage || data.result?.Storage || data.data?.storage || data.data?.Storage || data;
+}
+
+function readStorageValue(storage, key) {
+  if (!storage || !key) return undefined;
+  if (storage[key] !== undefined) return storage[key];
+  const found = Object.keys(storage).find((storedKey) => String(storedKey).toLowerCase() === String(key).toLowerCase());
+  return found ? storage[found] : undefined;
+}
+
+function storageTokenBalance(data, holder) {
+  const storage = extractStorageMap(data);
+  const original = String(holder || "").trim();
+  const lower = original.toLowerCase();
+  const nested = storage.balances || storage.Balances || storage.balanceOf || storage.BalanceOf;
+  if (nested && typeof nested === "object") {
+    const direct = readStorageValue(nested, original) ?? readStorageValue(nested, lower);
+    const normalized = normalizeTokenRawBalance(direct);
+    if (safeBig(normalized) > 0n) return normalized;
+  }
+
+  const keys = [
+    `__bal:${original}`,
+    `__bal:${lower}`,
+    `balances:${original}`,
+    `balances:${lower}`,
+    `balance:${original}`,
+    `balance:${lower}`,
+    `bal:${original}`,
+    `bal:${lower}`,
+    original,
+    lower
+  ];
+  for (const key of keys) {
+    const normalized = normalizeTokenRawBalance(readStorageValue(storage, key));
+    if (safeBig(normalized) > 0n) return normalized;
+  }
+  return "0";
+}
+
+async function fetchTokenBalanceFromStorage(base, contractAddr, walletAddr) {
+  try {
+    const res = await fetch(`${base}/contract/storage?address=${encodeURIComponent(contractAddr)}`);
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = text; }
+    return storageTokenBalance(json, walletAddr);
+  } catch {
+    return "0";
+  }
+}
+
 async function fetchTokenBalance(contractAddr, walletAddr, nodeUrl) {
   let base = (nodeUrl || PROD_CHAIN_URL).replace(/\/$/, "");
   if (isLocalEndpoint(base)) base = PROD_CHAIN_URL;
@@ -935,7 +990,11 @@ async function fetchTokenBalance(contractAddr, walletAddr, nodeUrl) {
   };
   try {
     const upper = await call("BalanceOf");
-    return upper || await call("balanceOf");
+    if (safeBig(upper) > 0n) return upper;
+    const lower = await call("balanceOf");
+    if (safeBig(lower) > 0n) return lower;
+    const storage = await fetchTokenBalanceFromStorage(base, contractAddr, walletAddr);
+    return firstNonZeroTokenBalance(upper, lower, storage);
   } catch { return "0"; }
 }
 

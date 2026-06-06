@@ -105,14 +105,9 @@ async function loadCombinedBalance(address) {
   const original = String(address || "").trim();
   if (!original) return { balance: "0", pending: "0" };
   const primary = await nodeGet(`/balance?address=${encodeURIComponent(original)}`);
-  const lower = original.toLowerCase();
-  if (original === lower) {
-    return { balance: readBalanceRaw(primary), pending: readPendingRaw(primary) };
-  }
-  const secondary = await nodeGet(`/balance?address=${encodeURIComponent(lower)}`).catch(() => null);
   return {
-    balance: (safeBig(readBalanceRaw(primary)) + safeBig(readBalanceRaw(secondary))).toString(),
-    pending: (safeBig(readPendingRaw(primary)) + safeBig(readPendingRaw(secondary))).toString(),
+    balance: readBalanceRaw(primary),
+    pending: readPendingRaw(primary),
   };
 }
 
@@ -562,14 +557,71 @@ async function fetchTokenMeta(addr) {
   const tryCall = async (fn) => {
     try { const r = await contractCall(addr, fn); return contractOutput(r); } catch { return ""; }
   };
-  const [name, symbol, decimals, balance] = await Promise.all([
-    tryCall("Name"), tryCall("Symbol"), tryCall("Decimals"),
-    tryCall(`BalanceOf`).catch(() => "0")
+  const [name, symbol, decimals] = await Promise.all([
+    tryCall("Name"), tryCall("Symbol"), tryCall("Decimals")
   ]);
-  // BalanceOf needs arg
-  let bal = "0";
-  try { const r = await contractCall(addr, "BalanceOf", [state.address]); bal = normalizeTokenRawBalance(contractOutput(r, "0")); } catch { }
+  const bal = await fetchTokenBalanceRaw(addr).catch(() => "0");
   return { name: name || "Unknown", symbol: symbol || addr.slice(2, 6).toUpperCase(), decimals: parseInt(decimals) || 8, balance: bal };
+}
+
+function firstNonZeroTokenBalance(...values) {
+  const normalized = values.map((value) => normalizeTokenRawBalance(value));
+  const found = normalized.find((value) => safeBig(value) > 0n);
+  return found || normalized.find((value) => value !== "0") || "0";
+}
+
+function extractStorageMap(data) {
+  if (!data || typeof data !== "object") return {};
+  return data.storage || data.Storage || data.result?.storage || data.result?.Storage || data.data?.storage || data.data?.Storage || data;
+}
+
+function readStorageValue(storage, key) {
+  if (!storage || !key) return undefined;
+  if (storage[key] !== undefined) return storage[key];
+  const found = Object.keys(storage).find((storedKey) => String(storedKey).toLowerCase() === String(key).toLowerCase());
+  return found ? storage[found] : undefined;
+}
+
+function storageTokenBalance(data, holder) {
+  const storage = extractStorageMap(data);
+  const original = String(holder || "").trim();
+  const lower = original.toLowerCase();
+  const nested = storage.balances || storage.Balances || storage.balanceOf || storage.BalanceOf;
+  if (nested && typeof nested === "object") {
+    const direct = readStorageValue(nested, original) ?? readStorageValue(nested, lower);
+    const normalized = normalizeTokenRawBalance(direct);
+    if (safeBig(normalized) > 0n) return normalized;
+  }
+
+  const keys = [
+    `__bal:${original}`,
+    `__bal:${lower}`,
+    `balances:${original}`,
+    `balances:${lower}`,
+    `balance:${original}`,
+    `balance:${lower}`,
+    `bal:${original}`,
+    `bal:${lower}`,
+    original,
+    lower
+  ];
+  for (const key of keys) {
+    const normalized = normalizeTokenRawBalance(readStorageValue(storage, key));
+    if (safeBig(normalized) > 0n) return normalized;
+  }
+  return "0";
+}
+
+async function fetchTokenBalanceRaw(addr, holder = state.address) {
+  const upper = await contractCall(addr, "BalanceOf", [holder]).catch(() => "0");
+  const upperBalance = normalizeTokenRawBalance(contractOutput(upper, upper));
+  if (safeBig(upperBalance) > 0n) return upperBalance;
+  const lower = await contractCall(addr, "balanceOf", [holder]).catch(() => "0");
+  const lowerBalance = normalizeTokenRawBalance(contractOutput(lower, lower));
+  if (safeBig(lowerBalance) > 0n) return lowerBalance;
+  const storageData = await nodeGet(`/contract/storage?address=${encodeURIComponent(addr)}`).catch(() => null);
+  const storageBalance = storageTokenBalance(storageData, holder);
+  return firstNonZeroTokenBalance(upperBalance, lowerBalance, storageBalance);
 }
 
 function renderTokenList() {
@@ -611,9 +663,9 @@ function renderTokenList() {
 
 async function refreshTokenBal(addr) {
   try {
-    const r = await contractCall(addr, "BalanceOf", [state.address]);
+    const raw = await fetchTokenBalanceRaw(addr);
     const idx = state.tokens.findIndex(t => t.address.toLowerCase() === addr.toLowerCase());
-    if (idx >= 0) { state.tokens[idx].balance = normalizeTokenRawBalance(contractOutput(r, "0")); saveTokens(); renderTokenList(); }
+    if (idx >= 0) { state.tokens[idx].balance = raw; saveTokens(); renderTokenList(); }
   } catch { }
 }
 

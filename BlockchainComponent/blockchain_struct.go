@@ -484,12 +484,42 @@ func (bc *Blockchain_struct) RecoverInMemoryTipFromDB(keepLastN int) (bool, erro
 	return after > before, nil
 }
 
-func (bc *Blockchain_struct) AccountBalanceString(address string) string {
-	bal, ok := bc.getAccountBalance(address)
-	if !ok || bal == nil {
-		return "0"
+func (bc *Blockchain_struct) AccountBalanceAmount(address string) *big.Int {
+	if bc == nil {
+		return big.NewInt(0)
 	}
-	return AmountString(bal)
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return big.NewInt(0)
+	}
+
+	normalized := normalizeAccountAddress(address)
+	total := big.NewInt(0)
+	matched := false
+
+	bc.AccountsMu.RLock()
+	defer bc.AccountsMu.RUnlock()
+	for key, bal := range bc.Accounts {
+		if bal == nil {
+			continue
+		}
+		if key == address || key == normalized || strings.EqualFold(key, address) || strings.EqualFold(normalizeAccountAddress(key), normalized) {
+			total.Add(total, bal)
+			matched = true
+		}
+	}
+	if !matched {
+		return big.NewInt(0)
+	}
+	return CopyAmount(total)
+}
+
+func (bc *Blockchain_struct) CanonicalAccountAddress(address string) string {
+	return normalizeAccountAddress(address)
+}
+
+func (bc *Blockchain_struct) AccountBalanceString(address string) string {
+	return AmountString(bc.AccountBalanceAmount(address))
 }
 
 // Efficient transaction pool cleanup

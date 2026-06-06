@@ -328,10 +328,7 @@ async function callCombinedBalance(address) {
   const original = String(address || "").trim();
   if (!original) return "0";
   const primary = await callNodeGet(`/balance?address=${encodeURIComponent(original)}`);
-  const lower = original.toLowerCase();
-  if (original === lower) return readBalanceRaw(primary);
-  const secondary = await callNodeGet(`/balance?address=${encodeURIComponent(lower)}`).catch(() => null);
-  return (safeBig(readBalanceRaw(primary)) + safeBig(readBalanceRaw(secondary))).toString();
+  return readBalanceRaw(primary);
 }
 async function callWallet(path, body) {
   let res;
