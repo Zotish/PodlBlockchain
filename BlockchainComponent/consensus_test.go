@@ -253,7 +253,10 @@ func TestSlashValidator_DoesNotRemoveDEXBackedValidator(t *testing.T) {
 	}
 }
 
-func TestMonitorValidators_DoesNotPenalizeOfflineDEXValidator(t *testing.T) {
+func TestMonitorValidators_PenalizesOfflineDEXValidatorAfterGrace(t *testing.T) {
+	t.Setenv("LQD_VALIDATOR_OFFLINE_GRACE_ROUNDS", "1")
+	t.Setenv("LQD_VALIDATOR_PENALTY_COOLDOWN_SEC", "0")
+
 	local := makeValidator("0x1111111111111111111111111111111111111111", 1e12, 365)
 	remote := &Validator{
 		Address:            "0x2222222222222222222222222222222222222222",
@@ -274,7 +277,25 @@ func TestMonitorValidators_DoesNotPenalizeOfflineDEXValidator(t *testing.T) {
 	bc.MonitorValidators()
 
 	if remote.PenaltyScore != 0 {
-		t.Fatalf("offline DEX-backed validator should not be penalized by monitor, got %.2f", remote.PenaltyScore)
+		t.Fatalf("first offline miss should stay within grace, got %.2f", remote.PenaltyScore)
+	}
+	if remote.MissedRounds != 1 {
+		t.Fatalf("expected one missed round, got %d", remote.MissedRounds)
+	}
+
+	bc.MonitorValidators()
+
+	if remote.PenaltyScore <= 0 {
+		t.Fatal("offline DEX-backed validator should be penalized after grace")
+	}
+	if remote.MissedRounds < 2 {
+		t.Fatalf("expected missed rounds to accumulate, got %d", remote.MissedRounds)
+	}
+	if remote.SlashReason == "" {
+		t.Fatal("expected slash reason for offline validator")
+	}
+	if len(bc.Validators) != 2 {
+		t.Fatalf("DEX-backed validator should remain registered after penalty, got %d validators", len(bc.Validators))
 	}
 }
 

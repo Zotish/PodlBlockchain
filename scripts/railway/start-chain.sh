@@ -34,8 +34,10 @@ if [ -n "${VALIDATOR_PRIVATE_KEY:-}" ]; then
   set -- "$@" -validator_private_key "$VALIDATOR_PRIVATE_KEY"
 fi
 
-if [ -n "${DEX_ADDRESS:-}" ] && [ -n "${LP_TOKEN_AMOUNT:-}" ]; then
-  set -- "$@" -dex_address "$DEX_ADDRESS" -lp_token_amount "$LP_TOKEN_AMOUNT"
+DEX_ADDRESS_TO_USE="${DEX_ADDRESS:-${VALIDATOR_DEX_ADDRESS:-}}"
+LP_TOKEN_AMOUNT_TO_USE="${LP_TOKEN_AMOUNT:-${VALIDATOR_LP_TOKEN_AMOUNT:-}}"
+if [ -n "$DEX_ADDRESS_TO_USE" ] && [ -n "$LP_TOKEN_AMOUNT_TO_USE" ]; then
+  set -- "$@" -dex_address "$DEX_ADDRESS_TO_USE" -lp_token_amount "$LP_TOKEN_AMOUNT_TO_USE"
 fi
 
 exec "$@"

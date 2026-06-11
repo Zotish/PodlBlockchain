@@ -80,6 +80,32 @@ func NewNetworkService(bc *Blockchain_struct) *NetworkService {
 	return newService
 }
 
+func defaultPeerReputation() float64 {
+	return 0.6
+}
+
+func promotePeerReputation(current, delta float64) float64 {
+	if current <= 0 {
+		current = defaultPeerReputation()
+	}
+	current += delta
+	if current > 1 {
+		return 1
+	}
+	return current
+}
+
+func decayPeerReputation(current float64) float64 {
+	if current <= 0 {
+		current = defaultPeerReputation()
+	}
+	current *= PeerReputationDecay
+	if current < 0 {
+		return 0
+	}
+	return current
+}
+
 func (ns *NetworkService) SetValidatorIdentity(address, privateKey string) {
 	ns.Mutex.Lock()
 	defer ns.Mutex.Unlock()
@@ -367,6 +393,14 @@ func (ns *NetworkService) applyPeerVersion(peer *Peer, peerVersion map[string]in
 		signature, _ := peerVersion["validator_signature"].(string)
 		peer.ValidatorVerified = verifyValidatorHandshake(peer.ValidatorAddress, message, signature)
 	}
+	if peer.Reputation <= 0 {
+		peer.Reputation = defaultPeerReputation()
+	}
+	if peer.ValidatorVerified {
+		peer.Reputation = promotePeerReputation(peer.Reputation, 0.10)
+	} else {
+		peer.Reputation = promotePeerReputation(peer.Reputation, 0.02)
+	}
 	peer.IsActive = true
 	peer.LastSeen = time.Now()
 	peer.LastUpdated = time.Now()
@@ -502,62 +536,29 @@ func (ns *NetworkService) fetchPeerHeight(peer *Peer) error {
 }
 func (ns *NetworkService) processPeerEvents() {
 	for event := range ns.PeerEvents {
-
+		localHeight := ns.bestHeight()
 		ns.Mutex.Lock()
-
 		peer, exists := ns.Peers[peerKey(event.Peer)]
-		if exists {
+		if exists && peer != nil {
 			switch event.Type {
 			case "block":
 				peer.LastSeen = time.Now()
-				// Reward for valid blocks
-				peer.Reputation = min(1.0, peer.Reputation*1.05)
+				peer.IsActive = true
+				peer.Reputation = promotePeerReputation(peer.Reputation, 0.05)
 
 			case "transaction":
 				peer.LastSeen = time.Now()
-				// Small reward for transactions
-				peer.Reputation = min(1.0, peer.Reputation*1.01)
+				peer.IsActive = true
+				peer.Reputation = promotePeerReputation(peer.Reputation, 0.01)
 
 			case "invalid_block":
-				// Penalize for invalid blocks
-				peer.Reputation *= 0.7
+				peer.Reputation = decayPeerReputation(peer.Reputation)
 				log.Printf("Penalized peer %s for invalid block (new reputation: %.2f)",
 					peer.Address, peer.Reputation)
 			}
+			ns.updatePeerSyncStatus(peer, localHeight)
 		}
-
 		ns.Mutex.Unlock()
-
-		// this part is commented because it was past code
-
-		// ns.Mutex.Lock()
-		// peer, exists := ns.Peers[event.Peer.Address]
-		// switch event.Type {
-		// case "block":
-		// 	var block Block
-		// 	if err := json.Unmarshal(event.Data, &block); err != nil {
-		// 		log.Printf("Error decoding block: %v", err)
-		// 		continue
-		// 	}
-
-		// 	// Verify and add block to blockchain
-		// 	if ns.Blockchain.VerifySingleBlock(&block) {
-		// 		ns.Blockchain.Blocks = append(ns.Blockchain.Blocks, &block)
-		// 		ns.Blockchain.Transaction_pool = []*Transaction{} // Clear transaction pool after block is added
-		// 	}
-
-		// case "transaction":
-		// 	var tx Transaction
-		// 	if err := json.Unmarshal(event.Data, &tx); err != nil {
-		// 		log.Printf("Error decoding transaction: %v", err)
-		// 		continue
-		// 	}
-
-		// 	// Verify and add transaction to pool
-		// 	if ns.Blockchain.VerifyTransaction(&tx) {
-		// 		ns.Blockchain.AddNewTxToTheTransaction_pool(&tx)
-		// 	}
-		// }
 	}
 }
 func (ns *NetworkService) acceptConnections() {
@@ -576,25 +577,50 @@ func (ns *NetworkService) maintainPeerConnections() {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		localHeight := ns.bestHeight()
 		ns.Mutex.Lock()
-		for _, peer := range ns.Peers {
-			if time.Since(peer.LastSeen) > 2*PingInterval {
-				delete(ns.Peers, peer.Address)
+		peers := make(map[string]*Peer, len(ns.Peers))
+		for key, peer := range ns.Peers {
+			if peer == nil {
+				delete(ns.Peers, key)
+				continue
+			}
+			if ns.isSelfPeer(peer) {
+				delete(ns.Peers, key)
+				continue
+			}
+			if time.Since(peer.LastSeen) > 4*PingInterval {
+				delete(ns.Peers, key)
 				log.Printf("Removed inactive peer: %s:%d", peer.Address, peer.Port)
 				continue
 			}
-
-			// Send ping
-			go func(p *Peer) {
-				success := ns.sendData(p, []byte(`{"type":"ping"}`))
-				if success {
-					ns.Mutex.Lock()
-					p.LastSeen = time.Now()
-					ns.Mutex.Unlock()
-				}
-			}(peer)
+			peers[key] = peer
 		}
 		ns.Mutex.Unlock()
+
+		for key, peer := range peers {
+			go func(key string, p *Peer) {
+				success := ns.sendData(p, []byte(`{"type":"ping"}`))
+				ns.Mutex.Lock()
+				defer ns.Mutex.Unlock()
+
+				current := ns.Peers[key]
+				if current == nil {
+					return
+				}
+				if success {
+					current.LastSeen = time.Now()
+					current.IsActive = true
+					current.Reputation = promotePeerReputation(current.Reputation, 0.05)
+				} else {
+					current.Reputation = decayPeerReputation(current.Reputation)
+					if current.Reputation < 0.1 {
+						current.IsActive = false
+					}
+				}
+				ns.updatePeerSyncStatus(current, localHeight)
+			}(key, peer)
+		}
 	}
 }
 
