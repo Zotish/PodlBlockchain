@@ -238,15 +238,22 @@ func (bc *Blockchain_struct) CalculateRewardForValidator(totalRewards uint64) ma
 		return map[string]uint64{}
 	}
 
-	// Compute weights
+	type weightedValidator struct {
+		validator *Validator
+		weight    float64
+	}
+
+	eligible := make([]weightedValidator, 0, len(bc.Validators))
 	var sum float64
-	weights := make([]float64, len(bc.Validators))
-	for i, v := range bc.Validators {
-		w := v.LiquidityPower * (1.0 - v.PenaltyScore)
-		if w < 0 {
-			w = 0
+	for _, v := range bc.Validators {
+		if v == nil || !bc.validatorEligibleForParticipantReward(v) {
+			continue
 		}
-		weights[i] = w
+		w := v.LiquidityPower * (1.0 - v.PenaltyScore)
+		if w <= 0 {
+			continue
+		}
+		eligible = append(eligible, weightedValidator{validator: v, weight: w})
 		sum += w
 	}
 
@@ -255,10 +262,10 @@ func (bc *Blockchain_struct) CalculateRewardForValidator(totalRewards uint64) ma
 		return out
 	}
 
-	for i, v := range bc.Validators {
-		portion := uint64(float64(valRewards) * (weights[i] / sum))
+	for _, item := range eligible {
+		portion := uint64(float64(valRewards) * (item.weight / sum))
 		if portion > 0 {
-			out[v.Address] = portion
+			out[item.validator.Address] = portion
 		}
 	}
 	return out

@@ -316,6 +316,32 @@ func TestCalculateRewardForValidator_HigherPowerGetsMore(t *testing.T) {
 	}
 }
 
+func TestCalculateRewardForValidator_ExcludesOfflineDEXValidator(t *testing.T) {
+	localAddr := "0x1111111111111111111111111111111111111111"
+	remoteAddr := "0x2222222222222222222222222222222222222222"
+
+	local := makeValidator(localAddr, 1e12, 365)
+	remote := makeValidator(remoteAddr, 1e12, 365)
+	remote.DEXAddress = "0xpool"
+	remote.PairKey = "LQD/USDT"
+	remote.LPTokenAmount = "100000000"
+	remote.LockedLiquidityUSD = 100000
+	remote.LiquidityPower = 100000
+
+	bc := newBCWithValidators([]*Validator{local, remote})
+	bc.LocalValidator = localAddr
+	bc.Network = NewNetworkService(bc)
+	bc.UpdateLiquidityPower()
+
+	out := bc.CalculateRewardForValidator(1000000000)
+	if reward := out[remoteAddr]; reward != 0 {
+		t.Fatalf("offline DEX validator must not receive participant reward, got %d", reward)
+	}
+	if reward := out[localAddr]; reward == 0 {
+		t.Fatal("local active validator should receive participant reward")
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LockLiquidity / UnlockLiquidity
 // ─────────────────────────────────────────────────────────────────────────────

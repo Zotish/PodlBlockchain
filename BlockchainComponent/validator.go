@@ -49,6 +49,10 @@ type Validator struct {
 	BlocksProposed int       `json:"blocks_proposed"`
 	BlocksIncluded int       `json:"blocks_included"`
 	LastActive     time.Time `json:"last_active"`
+	MissedRounds   int       `json:"missed_rounds,omitempty"`
+	LastPenaltyAt  time.Time `json:"last_penalty_at,omitempty"`
+	JailedUntil    time.Time `json:"jailed_until,omitempty"`
+	SlashReason    string    `json:"slash_reason,omitempty"`
 }
 
 func isDEXBackedValidator(v *Validator) bool {
@@ -513,6 +517,38 @@ func parseEnvFloat(name string) float64 {
 	return v
 }
 
+func parseEnvInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		return fallback
+	}
+	return v
+}
+
+func validatorOfflineGraceRounds() int {
+	return parseEnvInt("LQD_VALIDATOR_OFFLINE_GRACE_ROUNDS", 30)
+}
+
+func validatorPenaltyCooldown() time.Duration {
+	return time.Duration(parseEnvInt("LQD_VALIDATOR_PENALTY_COOLDOWN_SEC", 600)) * time.Second
+}
+
+func validatorJailDuration() time.Duration {
+	return time.Duration(parseEnvInt("LQD_VALIDATOR_JAIL_DURATION_SEC", 3600)) * time.Second
+}
+
+func validatorMaxPenaltyScore() float64 {
+	v := parseEnvFloat("LQD_VALIDATOR_MAX_PENALTY_SCORE")
+	if v > 0 && v <= 1 {
+		return v
+	}
+	return 0.95
+}
+
 func parseInt64(v string) int64 {
 	n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	return n
@@ -524,101 +560,164 @@ func (bc *Blockchain_struct) MonitorValidators() {
 
 	minActiveTime := 5 * time.Minute
 	currentTime := time.Now()
+	localValidator := strings.TrimSpace(bc.LocalValidator)
+	changed := false
 
-	// Build block map for double signing check
-	blockMap := make(map[string]string) // block hash -> validator address
-
+	seenByHeight := make(map[uint64]map[string]string)
 	for _, block := range bc.Blocks {
-		if existing, exists := blockMap[block.CurrentHash]; exists {
-			// Double signing detected!
-			bc.SlashValidator(existing, DoubleSigningPenalty, "double signing")
-			log.Printf("Double signing detected by validator %s for block %s", existing, block.CurrentHash)
+		if block == nil {
+			continue
 		}
-		blockMap[block.CurrentHash] = block.CurrentHash[:42] // Assuming first 42 chars contain validator address
+		validator := strings.TrimSpace(block.RewardBreakdown.Validator)
+		if validator == "" {
+			continue
+		}
+		if seenByHeight[block.BlockNumber] == nil {
+			seenByHeight[block.BlockNumber] = make(map[string]string)
+		}
+		key := strings.ToLower(validator)
+		if existingHash, exists := seenByHeight[block.BlockNumber][key]; exists && existingHash != block.CurrentHash {
+			bc.SlashValidator(validator, DoubleSigningPenalty, "double signing")
+			changed = true
+			log.Printf("Double signing detected by validator %s for height %d", validator, block.BlockNumber)
+		}
+		seenByHeight[block.BlockNumber][key] = block.CurrentHash
 	}
 
 	for _, v := range bc.Validators {
-		if isDEXBackedValidator(v) && !bc.validatorEligibleForParticipantReward(v) {
+		if v == nil {
 			continue
 		}
 
-		// Skip newly added validators
+		if !v.JailedUntil.IsZero() && currentTime.Before(v.JailedUntil) {
+			continue
+		}
+
+		if isDEXBackedValidator(v) {
+			if currentTime.After(v.LockTime) {
+				bc.SlashValidator(v.Address, 0.1, "dex lp lock expired")
+				changed = true
+				log.Printf("PosDL validator %s penalized for expired DEX LP lock", v.Address)
+				continue
+			}
+
+			if !bc.validatorSelectableOnThisNode(v, localValidator) {
+				v.MissedRounds++
+				v.SlashReason = "validator node offline or not synced"
+				changed = true
+				if v.MissedRounds > validatorOfflineGraceRounds() && currentTime.Sub(v.LastPenaltyAt) >= validatorPenaltyCooldown() {
+					bc.SlashValidator(v.Address, 0.05, "validator node offline or not synced")
+					changed = true
+					log.Printf("PosDL validator %s penalized for offline/sync miss rounds=%d", v.Address, v.MissedRounds)
+				}
+				continue
+			}
+
+			if v.MissedRounds != 0 || v.SlashReason == "validator node offline or not synced" {
+				v.MissedRounds = 0
+				v.SlashReason = ""
+				changed = true
+			}
+			if !v.JailedUntil.IsZero() && currentTime.After(v.JailedUntil) {
+				v.JailedUntil = time.Time{}
+				changed = true
+			}
+			v.LastActive = currentTime
+			continue
+		}
+
 		if currentTime.Sub(v.LastActive) < minActiveTime {
 			continue
 		}
 
-		// Check for inactivity
 		if currentTime.Sub(v.LastActive) > InactivityThreshold {
 			bc.SlashValidator(v.Address, 0.05, "inactivity")
+			changed = true
 			log.Printf("Validator %s slashed for inactivity", v.Address)
 			continue
 		}
 
-		// Check performance if validator has proposed blocks
 		if v.BlocksProposed > 0 {
 			successRate := float64(v.BlocksIncluded) / float64(v.BlocksProposed)
 			if successRate < MinPerformanceThreshold {
 				penalty := PerformancePenaltyScale * (1 - successRate)
 				bc.SlashValidator(v.Address, penalty, fmt.Sprintf("poor performance (%.2f%%)", successRate*100))
+				changed = true
 				log.Printf("Validator %s slashed for poor performance (%.2f%%)", v.Address, successRate*100)
 			}
 		}
 
-		// Check stake lock time
 		if currentTime.After(v.LockTime) {
 			bc.SlashValidator(v.Address, 0.1, "stake lock expired")
+			changed = true
 			log.Printf("Validator %s slashed for expired stake lock", v.Address)
 		}
 
-		// Check for sequential missed blocks
 		if v.BlocksProposed > 10 {
 			recentMissRate := float64(v.BlocksProposed-v.BlocksIncluded) / float64(v.BlocksProposed)
 			if recentMissRate > 0.5 {
 				bc.SlashValidator(v.Address, 0.15, "high miss rate")
+				changed = true
 				log.Printf("Validator %s slashed for high miss rate (%.2f%%)", v.Address, recentMissRate*100)
 			}
+		}
+	}
+
+	if changed {
+		dbCopy := *bc
+		dbCopy.Mutex = sync.Mutex{}
+		if err := PutIntoDB(dbCopy); err != nil {
+			log.Printf("Failed to persist validator monitor state: %v", err)
 		}
 	}
 }
 
 func (bc *Blockchain_struct) SlashValidator(add string, penalty float64, reason string) {
+	if penalty <= 0 {
+		penalty = 0.01
+	}
+	now := time.Now()
+	maxPenalty := validatorMaxPenaltyScore()
+
 	for i := 0; i < len(bc.Validators); i++ {
 		v := bc.Validators[i]
-		if v.Address == add {
-			// Calculate penalty based on severity and history
-			effectivePenalty := penalty * (1 + v.PenaltyScore)
+		if v == nil || !strings.EqualFold(v.Address, add) {
+			continue
+		}
 
-			// Cap penalty to prevent complete slashing from single offense
-			if effectivePenalty > 0.3 {
-				effectivePenalty = 0.3
-			}
+		effectivePenalty := penalty * (1 + v.PenaltyScore)
+		if effectivePenalty > 0.3 {
+			effectivePenalty = 0.3
+		}
 
-			if isDEXBackedValidator(v) {
-				// PosDL validators are backed by locked DEX LP positions, not legacy
-				// single-asset stake. Penalize their selection weight without deleting
-				// their registration just because LPStakeAmount is zero.
-				bc.Validators[i].PenaltyScore += 0.1
-				log.Printf("PosDL validator %s penalized (reason: %s, score: %.2f)", add, reason, bc.Validators[i].PenaltyScore)
-				return
-			}
+		updated := bc.Validators[i]
+		updated.PenaltyScore += effectivePenalty
+		if updated.PenaltyScore > maxPenalty {
+			updated.PenaltyScore = maxPenalty
+		}
+		updated.LastPenaltyAt = now
+		updated.SlashReason = reason
+		if updated.PenaltyScore >= maxPenalty {
+			updated.JailedUntil = now.Add(validatorJailDuration())
+		}
 
-			LocalPenalty := v.LPStakeAmount * effectivePenalty
-			bc.SlashingPool += LocalPenalty
-			bc.Validators[i].LPStakeAmount -= LocalPenalty
-
-			// Increase penalty score for future offenses
-			bc.Validators[i].PenaltyScore += 0.1
-
-			// Log the slashing event
-			log.Printf("Validator %s slashed: %f tokens (reason: %s)", add, LocalPenalty, reason)
-
-			if bc.Validators[i].LPStakeAmount < bc.MinStake {
-				bc.Validators = append(bc.Validators[:i], bc.Validators[i+1:]...)
-				i--
-				log.Printf("Validator %s removed due to insufficient stake", add)
-			}
+		if isDEXBackedValidator(v) {
+			log.Printf("PosDL validator %s penalized (reason: %s, penalty: %.4f, score: %.4f, jailed_until: %s)", add, reason, effectivePenalty, updated.PenaltyScore, updated.JailedUntil.Format(time.RFC3339))
 			return
 		}
+
+		localPenalty := v.LPStakeAmount * effectivePenalty
+		bc.SlashingPool += localPenalty
+		updated.LPStakeAmount -= localPenalty
+
+		log.Printf("Validator %s slashed: %f tokens (reason: %s)", add, localPenalty, reason)
+
+		if updated.LPStakeAmount < bc.MinStake {
+			bc.Validators = append(bc.Validators[:i], bc.Validators[i+1:]...)
+			i--
+			log.Printf("Validator %s removed due to insufficient stake", add)
+		}
+		return
 	}
 }
 
@@ -633,6 +732,16 @@ func (bc *Blockchain_struct) validatorSelectableOnThisNode(v *Validator, localVa
 	address := strings.TrimSpace(v.Address)
 	if address == "" {
 		return false
+	}
+	now := time.Now()
+	if v.PenaltyScore >= validatorMaxPenaltyScore() {
+		return false
+	}
+	if !v.JailedUntil.IsZero() {
+		if now.Before(v.JailedUntil) {
+			return false
+		}
+		v.JailedUntil = time.Time{}
 	}
 	if localValidator == "" || strings.EqualFold(address, localValidator) {
 		return true
