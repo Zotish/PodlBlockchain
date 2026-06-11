@@ -151,6 +151,10 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	start := time.Now()
 
 	bc.EnsureRuntimeState()
+	if !bc.EnsureMineableTip(1024) {
+		log.Printf("MineNewBlock: refusing to mine without a valid durable tip")
+		return nil
+	}
 	bc.PrunePendingBlocksAtOrBelowTip()
 
 	if len(bc.Blocks) == 0 {

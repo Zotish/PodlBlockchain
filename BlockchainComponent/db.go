@@ -1,10 +1,16 @@
 package blockchaincomponent
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +30,8 @@ var (
 
 const (
 	chainDBMetaKey       = "chain_meta"
-	chainDBSchemaVersion = 1
+	chainDBSchemaVersion = 2
+	chainDBSnapshotFmt   = "podl-leveldb-jsonl-v1"
 )
 
 type ChainDBMetadata struct {
@@ -32,6 +39,33 @@ type ChainDBMetadata struct {
 	LatestBlock   uint64 `json:"latest_block"`
 	LatestHash    string `json:"latest_hash"`
 	UpdatedAt     int64  `json:"updated_at"`
+	Format        string `json:"format,omitempty"`
+	Compat        string `json:"compat,omitempty"`
+}
+
+type ChainDBContinuityReport struct {
+	LatestBlock   uint64   `json:"latest_block"`
+	CheckedFrom   uint64   `json:"checked_from"`
+	CheckedTo     uint64   `json:"checked_to"`
+	CheckedAt     int64    `json:"checked_at"`
+	Valid         bool     `json:"valid"`
+	MissingBlocks []uint64 `json:"missing_blocks,omitempty"`
+	CorruptBlocks []uint64 `json:"corrupt_blocks,omitempty"`
+}
+
+type ChainDBSnapshotManifest struct {
+	Format        string `json:"format"`
+	SchemaVersion int    `json:"schema_version"`
+	LatestBlock   uint64 `json:"latest_block"`
+	LatestHash    string `json:"latest_hash"`
+	ExportedAt    int64  `json:"exported_at"`
+	KeyCount      uint64 `json:"key_count"`
+	DataSHA256    string `json:"data_sha256"`
+}
+
+type chainDBSnapshotRecord struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 func getDB() (*leveldb.DB, error) {
@@ -52,6 +86,8 @@ func metadataForBlock(block *Block) ChainDBMetadata {
 	meta := ChainDBMetadata{
 		SchemaVersion: chainDBSchemaVersion,
 		UpdatedAt:     time.Now().Unix(),
+		Format:        chainDBSnapshotFmt,
+		Compat:        "append-only-blocks-v1",
 	}
 	if block != nil {
 		meta.LatestBlock = block.BlockNumber
@@ -166,59 +202,90 @@ func getLatestBlockMarkerFromDB(db *leveldb.DB) (uint64, error) {
 	return parseLatestBlockMarker(raw)
 }
 
-func discoverLatestBlockNumberFromDB(db *leveldb.DB) (uint64, error) {
+func discoverBlockNumbersFromDB(db *leveldb.DB) ([]uint64, error) {
 	iter := db.NewIterator(util.BytesPrefix([]byte("block_")), nil)
 	defer iter.Release()
 
-	var latest uint64
+	numbers := []uint64{}
 	for iter.Next() {
 		n, err := parseLatestBlockMarker(iter.Key())
 		if err != nil {
 			continue
 		}
-		if n > latest {
-			latest = n
-		}
+		numbers = append(numbers, n)
 	}
 	if err := iter.Error(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return latest, nil
+	sort.Slice(numbers, func(i, j int) bool { return numbers[i] > numbers[j] })
+	return numbers, nil
+}
+
+func loadBlockFromDBWithHandle(db *leveldb.DB, blockNumber uint64) (*Block, error) {
+	blockKey := fmt.Sprintf("block_%d", blockNumber)
+	data, err := db.Get([]byte(blockKey), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var block Block
+	if err := json.Unmarshal(data, &block); err != nil {
+		return nil, err
+	}
+	if block.BlockNumber != blockNumber {
+		return nil, fmt.Errorf("block key/number mismatch: key=%d block=%d", blockNumber, block.BlockNumber)
+	}
+	if strings.TrimSpace(block.CurrentHash) == "" {
+		return nil, fmt.Errorf("block %d missing current hash", blockNumber)
+	}
+	return &block, nil
+}
+
+func discoverLatestUsableBlockFromDB(db *leveldb.DB) (*Block, error) {
+	numbers, err := discoverBlockNumbersFromDB(db)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range numbers {
+		blk, err := loadBlockFromDBWithHandle(db, n)
+		if err == nil && blk != nil {
+			return blk, nil
+		}
+	}
+	return nil, nil
 }
 
 func repairChainDBMetadataWithDB(db *leveldb.DB) (ChainDBMetadata, error) {
-	var latest uint64
-
-	scannedLatest, scanErr := discoverLatestBlockNumberFromDB(db)
+	latestBlock, scanErr := discoverLatestUsableBlockFromDB(db)
 	if scanErr != nil {
 		return ChainDBMetadata{}, scanErr
 	}
-	latest = scannedLatest
 
 	// If block records exist, they are the canonical source of truth. Metadata
 	// and latest_block can be stale/corrupt after interrupted deploys, so only
 	// use them when no individual block records are present yet.
-	if latest == 0 {
+	latest := uint64(0)
+	latestHash := ""
+	if latestBlock != nil {
+		latest = latestBlock.BlockNumber
+		latestHash = latestBlock.CurrentHash
+	} else {
 		if markerLatest, err := getLatestBlockMarkerFromDB(db); err == nil && markerLatest > latest {
 			latest = markerLatest
 		}
 		if meta, err := getChainDBMetadataRaw(db); err == nil && meta.LatestBlock > latest {
 			latest = meta.LatestBlock
+			latestHash = meta.LatestHash
 		}
 	}
 
 	meta := ChainDBMetadata{
 		SchemaVersion: chainDBSchemaVersion,
 		LatestBlock:   latest,
+		LatestHash:    latestHash,
 		UpdatedAt:     time.Now().Unix(),
-	}
-	if latest > 0 {
-		if data, err := db.Get([]byte(fmt.Sprintf("block_%d", latest)), nil); err == nil {
-			var block Block
-			if json.Unmarshal(data, &block) == nil {
-				meta.LatestHash = block.CurrentHash
-			}
-		}
+		Format:        chainDBSnapshotFmt,
+		Compat:        "append-only-blocks-v1",
 	}
 
 	batch := new(leveldb.Batch)
@@ -245,24 +312,271 @@ func RepairChainDBMetadata() (ChainDBMetadata, error) {
 	return repairChainDBMetadataWithDB(db)
 }
 
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmpPath := path + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func ValidateChainDBContinuity(limit uint64) (ChainDBContinuityReport, error) {
+	db, err := getDB()
+	if err != nil {
+		return ChainDBContinuityReport{}, err
+	}
+
+	meta, err := repairChainDBMetadataWithDB(db)
+	if err != nil {
+		return ChainDBContinuityReport{}, err
+	}
+
+	latest := meta.LatestBlock
+	if limit == 0 || limit > latest {
+		limit = latest
+	}
+	from := uint64(1)
+	if latest > 0 && limit > 0 && latest >= limit {
+		from = latest - limit + 1
+	}
+
+	report := ChainDBContinuityReport{
+		LatestBlock: latest,
+		CheckedFrom: from,
+		CheckedTo:   latest,
+		CheckedAt:   time.Now().Unix(),
+		Valid:       true,
+	}
+
+	var previous *Block
+	for blockNumber := from; blockNumber <= latest && blockNumber > 0; blockNumber++ {
+		key := []byte(fmt.Sprintf("block_%d", blockNumber))
+		has, err := db.Has(key, nil)
+		if err != nil {
+			return report, err
+		}
+		if !has {
+			report.Valid = false
+			report.MissingBlocks = append(report.MissingBlocks, blockNumber)
+			previous = nil
+			continue
+		}
+
+		block, err := loadBlockFromDBWithHandle(db, blockNumber)
+		if err != nil {
+			report.Valid = false
+			report.CorruptBlocks = append(report.CorruptBlocks, blockNumber)
+			previous = nil
+			continue
+		}
+		if previous != nil && block.PreviousHash != previous.CurrentHash {
+			report.Valid = false
+			report.CorruptBlocks = append(report.CorruptBlocks, blockNumber)
+		}
+		previous = block
+	}
+
+	return report, nil
+}
+
+func CreateChainDBSnapshot(snapshotRoot string) (ChainDBSnapshotManifest, string, error) {
+	db, err := getDB()
+	if err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+
+	meta, err := repairChainDBMetadataWithDB(db)
+	if err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+
+	if strings.TrimSpace(snapshotRoot) == "" {
+		snapshotRoot = filepath.Join(filepath.Dir(constantset.BLOCKCHAIN_DB_PATH), "snapshots")
+	}
+	snapshotDir := filepath.Join(snapshotRoot, fmt.Sprintf("chain-snapshot-%d-%d", meta.LatestBlock, time.Now().Unix()))
+	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+
+	dataPath := filepath.Join(snapshotDir, "leveldb.jsonl")
+	tmpPath := dataPath + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+
+	hash := sha256.New()
+	encoder := json.NewEncoder(io.MultiWriter(file, hash))
+	iter := db.NewIterator(nil, nil)
+	keyCount := uint64(0)
+	for iter.Next() {
+		record := chainDBSnapshotRecord{
+			Key:   base64.StdEncoding.EncodeToString(iter.Key()),
+			Value: base64.StdEncoding.EncodeToString(iter.Value()),
+		}
+		if err := encoder.Encode(record); err != nil {
+			iter.Release()
+			file.Close()
+			return ChainDBSnapshotManifest{}, "", err
+		}
+		keyCount++
+	}
+	if err := iter.Error(); err != nil {
+		iter.Release()
+		file.Close()
+		return ChainDBSnapshotManifest{}, "", err
+	}
+	iter.Release()
+
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return ChainDBSnapshotManifest{}, "", err
+	}
+	if err := file.Close(); err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+	if err := os.Rename(tmpPath, dataPath); err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+
+	manifest := ChainDBSnapshotManifest{
+		Format:        chainDBSnapshotFmt,
+		SchemaVersion: chainDBSchemaVersion,
+		LatestBlock:   meta.LatestBlock,
+		LatestHash:    meta.LatestHash,
+		ExportedAt:    time.Now().Unix(),
+		KeyCount:      keyCount,
+		DataSHA256:    hex.EncodeToString(hash.Sum(nil)),
+	}
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+	if err := writeFileAtomic(filepath.Join(snapshotDir, "manifest.json"), manifestBytes, 0644); err != nil {
+		return ChainDBSnapshotManifest{}, "", err
+	}
+
+	return manifest, snapshotDir, nil
+}
+
+func RestoreChainDBSnapshotToPath(snapshotDir string, targetPath string, allowOverwrite bool) error {
+	if strings.TrimSpace(snapshotDir) == "" {
+		return fmt.Errorf("snapshot directory is required")
+	}
+	if strings.TrimSpace(targetPath) == "" {
+		targetPath = constantset.BLOCKCHAIN_DB_PATH
+	}
+
+	manifestBytes, err := os.ReadFile(filepath.Join(snapshotDir, "manifest.json"))
+	if err != nil {
+		return err
+	}
+	var manifest ChainDBSnapshotManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return err
+	}
+	if manifest.Format != chainDBSnapshotFmt {
+		return fmt.Errorf("unsupported chain snapshot format %q", manifest.Format)
+	}
+
+	if _, err := os.Stat(targetPath); err == nil {
+		if !allowOverwrite {
+			return fmt.Errorf("target DB path already exists: %s", targetPath)
+		}
+		backupPath := fmt.Sprintf("%s.pre-restore-%d", targetPath, time.Now().Unix())
+		if err := os.Rename(targetPath, backupPath); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return err
+	}
+	db, err := leveldb.OpenFile(targetPath, &opt.Options{
+		NoSync:      false,
+		WriteBuffer: 64 * opt.MiB,
+	})
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	dataFile, err := os.Open(filepath.Join(snapshotDir, "leveldb.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer dataFile.Close()
+
+	hash := sha256.New()
+	scanner := bufio.NewScanner(dataFile)
+	scanner.Buffer(make([]byte, 1024), 64*1024*1024)
+	batch := new(leveldb.Batch)
+	keyCount := uint64(0)
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		hash.Write(line)
+		hash.Write([]byte("\n"))
+
+		var record chainDBSnapshotRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			return err
+		}
+		key, err := base64.StdEncoding.DecodeString(record.Key)
+		if err != nil {
+			return err
+		}
+		value, err := base64.StdEncoding.DecodeString(record.Value)
+		if err != nil {
+			return err
+		}
+		batch.Put(key, value)
+		keyCount++
+		if keyCount%1000 == 0 {
+			if err := db.Write(batch, &opt.WriteOptions{Sync: true}); err != nil {
+				return err
+			}
+			batch.Reset()
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if batch.Len() > 0 {
+		if err := db.Write(batch, &opt.WriteOptions{Sync: true}); err != nil {
+			return err
+		}
+	}
+
+	if keyCount != manifest.KeyCount {
+		return fmt.Errorf("snapshot key count mismatch: got %d expected %d", keyCount, manifest.KeyCount)
+	}
+	if gotHash := hex.EncodeToString(hash.Sum(nil)); gotHash != manifest.DataSHA256 {
+		return fmt.Errorf("snapshot checksum mismatch: got %s expected %s", gotHash, manifest.DataSHA256)
+	}
+	_, err = repairChainDBMetadataWithDB(db)
+	return err
+}
+
 func GetBlockFromDB(blockNumber uint64) (*Block, error) {
 	db, err := getDB()
 	if err != nil {
 		return nil, err
 	}
-
-	blockKey := fmt.Sprintf("block_%d", blockNumber)
-	data, err := db.Get([]byte(blockKey), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	var block Block
-	if err := json.Unmarshal(data, &block); err != nil {
-		return nil, err
-	}
-
-	return &block, nil
+	return loadBlockFromDBWithHandle(db, blockNumber)
 }
 
 func GetBlockByHashFromDB(hash string) (*Block, error) {
@@ -298,17 +612,35 @@ func GetLatestBlockNumberFromDB() (uint64, error) {
 		return 0, err
 	}
 
-	latest, latestErr := getLatestBlockMarkerFromDB(db)
-	if meta, metaErr := getChainDBMetadataRaw(db); metaErr == nil && meta.LatestBlock > latest {
-		latest = meta.LatestBlock
+	meta, metaErr := getChainDBMetadataRaw(db)
+	if metaErr != nil || meta.SchemaVersion != chainDBSchemaVersion || meta.LatestBlock == 0 {
+		repaired, repairErr := repairChainDBMetadataWithDB(db)
+		if repairErr != nil {
+			return 0, repairErr
+		}
+		if repaired.LatestBlock == 0 {
+			return 0, fmt.Errorf("latest block metadata not found")
+		}
+		return repaired.LatestBlock, nil
 	}
-	if latest > 0 {
-		return latest, nil
+
+	if markerLatest, markerErr := getLatestBlockMarkerFromDB(db); markerErr == nil && markerLatest != meta.LatestBlock {
+		repaired, repairErr := repairChainDBMetadataWithDB(db)
+		if repairErr != nil {
+			return 0, repairErr
+		}
+		return repaired.LatestBlock, nil
 	}
-	if latestErr != nil {
-		return 0, latestErr
+
+	if _, err := loadBlockFromDBWithHandle(db, meta.LatestBlock); err != nil {
+		repaired, repairErr := repairChainDBMetadataWithDB(db)
+		if repairErr != nil {
+			return 0, repairErr
+		}
+		return repaired.LatestBlock, nil
 	}
-	return 0, fmt.Errorf("latest block metadata not found")
+
+	return meta.LatestBlock, nil
 }
 
 func GetRecentBlocksFromDB(limit int) ([]*Block, uint64, error) {

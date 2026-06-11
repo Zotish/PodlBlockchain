@@ -236,6 +236,15 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 			block.BlockNumber, hashPreview, len(votes), required, activeVoters, len(bc.Validators))
 		return false
 	}
+
+	// Disk is the source of truth. Never advance the in-memory tip until the
+	// finalized block has been fsynced to LevelDB, otherwise deploy/restart can
+	// expose a higher memory height than the durable DB height.
+	if err := SaveBlockToDB(block); err != nil {
+		log.Printf("TryFinalizePending: SaveBlockToDB error: %v", err)
+		return false
+	}
+
 	bc.Blocks = append(bc.Blocks, block)
 	delete(bc.PendingBlocks, blockHash)
 	delete(bc.BlockVotes, blockHash)
@@ -260,11 +269,6 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 		}
 	}
 	bc.Transaction_pool = remaining
-
-	// Persist to DB
-	if err := SaveBlockToDB(block); err != nil {
-		log.Printf("TryFinalizePending: SaveBlockToDB error: %v", err)
-	}
 
 	voteCount := len(votes)
 	hashPreview := blockHash
@@ -482,6 +486,34 @@ func (bc *Blockchain_struct) RecoverInMemoryTipFromDB(keepLastN int) (bool, erro
 		return false, fmt.Errorf("refusing in-memory height regression: before=%d after=%d", before, after)
 	}
 	return after > before, nil
+}
+
+func (bc *Blockchain_struct) EnsureMineableTip(keepLastN int) bool {
+	if bc == nil {
+		return false
+	}
+	if len(bc.Blocks) == 0 || bc.LatestBlockHash() == "" {
+		if _, err := bc.RecoverInMemoryTipFromDB(keepLastN); err != nil {
+			log.Printf("EnsureMineableTip: failed to recover empty/corrupt in-memory tip: %v", err)
+		}
+		return len(bc.Blocks) > 0 && strings.TrimSpace(bc.LatestBlockHash()) != ""
+	}
+
+	dbLatest, err := GetLatestBlockNumberFromDB()
+	if err != nil {
+		log.Printf("EnsureMineableTip: failed to read DB tip: %v", err)
+		return true
+	}
+	if dbLatest > bc.LatestBlockNumber() {
+		if _, err := bc.RecoverInMemoryTipFromDB(keepLastN); err != nil {
+			log.Printf("EnsureMineableTip: failed to hydrate higher DB tip %d: %v", dbLatest, err)
+		}
+	}
+
+	if len(bc.Blocks) == 0 || strings.TrimSpace(bc.LatestBlockHash()) == "" {
+		return false
+	}
+	return true
 }
 
 func (bc *Blockchain_struct) AccountBalanceAmount(address string) *big.Int {
