@@ -30,7 +30,8 @@ var (
 
 const (
 	chainDBMetaKey       = "chain_meta"
-	chainDBSchemaVersion = 2
+	chainDBMigrationKey  = "chain_migrations"
+	chainDBSchemaVersion = 3
 	chainDBSnapshotFmt   = "podl-leveldb-jsonl-v1"
 )
 
@@ -61,6 +62,20 @@ type ChainDBSnapshotManifest struct {
 	ExportedAt    int64  `json:"exported_at"`
 	KeyCount      uint64 `json:"key_count"`
 	DataSHA256    string `json:"data_sha256"`
+}
+
+type ChainDBMigrationRecord struct {
+	FromSchema  int    `json:"from_schema"`
+	ToSchema    int    `json:"to_schema"`
+	Name        string `json:"name"`
+	AppliedAt   int64  `json:"applied_at"`
+	LatestBlock uint64 `json:"latest_block"`
+}
+
+type ChainDBMigrationState struct {
+	SchemaVersion int                      `json:"schema_version"`
+	LastAppliedAt int64                    `json:"last_applied_at"`
+	Records       []ChainDBMigrationRecord `json:"records"`
 }
 
 type chainDBSnapshotRecord struct {
@@ -312,6 +327,112 @@ func RepairChainDBMetadata() (ChainDBMetadata, error) {
 	return repairChainDBMetadataWithDB(db)
 }
 
+func RunChainDBMigrations() (ChainDBMigrationState, error) {
+	db, err := getDB()
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+
+	meta, err := repairChainDBMetadataWithDB(db)
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+
+	state := ChainDBMigrationState{}
+	if raw, err := db.Get([]byte(chainDBMigrationKey), nil); err == nil {
+		_ = json.Unmarshal(raw, &state)
+	}
+	if state.SchemaVersion == chainDBSchemaVersion && meta.SchemaVersion == chainDBSchemaVersion {
+		return state, nil
+	}
+
+	fromSchema := meta.SchemaVersion
+	if fromSchema == 0 {
+		fromSchema = 1
+	}
+
+	if raw, err := db.Get([]byte(constantset.BLOCKCHAIN_KEY), nil); err == nil && len(raw) > 0 {
+		var chain Blockchain_struct
+		if err := json.Unmarshal(raw, &chain); err == nil {
+			chain.EnsureRuntimeState()
+			chain.PrunePendingBlocksAtOrBelowTip()
+			chain.Network = nil
+			chain.DLEngine = nil
+			data, marshalErr := json.Marshal(chain)
+			if marshalErr != nil {
+				return ChainDBMigrationState{}, marshalErr
+			}
+			if err := db.Put([]byte(constantset.BLOCKCHAIN_KEY), data, &opt.WriteOptions{Sync: true}); err != nil {
+				return ChainDBMigrationState{}, err
+			}
+		}
+	}
+
+	continuity, err := validateChainDBContinuityWithDB(db, 4096)
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	if !continuity.Valid {
+		return ChainDBMigrationState{}, fmt.Errorf("chain DB continuity check failed during migration: missing=%v corrupt=%v", continuity.MissingBlocks, continuity.CorruptBlocks)
+	}
+
+	latestBlock, err := discoverLatestUsableBlockFromDB(db)
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	meta.SchemaVersion = chainDBSchemaVersion
+	meta.UpdatedAt = time.Now().Unix()
+	if latestBlock != nil {
+		meta.LatestBlock = latestBlock.BlockNumber
+		meta.LatestHash = latestBlock.CurrentHash
+	}
+
+	state.SchemaVersion = chainDBSchemaVersion
+	state.LastAppliedAt = time.Now().Unix()
+	state.Records = append(state.Records, ChainDBMigrationRecord{
+		FromSchema:  fromSchema,
+		ToSchema:    chainDBSchemaVersion,
+		Name:        "runtime-state-and-tip-safety-v3",
+		AppliedAt:   state.LastAppliedAt,
+		LatestBlock: meta.LatestBlock,
+	})
+
+	metaData, err := json.Marshal(meta)
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	batch := new(leveldb.Batch)
+	batch.Put([]byte(chainDBMetaKey), metaData)
+	batch.Put([]byte(chainDBMigrationKey), stateData)
+	if meta.LatestBlock > 0 {
+		batch.Put([]byte("latest_block"), []byte(fmt.Sprintf("block_%d", meta.LatestBlock)))
+	}
+	if err := db.Write(batch, &opt.WriteOptions{Sync: true}); err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	return state, nil
+}
+
+func GetChainDBMigrationState() (ChainDBMigrationState, error) {
+	db, err := getDB()
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	raw, err := db.Get([]byte(chainDBMigrationKey), nil)
+	if err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	var state ChainDBMigrationState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return ChainDBMigrationState{}, err
+	}
+	return state, nil
+}
+
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmpPath := path + ".tmp"
 	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
@@ -337,7 +458,10 @@ func ValidateChainDBContinuity(limit uint64) (ChainDBContinuityReport, error) {
 	if err != nil {
 		return ChainDBContinuityReport{}, err
 	}
+	return validateChainDBContinuityWithDB(db, limit)
+}
 
+func validateChainDBContinuityWithDB(db *leveldb.DB, limit uint64) (ChainDBContinuityReport, error) {
 	meta, err := repairChainDBMetadataWithDB(db)
 	if err != nil {
 		return ChainDBContinuityReport{}, err
@@ -389,6 +513,57 @@ func ValidateChainDBContinuity(limit uint64) (ChainDBContinuityReport, error) {
 	}
 
 	return report, nil
+}
+
+func validateChainDBSnapshotFiles(snapshotDir string) (ChainDBSnapshotManifest, error) {
+	manifestBytes, err := os.ReadFile(filepath.Join(snapshotDir, "manifest.json"))
+	if err != nil {
+		return ChainDBSnapshotManifest{}, err
+	}
+	var manifest ChainDBSnapshotManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return ChainDBSnapshotManifest{}, err
+	}
+	if manifest.Format != chainDBSnapshotFmt {
+		return ChainDBSnapshotManifest{}, fmt.Errorf("unsupported chain snapshot format %q", manifest.Format)
+	}
+
+	dataFile, err := os.Open(filepath.Join(snapshotDir, "leveldb.jsonl"))
+	if err != nil {
+		return ChainDBSnapshotManifest{}, err
+	}
+	defer dataFile.Close()
+
+	hash := sha256.New()
+	scanner := bufio.NewScanner(dataFile)
+	scanner.Buffer(make([]byte, 1024), 64*1024*1024)
+	keyCount := uint64(0)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		hash.Write(line)
+		hash.Write([]byte("\n"))
+		var record chainDBSnapshotRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			return ChainDBSnapshotManifest{}, err
+		}
+		if _, err := base64.StdEncoding.DecodeString(record.Key); err != nil {
+			return ChainDBSnapshotManifest{}, err
+		}
+		if _, err := base64.StdEncoding.DecodeString(record.Value); err != nil {
+			return ChainDBSnapshotManifest{}, err
+		}
+		keyCount++
+	}
+	if err := scanner.Err(); err != nil {
+		return ChainDBSnapshotManifest{}, err
+	}
+	if keyCount != manifest.KeyCount {
+		return ChainDBSnapshotManifest{}, fmt.Errorf("snapshot key count mismatch: got %d expected %d", keyCount, manifest.KeyCount)
+	}
+	if gotHash := hex.EncodeToString(hash.Sum(nil)); gotHash != manifest.DataSHA256 {
+		return ChainDBSnapshotManifest{}, fmt.Errorf("snapshot checksum mismatch: got %s expected %s", gotHash, manifest.DataSHA256)
+	}
+	return manifest, nil
 }
 
 func CreateChainDBSnapshot(snapshotRoot string) (ChainDBSnapshotManifest, string, error) {
@@ -479,16 +654,9 @@ func RestoreChainDBSnapshotToPath(snapshotDir string, targetPath string, allowOv
 		targetPath = constantset.BLOCKCHAIN_DB_PATH
 	}
 
-	manifestBytes, err := os.ReadFile(filepath.Join(snapshotDir, "manifest.json"))
+	manifest, err := validateChainDBSnapshotFiles(snapshotDir)
 	if err != nil {
 		return err
-	}
-	var manifest ChainDBSnapshotManifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-		return err
-	}
-	if manifest.Format != chainDBSnapshotFmt {
-		return fmt.Errorf("unsupported chain snapshot format %q", manifest.Format)
 	}
 
 	if _, err := os.Stat(targetPath); err == nil {

@@ -85,6 +85,26 @@ type DEXValidatorAssessment struct {
 	Reason             string  `json:"reason,omitempty"`
 }
 
+type ValidatorOnboardingStatus struct {
+	Address        string                 `json:"address"`
+	Registered     bool                   `json:"registered"`
+	DEXBacked      bool                   `json:"dex_backed"`
+	Selectable     bool                   `json:"selectable"`
+	VotingEligible bool                   `json:"voting_eligible"`
+	RewardEligible bool                   `json:"reward_eligible"`
+	PeerVerified   bool                   `json:"peer_verified"`
+	PeerActive     bool                   `json:"peer_active"`
+	SyncStatus     string                 `json:"sync_status"`
+	HeightLag      int                    `json:"height_lag"`
+	PenaltyScore   float64                `json:"penalty_score"`
+	MissedRounds   int                    `json:"missed_rounds"`
+	JailedUntil    int64                  `json:"jailed_until,omitempty"`
+	SlashReason    string                 `json:"slash_reason,omitempty"`
+	Requirements   map[string]bool        `json:"requirements"`
+	Peer           map[string]interface{} `json:"peer,omitempty"`
+	NextAction     string                 `json:"next_action,omitempty"`
+}
+
 func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lockDuration time.Duration) error {
 	bc.Mutex.Lock()
 	defer bc.Mutex.Unlock()
@@ -549,6 +569,34 @@ func validatorMaxPenaltyScore() float64 {
 	return 0.95
 }
 
+func validatorEffectiveWeight(v *Validator) float64 {
+	if v == nil {
+		return 0
+	}
+	if !v.LockTime.IsZero() && time.Now().After(v.LockTime) {
+		return 0
+	}
+	power := v.LiquidityPower
+	if power <= 0 {
+		if isDEXBackedValidator(v) {
+			power = v.LPStakeAmount
+			if power <= 0 {
+				return 0
+			}
+		} else {
+			power = legacyLiquidityPower(v.LPStakeAmount, v.LockTime)
+		}
+	}
+	if power <= 0 {
+		return 0
+	}
+	penaltyFactor := 1.0 - v.PenaltyScore
+	if penaltyFactor < 0 {
+		penaltyFactor = 0
+	}
+	return power * penaltyFactor
+}
+
 func parseInt64(v string) int64 {
 	n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	return n
@@ -752,6 +800,20 @@ func (bc *Blockchain_struct) validatorSelectableOnThisNode(v *Validator, localVa
 	return bc.Network.HasVotingPeerForValidator(address, bc.latestBlockNumberForVoting())
 }
 
+func (bc *Blockchain_struct) ValidatorCanVote(address string) bool {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return false
+	}
+	localValidator := strings.TrimSpace(bc.LocalValidator)
+	for _, v := range bc.Validators {
+		if v != nil && strings.EqualFold(v.Address, address) {
+			return bc.validatorSelectableOnThisNode(v, localValidator)
+		}
+	}
+	return false
+}
+
 func (bc *Blockchain_struct) validatorEligibleForParticipantReward(v *Validator) bool {
 	if v == nil {
 		return false
@@ -782,10 +844,7 @@ func (bc *Blockchain_struct) SelectValidator() (Validator, error) {
 		if !bc.validatorSelectableOnThisNode(v, localValidator) {
 			continue
 		}
-		weight := v.LiquidityPower * (1.0 - v.PenaltyScore)
-		if weight < 0 {
-			weight = 0
-		}
+		weight := validatorEffectiveWeight(v)
 		if weight == 0 {
 			continue
 		}
@@ -810,4 +869,93 @@ func (bc *Blockchain_struct) SelectValidator() (Validator, error) {
 	selected.BlocksProposed++
 	selected.LastActive = time.Now()
 	return *selected, nil
+}
+
+func (bc *Blockchain_struct) ValidatorOnboardingReport(address string) ValidatorOnboardingStatus {
+	address = strings.TrimSpace(address)
+	status := ValidatorOnboardingStatus{
+		Address:      address,
+		Requirements: map[string]bool{},
+		NextAction:   "register validator",
+	}
+	if bc == nil || address == "" {
+		return status
+	}
+
+	localValidator := strings.TrimSpace(bc.LocalValidator)
+	var validator *Validator
+	for _, v := range bc.Validators {
+		if v != nil && strings.EqualFold(v.Address, address) {
+			validator = v
+			break
+		}
+	}
+	if validator == nil {
+		status.Requirements["registered"] = false
+		return status
+	}
+
+	status.Registered = true
+	status.DEXBacked = isDEXBackedValidator(validator)
+	status.PenaltyScore = validator.PenaltyScore
+	status.MissedRounds = validator.MissedRounds
+	status.SlashReason = validator.SlashReason
+	if !validator.JailedUntil.IsZero() {
+		status.JailedUntil = validator.JailedUntil.Unix()
+	}
+	status.Selectable = bc.validatorSelectableOnThisNode(validator, localValidator)
+	status.VotingEligible = status.Selectable
+	status.RewardEligible = bc.validatorEligibleForParticipantReward(validator)
+
+	if strings.EqualFold(address, localValidator) {
+		status.PeerVerified = true
+		status.PeerActive = true
+		status.SyncStatus = "local"
+	} else if bc.Network != nil {
+		for _, peer := range bc.Network.PeerStatusSnapshot() {
+			peerAddr, _ := peer["validator_address"].(string)
+			if !strings.EqualFold(peerAddr, address) {
+				continue
+			}
+			status.Peer = peer
+			status.PeerVerified, _ = peer["validator_verified"].(bool)
+			status.PeerActive, _ = peer["is_active"].(bool)
+			status.SyncStatus, _ = peer["sync_status"].(string)
+			switch lag := peer["height_lag"].(type) {
+			case int:
+				status.HeightLag = lag
+			case float64:
+				status.HeightLag = int(lag)
+			}
+			break
+		}
+	}
+
+	status.Requirements["registered"] = status.Registered
+	status.Requirements["dex_or_legacy_stake_valid"] = status.DEXBacked || validator.LPStakeAmount >= bc.MinStake
+	status.Requirements["lock_active"] = time.Now().Before(validator.LockTime)
+	status.Requirements["not_jailed"] = status.JailedUntil == 0 || time.Now().Unix() >= status.JailedUntil
+	status.Requirements["penalty_below_max"] = validator.PenaltyScore < validatorMaxPenaltyScore()
+	status.Requirements["node_online"] = strings.EqualFold(address, localValidator) || status.PeerActive
+	status.Requirements["peer_verified"] = strings.EqualFold(address, localValidator) || status.PeerVerified
+	status.Requirements["near_tip"] = strings.EqualFold(address, localValidator) || status.HeightLag <= peerMaxVotingHeightLag()
+	status.Requirements["voting_eligible"] = status.VotingEligible
+
+	switch {
+	case !status.Requirements["dex_or_legacy_stake_valid"]:
+		status.NextAction = "lock enough canonical DEX LP or legacy stake"
+	case !status.Requirements["lock_active"]:
+		status.NextAction = "renew validator lock"
+	case !status.Requirements["not_jailed"] || !status.Requirements["penalty_below_max"]:
+		status.NextAction = "wait for jail expiry or reduce penalty through clean uptime"
+	case !status.Requirements["node_online"]:
+		status.NextAction = "start validator node and connect it to peers"
+	case !status.Requirements["peer_verified"]:
+		status.NextAction = "start node with validator private key so P2P handshake verifies"
+	case !status.Requirements["near_tip"]:
+		status.NextAction = "let node sync near chain tip"
+	case status.VotingEligible:
+		status.NextAction = "ready for voting rewards"
+	}
+	return status
 }
