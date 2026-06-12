@@ -1061,12 +1061,39 @@ func (bcs *BlockchainServer) ValidatorStats(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
 	address := mux.Vars(r)["address"]
+	if address == "" {
+		address = r.PathValue("address")
+	}
 	stats := bcs.BlockchainPtr.GetValidatorStats(address)
 	if stats == nil {
 		http.Error(w, "validator not found", http.StatusNotFound)
 		return
 	}
+	stats["onboarding"] = bcs.BlockchainPtr.ValidatorOnboardingReport(address)
 	json.NewEncoder(w).Encode(stats)
+}
+
+func (bcs *BlockchainServer) ValidatorOnboarding(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	address := strings.TrimSpace(r.URL.Query().Get("address"))
+	if address == "" {
+		address = strings.TrimSpace(r.PathValue("address"))
+	}
+	if !wallet.ValidateAddress(address) {
+		http.Error(w, "invalid address", http.StatusBadRequest)
+		return
+	}
+	report := bcs.BlockchainPtr.ValidatorOnboardingReport(address)
+	json.NewEncoder(w).Encode(report)
 }
 
 func (bcs *BlockchainServer) NetworkStats(w http.ResponseWriter, r *http.Request) {
@@ -2618,7 +2645,11 @@ func (bcs *BlockchainServer) AddValidator(w http.ResponseWriter, r *http.Request
 		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status": "ok", "address": req.Address, "amount": req.Amount, "minStake": bcs.BlockchainPtr.MinStake,
+		"status":     "ok",
+		"address":    req.Address,
+		"amount":     req.Amount,
+		"minStake":   bcs.BlockchainPtr.MinStake,
+		"onboarding": bcs.BlockchainPtr.ValidatorOnboardingReport(req.Address),
 	})
 }
 
@@ -2668,6 +2699,7 @@ func (bcs *BlockchainServer) RegisterDEXValidator(w http.ResponseWriter, r *http
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":     "ok",
 		"assessment": assessment,
+		"onboarding": bcs.BlockchainPtr.ValidatorOnboardingReport(req.Address),
 	})
 }
 
@@ -4483,6 +4515,7 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 
 	height, latestHash := b.currentChainTip()
 	dbHeight, dbErr := blockchaincomponent.GetLatestBlockNumberFromDB()
+	migrations, migrationErr := blockchaincomponent.GetChainDBMigrationState()
 
 	var memoryHeight uint64
 	mempool := 0
@@ -4554,6 +4587,7 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 
 	addCheck("chain_tip", height > 0 && latestHash != "", true, fmt.Sprintf("height=%d latest_hash=%s", height, latestHash))
 	addCheck("db_persistence", dbErr == nil && dbHeight > 0, true, fmt.Sprintf("db_height=%d", dbHeight))
+	addCheck("db_migrations", migrationErr == nil && migrations.SchemaVersion > 0, true, fmt.Sprintf("schema_version=%d", migrations.SchemaVersion))
 	addCheck("db_tip_alignment", dbErr == nil && dbHeight >= memoryHeight, false, fmt.Sprintf("memory_height=%d db_height=%d", memoryHeight, dbHeight))
 	addCheck("validator_set", validatorsTotal > 0, true, fmt.Sprintf("validators=%d", validatorsTotal))
 	addCheck("voting_capacity", localValidator != "" || votingPeers > 0, true, fmt.Sprintf("local_validator=%s peer_voting=%d", localValidator, votingPeers))
@@ -4581,6 +4615,7 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 		"memory_height":                    memoryHeight,
 		"db_height":                        dbHeight,
 		"db_path":                          constantset.BLOCKCHAIN_DB_PATH,
+		"db_migrations":                    migrations,
 		"mempool":                          mempool,
 		"base_fee":                         baseFee,
 		"validators": map[string]interface{}{
@@ -4597,6 +4632,9 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 	}
 	if dbErr != nil {
 		out["db_error"] = dbErr.Error()
+	}
+	if migrationErr != nil {
+		out["migration_error"] = migrationErr.Error()
 	}
 	json.NewEncoder(w).Encode(out)
 }
@@ -4616,6 +4654,7 @@ func (b *BlockchainServer) OperationsSnapshot(w http.ResponseWriter, r *http.Req
 	height, latestHash := b.currentChainTip()
 	dbHeight, dbErr := blockchaincomponent.GetLatestBlockNumberFromDB()
 	meta, metaErr := blockchaincomponent.GetChainDBMetadata()
+	migrations, migrationErr := blockchaincomponent.GetChainDBMigrationState()
 	snapshot := map[string]interface{}{
 		"status":            "ok",
 		"height":            height,
@@ -4623,6 +4662,7 @@ func (b *BlockchainServer) OperationsSnapshot(w http.ResponseWriter, r *http.Req
 		"db_height":         dbHeight,
 		"db_aligned":        dbErr == nil && dbHeight >= height,
 		"db_path":           constantset.BLOCKCHAIN_DB_PATH,
+		"migrations":        migrations,
 		"timestamp":         time.Now().Unix(),
 	}
 	if dbErr != nil {
@@ -4632,6 +4672,9 @@ func (b *BlockchainServer) OperationsSnapshot(w http.ResponseWriter, r *http.Req
 		snapshot["metadata_error"] = metaErr.Error()
 	} else {
 		snapshot["metadata"] = meta
+	}
+	if migrationErr != nil {
+		snapshot["migration_error"] = migrationErr.Error()
 	}
 
 	if b.BlockchainPtr != nil {
@@ -4695,6 +4738,56 @@ func (b *BlockchainServer) RecoverTipFromDB(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (b *BlockchainServer) ChainDBStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := uint64(4096)
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			limit = parsed
+		}
+	}
+	meta, metaErr := blockchaincomponent.GetChainDBMetadata()
+	migrations, migrationErr := blockchaincomponent.GetChainDBMigrationState()
+	continuity, continuityErr := blockchaincomponent.ValidateChainDBContinuity(limit)
+	dbHeight, dbErr := blockchaincomponent.GetLatestBlockNumberFromDB()
+
+	out := map[string]interface{}{
+		"status":     "ok",
+		"db_path":    constantset.BLOCKCHAIN_DB_PATH,
+		"db_height":  dbHeight,
+		"metadata":   meta,
+		"migrations": migrations,
+		"continuity": continuity,
+		"timestamp":  time.Now().Unix(),
+	}
+	if metaErr != nil {
+		out["metadata_error"] = metaErr.Error()
+	}
+	if migrationErr != nil {
+		out["migration_error"] = migrationErr.Error()
+	}
+	if continuityErr != nil {
+		out["continuity_error"] = continuityErr.Error()
+	}
+	if dbErr != nil {
+		out["db_error"] = dbErr.Error()
+	}
+	if metaErr != nil || continuityErr != nil || dbErr != nil || !continuity.Valid {
+		out["status"] = "action_required"
+	}
+	json.NewEncoder(w).Encode(out)
 }
 
 func (b *BlockchainServer) TreasuryStatus(w http.ResponseWriter, r *http.Request) {
@@ -4867,6 +4960,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/account/{address}/nonce", b.GetAccountNonce)
 	http.HandleFunc("/getheight", b.GetBlockchainHeight)
 	http.HandleFunc("/validator/{address}", b.ValidatorStats)
+	http.HandleFunc("/validator/onboarding", b.ValidatorOnboarding)
 	http.HandleFunc("/network", b.NetworkStats)
 	http.HandleFunc("/peers", b.GetPeers)
 	http.HandleFunc("/peers/add", b.AddPeer)
@@ -4874,6 +4968,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/readiness/mainnet", b.MainnetReadiness)
 	http.HandleFunc("/ops/snapshot", b.OperationsSnapshot)
 	http.HandleFunc("/ops/recover-tip", b.limiter.middleware(b.RecoverTipFromDB))
+	http.HandleFunc("/ops/db", b.ChainDBStatus)
 	http.HandleFunc("/treasury", b.TreasuryStatus)
 	http.HandleFunc("/mempool", b.GetMempool)
 	http.HandleFunc("/faucet", b.limiter.middleware(b.Faucet))

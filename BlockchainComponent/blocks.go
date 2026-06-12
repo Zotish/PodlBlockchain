@@ -156,6 +156,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		return nil
 	}
 	bc.PrunePendingBlocksAtOrBelowTip()
+	bc.PruneExpiredPendingBlocks(2 * time.Minute)
 
 	if len(bc.Blocks) == 0 {
 		return nil

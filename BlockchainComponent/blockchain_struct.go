@@ -135,6 +135,9 @@ type Blockchain_struct struct {
 	LocalValidator     string
 	BlockVotes         map[string]map[string]bool
 	PendingBlocks      map[string]*Block
+	PendingBlockSeenAt map[string]int64                  `json:"pending_block_seen_at,omitempty"`
+	LastFinalizedAt    int64                             `json:"last_finalized_at,omitempty"`
+	recoveryWatchdogOn bool                              `json:"-"`
 	StrategyVaults     map[string]*StrategyVaultPosition `json:"strategy_vaults,omitempty"`
 	StrategyVaultMoves []StrategyVaultMovement           `json:"strategy_vault_moves,omitempty"`
 
@@ -197,6 +200,10 @@ func (bc *Blockchain_struct) AddPendingBlock(block *Block) {
 		return
 	}
 	bc.PendingBlocks[block.CurrentHash] = block
+	if bc.PendingBlockSeenAt == nil {
+		bc.PendingBlockSeenAt = make(map[string]int64)
+	}
+	bc.PendingBlockSeenAt[block.CurrentHash] = time.Now().Unix()
 }
 
 func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent float64) bool {
@@ -246,14 +253,17 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 	}
 
 	bc.Blocks = append(bc.Blocks, block)
+	bc.LastFinalizedAt = time.Now().Unix()
 	delete(bc.PendingBlocks, blockHash)
 	delete(bc.BlockVotes, blockHash)
+	delete(bc.PendingBlockSeenAt, blockHash)
 
 	// Prune stale pending blocks at or below the finalized height
 	for h, pb := range bc.PendingBlocks {
 		if pb.BlockNumber <= block.BlockNumber {
 			delete(bc.PendingBlocks, h)
 			delete(bc.BlockVotes, h)
+			delete(bc.PendingBlockSeenAt, h)
 		}
 	}
 
@@ -415,6 +425,15 @@ func (bc *Blockchain_struct) EnsureRuntimeState() {
 	if bc.PendingBlocks == nil {
 		bc.PendingBlocks = make(map[string]*Block)
 	}
+	if bc.PendingBlockSeenAt == nil {
+		bc.PendingBlockSeenAt = make(map[string]int64)
+		for hash := range bc.PendingBlocks {
+			bc.PendingBlockSeenAt[hash] = time.Now().Unix()
+		}
+	}
+	if bc.LastFinalizedAt == 0 && bc.LatestBlockNumber() > 0 {
+		bc.LastFinalizedAt = time.Now().Unix()
+	}
 	if bc.StrategyVaults == nil {
 		bc.StrategyVaults = make(map[string]*StrategyVaultPosition)
 	}
@@ -462,8 +481,33 @@ func (bc *Blockchain_struct) PrunePendingBlocksAtOrBelowTip() {
 		if pending == nil || pending.BlockNumber <= tip {
 			delete(bc.PendingBlocks, hash)
 			delete(bc.BlockVotes, hash)
+			delete(bc.PendingBlockSeenAt, hash)
 		}
 	}
+}
+
+func (bc *Blockchain_struct) PruneExpiredPendingBlocks(maxAge time.Duration) int {
+	if bc == nil {
+		return 0
+	}
+	if maxAge <= 0 {
+		maxAge = 30 * time.Second
+	}
+	now := time.Now().Unix()
+	removed := 0
+	for hash, pending := range bc.PendingBlocks {
+		seenAt := bc.PendingBlockSeenAt[hash]
+		if pending == nil || seenAt == 0 || now-seenAt > int64(maxAge.Seconds()) {
+			delete(bc.PendingBlocks, hash)
+			delete(bc.BlockVotes, hash)
+			delete(bc.PendingBlockSeenAt, hash)
+			removed++
+		}
+	}
+	if removed > 0 {
+		log.Printf("Pruned %d expired pending blocks", removed)
+	}
+	return removed
 }
 
 // RecoverInMemoryTipFromDB restores the canonical DB tip without allowing
@@ -481,6 +525,7 @@ func (bc *Blockchain_struct) RecoverInMemoryTipFromDB(keepLastN int) (bool, erro
 	bc.HydrateInMemoryBlocksFromDB(keepLastN)
 	bc.EnsureRuntimeState()
 	bc.PrunePendingBlocksAtOrBelowTip()
+	bc.PruneExpiredPendingBlocks(2 * time.Minute)
 	after := bc.LatestBlockNumber()
 	if before > 0 && after < before {
 		return false, fmt.Errorf("refusing in-memory height regression: before=%d after=%d", before, after)
@@ -514,6 +559,33 @@ func (bc *Blockchain_struct) EnsureMineableTip(keepLastN int) bool {
 		return false
 	}
 	return true
+}
+
+func (bc *Blockchain_struct) StartRecoveryWatchdog(interval time.Duration) {
+	if bc == nil || bc.recoveryWatchdogOn {
+		return
+	}
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	bc.recoveryWatchdogOn = true
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			bc.Mutex.Lock()
+			bc.EnsureRuntimeState()
+			dbLatest, err := GetLatestBlockNumberFromDB()
+			if err == nil && dbLatest > bc.LatestBlockNumber() {
+				if _, recoverErr := bc.RecoverInMemoryTipFromDB(1024); recoverErr != nil {
+					log.Printf("Recovery watchdog failed to hydrate DB tip %d: %v", dbLatest, recoverErr)
+				}
+			}
+			bc.PrunePendingBlocksAtOrBelowTip()
+			bc.PruneExpiredPendingBlocks(2 * time.Minute)
+			bc.Mutex.Unlock()
+		}
+	}()
 }
 
 func (bc *Blockchain_struct) AccountBalanceAmount(address string) *big.Int {
@@ -581,6 +653,11 @@ func (bc *Blockchain_struct) CleanTransactionPool() {
 func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 	exist, _ := KeyExist()
 	if exist {
+		if migrations, err := RunChainDBMigrations(); err != nil {
+			log.Printf("Warning: failed to run chain DB migrations on startup: %v", err)
+		} else if migrations.SchemaVersion > 0 {
+			log.Printf("Chain DB migrations ready: schema=%d records=%d", migrations.SchemaVersion, len(migrations.Records))
+		}
 		if meta, err := RepairChainDBMetadata(); err != nil {
 			log.Printf("Warning: failed to repair chain DB metadata on startup: %v", err)
 		} else if meta.LatestBlock > 0 {
@@ -639,6 +716,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 				blockchainStruct.CleanTransactionPool()
 			}
 		}()
+		blockchainStruct.StartRecoveryWatchdog(15 * time.Second)
 
 		return blockchainStruct
 	} else {
@@ -670,6 +748,8 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		newBlockchain.PendingFeePool = make(map[string]*big.Int)
 		newBlockchain.BlockVotes = make(map[string]map[string]bool)
 		newBlockchain.PendingBlocks = make(map[string]*Block)
+		newBlockchain.PendingBlockSeenAt = make(map[string]int64)
+		newBlockchain.LastFinalizedAt = time.Now().Unix()
 		newBlockchain.BridgeRequests = make(map[string]*BridgeRequest)
 		newBlockchain.BridgeTokenMap = make(map[string]*BridgeTokenInfo)
 		if err := newBlockchain.LoadBridgeTokenRegistryIntoState(); err != nil {
@@ -697,6 +777,9 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 			log.Printf("Failed to save blockchain to DB: %v", err)
 			return nil
 		}
+		if _, err := RunChainDBMigrations(); err != nil {
+			log.Printf("Warning: failed to initialize chain DB migration state: %v", err)
+		}
 
 		// Start auto mempool cleanup
 		go func() {
@@ -706,6 +789,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 				newBlockchain.CleanTransactionPool()
 			}
 		}()
+		newBlockchain.StartRecoveryWatchdog(15 * time.Second)
 
 		return newBlockchain
 	}

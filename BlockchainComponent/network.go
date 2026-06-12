@@ -52,6 +52,9 @@ type Peer struct {
 	ValidatorVerified bool      `json:"validator_verified"`
 	SyncStatus        string    `json:"sync_status,omitempty"`
 	HeightLag         int       `json:"height_lag"`
+	SuccessCount      uint64    `json:"success_count,omitempty"`
+	FailureCount      uint64    `json:"failure_count,omitempty"`
+	LastFailure       time.Time `json:"last_failure,omitempty"`
 }
 
 type NetworkService struct {
@@ -104,6 +107,58 @@ func decayPeerReputation(current float64) float64 {
 		return 0
 	}
 	return current
+}
+
+func peerMinReputationThreshold() float64 {
+	if v := parseEnvFloat("LQD_PEER_MIN_REPUTATION"); v > 0 && v < 1 {
+		return v
+	}
+	return MinReputationThreshold
+}
+
+func peerMaxVotingHeightLag() int {
+	return parseEnvInt("LQD_MAX_VOTING_PEER_HEIGHT_LAG", MaxVotingPeerHeightLag)
+}
+
+func peerFailurePenalty() float64 {
+	if v := parseEnvFloat("LQD_PEER_FAILURE_PENALTY"); v > 0 && v < 1 {
+		return v
+	}
+	return 0.15
+}
+
+func recordPeerSuccess(peer *Peer, delta float64) {
+	if peer == nil {
+		return
+	}
+	peer.SuccessCount++
+	peer.Reputation = promotePeerReputation(peer.Reputation, delta)
+	peer.IsActive = true
+	peer.LastSeen = time.Now()
+	peer.LastUpdated = time.Now()
+}
+
+func recordPeerFailure(peer *Peer, reason string) {
+	if peer == nil {
+		return
+	}
+	peer.FailureCount++
+	peer.LastFailure = time.Now()
+	peer.LastUpdated = time.Now()
+	penalty := peerFailurePenalty()
+	if peer.Reputation <= 0 {
+		peer.Reputation = defaultPeerReputation()
+	}
+	peer.Reputation -= penalty
+	if peer.Reputation < 0 {
+		peer.Reputation = 0
+	}
+	if peer.Reputation < peerMinReputationThreshold()/2 {
+		peer.IsActive = false
+	}
+	if reason != "" {
+		log.Printf("Peer %s:%d reputation penalty (%s): %.2f", peer.Address, peer.Port, reason, peer.Reputation)
+	}
 }
 
 func (ns *NetworkService) SetValidatorIdentity(address, privateKey string) {
@@ -434,7 +489,7 @@ func (ns *NetworkService) updatePeerSyncStatus(peer *Peer, localHeight int) {
 	switch {
 	case !peer.IsActive:
 		peer.SyncStatus = "offline"
-	case localHeight > 0 && peer.Height+MaxVotingPeerHeightLag < localHeight:
+	case localHeight > 0 && peer.Height+peerMaxVotingHeightLag() < localHeight:
 		peer.SyncStatus = "syncing"
 	case peer.ValidatorVerified:
 		peer.SyncStatus = "active"
@@ -453,10 +508,10 @@ func (ns *NetworkService) peerVotingEligibleLocked(peer *Peer, localHeight int) 
 	if !peer.ValidatorVerified || strings.TrimSpace(peer.ValidatorAddress) == "" {
 		return false
 	}
-	if peer.Reputation < MinReputationThreshold {
+	if peer.Reputation < peerMinReputationThreshold() {
 		return false
 	}
-	if localHeight > 0 && peer.Height+MaxVotingPeerHeightLag < localHeight {
+	if localHeight > 0 && peer.Height+peerMaxVotingHeightLag() < localHeight {
 		return false
 	}
 	return time.Since(peer.LastSeen) < 2*PingInterval
@@ -511,6 +566,9 @@ func (ns *NetworkService) PeerStatusSnapshot() []map[string]interface{} {
 			"validator_address":  p.ValidatorAddress,
 			"validator_verified": p.ValidatorVerified,
 			"voting_eligible":    ns.peerVotingEligibleLocked(p, localHeight),
+			"success_count":      p.SuccessCount,
+			"failure_count":      p.FailureCount,
+			"last_failure":       p.LastFailure,
 		})
 	}
 	return out
@@ -552,9 +610,7 @@ func (ns *NetworkService) processPeerEvents() {
 				peer.Reputation = promotePeerReputation(peer.Reputation, 0.01)
 
 			case "invalid_block":
-				peer.Reputation = decayPeerReputation(peer.Reputation)
-				log.Printf("Penalized peer %s for invalid block (new reputation: %.2f)",
-					peer.Address, peer.Reputation)
+				recordPeerFailure(peer, "invalid block")
 			}
 			ns.updatePeerSyncStatus(peer, localHeight)
 		}
@@ -609,14 +665,9 @@ func (ns *NetworkService) maintainPeerConnections() {
 					return
 				}
 				if success {
-					current.LastSeen = time.Now()
-					current.IsActive = true
-					current.Reputation = promotePeerReputation(current.Reputation, 0.05)
+					recordPeerSuccess(current, 0.05)
 				} else {
-					current.Reputation = decayPeerReputation(current.Reputation)
-					if current.Reputation < 0.1 {
-						current.IsActive = false
-					}
+					recordPeerFailure(current, "ping failed")
 				}
 				ns.updatePeerSyncStatus(current, localHeight)
 			}(key, peer)
@@ -950,6 +1001,7 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 		// Verify block before processing
 		if !ns.Blockchain.VerifySingleBlock(&block) {
 			log.Printf("Invalid block received from %s", peer.Address)
+			recordPeerFailure(peer, "invalid block")
 			return
 		}
 
@@ -1065,6 +1117,12 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 			return
 		}
 		ns.Blockchain.Mutex.Lock()
+		if !ns.Blockchain.ValidatorCanVote(validator) {
+			ns.Blockchain.Mutex.Unlock()
+			log.Printf("Rejected vote from ineligible validator %s", validator)
+			recordPeerFailure(peer, "ineligible vote")
+			return
+		}
 		alreadySeen := false
 		if ns.Blockchain.BlockVotes != nil {
 			if voters, ok := ns.Blockchain.BlockVotes[hash]; ok && voters != nil {
@@ -1333,7 +1391,7 @@ func (ns *NetworkService) SyncChain() error {
 			continue
 		}
 		// Skip peers with low reputation
-		if peer.Reputation < MinReputationThreshold {
+		if peer.Reputation < peerMinReputationThreshold() {
 			continue
 		}
 
@@ -1364,7 +1422,7 @@ func (ns *NetworkService) SyncChain() error {
 			lastErr = err
 			// Penalize peer for failed sync
 			ns.Mutex.Lock()
-			bestPeer.Reputation *= 0.8
+			recordPeerFailure(bestPeer, "sync failed")
 			ns.Mutex.Unlock()
 			log.Printf("Sync attempt %d failed: %v (peer reputation now: %.2f)",
 				attempt, err, bestPeer.Reputation)
@@ -1373,7 +1431,7 @@ func (ns *NetworkService) SyncChain() error {
 		}
 		// Reward peer for successful sync
 		ns.Mutex.Lock()
-		bestPeer.Reputation = min(1.0, bestPeer.Reputation*1.1)
+		recordPeerSuccess(bestPeer, 0.10)
 		ns.Mutex.Unlock()
 		return nil
 	}
