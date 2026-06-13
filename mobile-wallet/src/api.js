@@ -133,6 +133,9 @@ function requestKey(method, url, body) {
 
 async function requestJson(url, options = {}) {
   const method = options.method || "GET";
+  const maxRetries = Number.isFinite(Number(options.retries))
+    ? Number(options.retries)
+    : (method === "GET" ? 2 : 1);
   const cacheTtlMs = method === "GET" ? Number(options.cacheTtlMs || 0) : 0;
   const cacheKey = cacheTtlMs > 0 ? requestKey(method, url, "") : "";
   if (cacheKey) {
@@ -156,11 +159,13 @@ async function requestJson(url, options = {}) {
     const key = requestKey(method, url, body);
     if (inFlightRequests.has(key)) return inFlightRequests.get(key);
 
-    const requestPromise = fetch(url, {
+    const requestPromise = fetchWithRetry(url, {
       method,
       headers,
       body,
       signal: controller.signal,
+      maxRetries,
+      retryDelayMs: Number(options.retryDelayMs || 450),
     }).then(async (response) => {
       const text = await response.text();
       let data = null;
@@ -188,6 +193,31 @@ async function requestJson(url, options = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function retryableStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url, options) {
+  const { maxRetries = 0, retryDelayMs = 450, ...fetchOptions } = options || {};
+  let lastError = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      const response = await fetch(url, fetchOptions);
+      if (!retryableStatus(response.status) || attempt >= maxRetries) return response;
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxRetries) throw error;
+    }
+    await wait(retryDelayMs * Math.pow(2, attempt));
+  }
+  throw lastError || new Error("Network request failed");
 }
 
 export async function getJson(url, options = {}) {

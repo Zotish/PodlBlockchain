@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PODL health monitor every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Persistent=true
+Unit=podl-monitor.service
+
+[Install]
+WantedBy=timers.target

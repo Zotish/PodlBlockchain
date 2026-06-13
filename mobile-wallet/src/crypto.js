@@ -831,6 +831,99 @@ export function signEip155Tx(params, privKeyHex) {
   return "0x" + uint8ToHex(_rlpEncode(signedFields));
 }
 
+/**
+ * Sign an EIP-191 personal_sign message.
+ * Accepts either a plain UTF-8 string or a 0x-prefixed hex payload.
+ */
+export function signPersonalMessage(message, privKeyHex) {
+  const raw = String(message || "");
+  const body = /^0x[0-9a-fA-F]*$/.test(raw)
+    ? hexToUint8(raw.slice(2))
+    : new TextEncoder().encode(raw);
+  const prefix = new TextEncoder().encode(`\x19Ethereum Signed Message:\n${body.length}`);
+  const digest = keccak256(concatUint8(prefix, body));
+  const [sigBytes, recovery] = secp.signSync(digest, hexToUint8(privKeyHex), { recovered: true, der: false });
+  const v = new Uint8Array([27 + recovery]);
+  return "0x" + uint8ToHex(concatUint8(sigBytes, v));
+}
+
+export function signEd25519Message(message, privKeyHex) {
+  const bytes = typeof message === "string" && /^0x[0-9a-fA-F]*$/.test(message)
+    ? hexToUint8(message.slice(2))
+    : new TextEncoder().encode(String(message || ""));
+  const seed = hexToUint8(privKeyHex).slice(0, 32);
+  const kp = nacl.sign.keyPair.fromSeed(seed);
+  const signature = nacl.sign.detached(bytes, kp.secretKey);
+  return {
+    publicKey: "0x" + uint8ToHex(kp.publicKey),
+    signature: "0x" + uint8ToHex(signature),
+  };
+}
+
+export function signSecp256k1Message(message, privKeyHex) {
+  const bytes = typeof message === "string" && /^0x[0-9a-fA-F]*$/.test(message)
+    ? hexToUint8(message.slice(2))
+    : new TextEncoder().encode(String(message || ""));
+  const digest = sha256(bytes);
+  const [sigBytes, recovery] = secp.signSync(digest, hexToUint8(privKeyHex), { recovered: true, der: false });
+  return {
+    signature: "0x" + uint8ToHex(sigBytes) + (27 + recovery).toString(16).padStart(2, "0"),
+    recovery,
+  };
+}
+
+function uint8ToBase64(u8) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < u8.length; i += 3) {
+    const a = u8[i];
+    const b = i + 1 < u8.length ? u8[i + 1] : 0;
+    const c = i + 2 < u8.length ? u8[i + 2] : 0;
+    const n = (a << 16) | (b << 8) | c;
+    out += chars[(n >> 18) & 63];
+    out += chars[(n >> 12) & 63];
+    out += i + 1 < u8.length ? chars[(n >> 6) & 63] : "=";
+    out += i + 2 < u8.length ? chars[n & 63] : "=";
+  }
+  return out;
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableJson).join(",") + "]";
+  return "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + stableJson(value[key])).join(",") + "}";
+}
+
+export function ed25519PublicKey(privKeyHex, encoding = "hex") {
+  const seed = hexToUint8(privKeyHex).slice(0, 32);
+  const kp = nacl.sign.keyPair.fromSeed(seed);
+  if (encoding === "base58") return base58Encode(kp.publicKey);
+  if (encoding === "base64") return uint8ToBase64(kp.publicKey);
+  return "0x" + uint8ToHex(kp.publicKey);
+}
+
+export function secp256k1CompressedPublicKey(privKeyHex, encoding = "hex") {
+  const pub = secp.getPublicKey(hexToUint8(privKeyHex), true);
+  if (encoding === "base64") return uint8ToBase64(pub);
+  return "0x" + uint8ToHex(pub);
+}
+
+export function signCosmosAminoDoc(signDoc, privKeyHex) {
+  const bytes = new TextEncoder().encode(stableJson(signDoc || {}));
+  const digest = sha256(bytes);
+  const sigBytes = secp.signSync(digest, hexToUint8(privKeyHex), { der: false });
+  return {
+    signed: signDoc,
+    signature: {
+      pub_key: {
+        type: "tendermint/PubKeySecp256k1",
+        value: secp256k1CompressedPublicKey(privKeyHex, "base64"),
+      },
+      signature: uint8ToBase64(sigBytes),
+    },
+  };
+}
+
 // ─── ERC-20 Transfer ABI encoding ────────────────────────────────────────────
 
 export function encodeErc20Transfer(to, amount) {

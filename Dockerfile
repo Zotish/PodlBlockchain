@@ -3,7 +3,7 @@ FROM golang:1.24-bookworm
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates tzdata gcc g++ libc6-dev \
+  && apt-get install -y --no-install-recommends ca-certificates tzdata gcc g++ libc6-dev curl \
   && rm -rf /var/lib/apt/lists/*
 
 COPY go.mod go.sum ./

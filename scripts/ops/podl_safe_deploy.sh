@@ -4,6 +4,9 @@ set -eu
 PODL_ROOT="${PODL_ROOT:-/opt/podl}"
 APP_ROOT="${APP_ROOT:-$PODL_ROOT/app}"
 CHAIN_URL="${CHAIN_URL:-http://127.0.0.1:6500}"
+WALLET_URL="${WALLET_URL:-http://127.0.0.1:8080}"
+AGG_URL="${AGG_URL:-http://127.0.0.1:9000}"
+DEX_API_URL="${DEX_API_URL:-http://127.0.0.1:9100}"
 BRANCH="${BRANCH:-main}"
 COMPOSE="${COMPOSE:-docker compose}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-45}"
@@ -32,13 +35,22 @@ if [ -d "$APP_ROOT/.git" ]; then
   git pull --ff-only origin "$BRANCH"
 fi
 
+cp "$APP_ROOT/deploy/vps/docker-compose.yml" "$PODL_ROOT/docker-compose.yml"
+cp "$APP_ROOT/deploy/vps/Caddyfile" "$PODL_ROOT/Caddyfile"
+
 cd "$PODL_ROOT"
-$COMPOSE up -d --build --remove-orphans
+docker build -t "${LQD_IMAGE:-podl-blockchain:local}" "$APP_ROOT" >/dev/null
+$COMPOSE up -d --no-deps dex-api wallet aggregator caddy >/dev/null
+$COMPOSE up -d --no-deps chain >/dev/null
+$COMPOSE up -d --remove-orphans >/dev/null
 
 ready=false
 i=1
 while [ "$i" -le "$WAIT_ATTEMPTS" ]; do
-  if curl -fsS "$CHAIN_URL/health" >/dev/null 2>&1; then
+  if curl -fsS "$CHAIN_URL/health" >/dev/null 2>&1 \
+    && curl -fsS "$WALLET_URL/health" >/dev/null 2>&1 \
+    && curl -fsS "$AGG_URL/health" >/dev/null 2>&1 \
+    && curl -fsS "$DEX_API_URL/health" >/dev/null 2>&1; then
     ready=true
     break
   fi
