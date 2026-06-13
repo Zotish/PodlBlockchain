@@ -44,6 +44,42 @@ func TestSetCORSHeadersAllowsAdminConsoleOrigin(t *testing.T) {
 	}
 }
 
+func TestSetCORSHeadersAllowsProductionPreviewOrigins(t *testing.T) {
+	for _, origin := range []string{
+		"https://178-105-133-94.sslip.io",
+		"https://api.178-105-133-94.sslip.io",
+		"https://podl-mainnet.netlify.app",
+		"https://podl-explorer.vercel.app",
+	} {
+		req := httptest.NewRequest(http.MethodOptions, "/blocks", nil)
+		req.Header.Set("Origin", origin)
+
+		rr := httptest.NewRecorder()
+		setCORSHeaders(rr, req)
+
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != origin {
+			t.Fatalf("expected production origin %s to be allowed, got %q", origin, got)
+		}
+		if !strings.Contains(rr.Header().Get("Access-Control-Allow-Methods"), "OPTIONS") {
+			t.Fatalf("expected OPTIONS in allowed methods, got %q", rr.Header().Get("Access-Control-Allow-Methods"))
+		}
+	}
+}
+
+func TestSetCORSHeadersAllowsWildcardEnvOrigin(t *testing.T) {
+	t.Setenv("LQD_ALLOWED_ORIGINS", "*")
+	origin := "https://custom-explorer.example.com"
+	req := httptest.NewRequest(http.MethodOptions, "/balance", nil)
+	req.Header.Set("Origin", origin)
+
+	rr := httptest.NewRecorder()
+	setCORSHeaders(rr, req)
+
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != origin {
+		t.Fatalf("expected env wildcard origin to be reflected, got %q", got)
+	}
+}
+
 func TestGetBridgeFamiliesReturnsJSONAndCORS(t *testing.T) {
 	server := NewBlockchainServer(6500, &blockchaincomponent.Blockchain_struct{})
 	req := httptest.NewRequest(http.MethodGet, "/bridge/families", nil)
