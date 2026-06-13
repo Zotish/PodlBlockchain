@@ -49,3 +49,37 @@ func TestStrategyVaultDepositRebalanceWithdraw(t *testing.T) {
 		t.Fatalf("expected withdrawn status, got %q", withdrawn.Status)
 	}
 }
+
+func TestStrategyVaultSafetyRollbackKeepsCurrentPool(t *testing.T) {
+	oldPersist := persistRuntimeState
+	persistRuntimeState = func(Blockchain_struct) error { return nil }
+	defer func() { persistRuntimeState = oldPersist }()
+
+	bc := &Blockchain_struct{}
+	owner := "0xad3606E1ddA48BAF4653d8185B667390a1a5D9c6"
+	pos, err := bc.StrategyVaultDeposit(owner, "LQD/USDT", "lqd", "usdt", big.NewInt(100), big.NewInt(200))
+	if err != nil {
+		t.Fatalf("deposit failed: %v", err)
+	}
+	if _, err := bc.SetStrategyVaultSafety(9950, 10000, 0); err != nil {
+		t.Fatalf("set safety failed: %v", err)
+	}
+
+	move, err := bc.StrategyVaultRebalance(pos.ID, "LQD/ETH", 9900, "oracle-signal")
+	if err == nil {
+		t.Fatal("expected rebalance below safety floor to fail")
+	}
+	if move == nil || move.Status != "rolled_back" {
+		t.Fatalf("expected rolled_back movement, got %#v", move)
+	}
+	positions := bc.StrategyVaultStatus(owner)
+	if len(positions) != 1 {
+		t.Fatalf("expected one position, got %d", len(positions))
+	}
+	if positions[0].CurrentPool != "LQD/USDT" {
+		t.Fatalf("current pool changed on failed rebalance: %q", positions[0].CurrentPool)
+	}
+	if len(bc.StrategyVaultMoves) != 1 || bc.StrategyVaultMoves[0].Status != "rolled_back" {
+		t.Fatalf("expected rollback audit movement, got %#v", bc.StrategyVaultMoves)
+	}
+}

@@ -55,6 +55,8 @@ export async function waitForTx(txHash, timeoutMs = 20000) {
           const hash = tx?.tx_hash || tx?.TxHash || tx?.hash;
           return hash && String(hash).toLowerCase() === target;
         });
+        const status = String(found?.status || found?.Status || "").toLowerCase();
+        if (found && status === "failed") return found;
         if (found && (found.source === "block" || found.block_number !== undefined)) return found;
       }
     } catch {}
@@ -186,6 +188,64 @@ export async function getCurrentDexFactory() {
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (!res.ok) throw new Error(data.error || text || "Failed to fetch current DEX factory");
   return data?.address || "";
+}
+
+export async function getDynamicLiquidityStatus() {
+  const res = await fetch(`${getNodeUrl()}/liquidity/dynamic/status`);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || text || "Failed to fetch dynamic liquidity status");
+  return data;
+}
+
+export async function triggerDynamicLiquidity({ apiKey = "", reason = "keeper-ui" } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+  const res = await fetch(`${getNodeUrl()}/liquidity/dynamic/trigger`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ reason })
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || text || "Dynamic liquidity trigger failed");
+  return data;
+}
+
+export async function setDynamicLiquidityOracle({ pairAddress, demandBps, source = "keeper-ui", apiKey = "" }) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+  const res = await fetch(`${getNodeUrl()}/liquidity/dynamic/oracle`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ pair_address: pairAddress, demand_bps: Number(demandBps), source })
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || text || "Oracle signal update failed");
+  return data;
+}
+
+export async function setStrategyVaultSafety({ minOutBps, maxMoveBps, minRebalanceIntervalS, apiKey = "" }) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+  const res = await fetch(`${getNodeUrl()}/liquidity/vault/safety`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      min_out_bps: Number(minOutBps),
+      max_move_bps: Number(maxMoveBps),
+      min_rebalance_interval_s: Number(minRebalanceIntervalS)
+    })
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || text || "Vault safety update failed");
+  return data;
 }
 
 export async function getContractAbi(address) {

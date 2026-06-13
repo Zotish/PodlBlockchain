@@ -180,6 +180,10 @@ const TokenPage = () => {
   const [registryTokens, setRegistryTokens] = useState([]);
   const [registryPools, setRegistryPools] = useState([]);
   const [storage, setStorage] = useState({});
+  const [indexedHolders, setIndexedHolders] = useState([]);
+  const [verification, setVerification] = useState(null);
+  const [verifySource, setVerifySource] = useState('');
+  const [verifyMessage, setVerifyMessage] = useState('');
   const [transactions, setTransactions] = useState([]);
   const [activeTab, setActiveTab] = useState('transfers');
   const [loading, setLoading] = useState(true);
@@ -190,17 +194,21 @@ const TokenPage = () => {
     try {
       setLoading(true);
       setError('');
-      const [contractData, registryTokenData, registryPoolData, storageData, txPage] = await Promise.all([
+      const [contractData, registryTokenData, registryPoolData, storageData, txPage, holderData, verificationData] = await Promise.all([
         fetchJSON('/contract/list', { cacheTtlMs: 5000, timeoutMs: 10000 }).catch(() => []),
         fetchDexRegistryTokens().catch(() => []),
         fetchDexRegistryPools().catch(() => []),
         fetchJSON(`/contract/storage?address=${address}`, { cacheTtlMs: 5000, timeoutMs: 10000 }).catch(() => ({})),
         fetchHistoricalTransactionPage(1, 250).catch(() => ({ transactions: [] })),
+        fetchJSON(`/token/${address}/holders`, { cacheTtlMs: 5000, timeoutMs: 10000 }).catch(() => null),
+        fetchJSON(`/contract/verification?address=${address}`, { cacheTtlMs: 5000, timeoutMs: 10000 }).catch(() => null),
       ]);
       setContracts((Array.isArray(contractData) ? contractData : mergeArrayResults(contractData, 'address')).map(normalizeContract));
       setRegistryTokens(Array.isArray(registryTokenData) ? registryTokenData.map(normalizeRegistryToken) : []);
       setRegistryPools(Array.isArray(registryPoolData) ? registryPoolData : []);
       setStorage(extractStorage(storageData));
+      setIndexedHolders(Array.isArray(holderData?.holders) ? holderData.holders : []);
+      setVerification(verificationData?.contract || null);
       setTransactions((txPage.transactions || []).filter((tx) => txMatchesToken(tx, address)));
     } catch (err) {
       setError(err.message || 'Failed to load token details');
@@ -236,7 +244,42 @@ const TokenPage = () => {
     };
   }, [address, contracts, registryTokens, storage]);
 
-  const holders = useMemo(() => parseHolders(storage, token.decimals), [storage, token.decimals]);
+  const holders = useMemo(() => {
+    if (indexedHolders.length) {
+      return indexedHolders.map((holder, index) => ({
+        rank: holder.rank || index + 1,
+        address: holder.address,
+        amount: holder.amount || '0',
+        formatted: formatTokenAmount(holder.amount || '0', token.decimals, '0'),
+      }));
+    }
+    return parseHolders(storage, token.decimals);
+  }, [indexedHolders, storage, token.decimals]);
+
+  const submitVerification = async () => {
+    setVerifyMessage('');
+    if (!verifySource.trim()) {
+      setVerifyMessage('Source code required');
+      return;
+    }
+    try {
+      const data = await fetchJSON('/contract/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address,
+          source_code: verifySource,
+          compiler_version: 'lqd-go-plugin',
+          optimization: false,
+        }),
+        timeoutMs: 15000,
+      });
+      setVerifyMessage(`Verified: ${data.source_hash || 'source matched'}`);
+      await load();
+    } catch (err) {
+      setVerifyMessage(err.message || 'Verification failed');
+    }
+  };
 
   const pools = useMemo(() => {
     const target = lower(address);
@@ -401,9 +444,21 @@ const TokenPage = () => {
           </div>
           <div className="token-contract-grid">
             <TokenMetric label="Owner" value={token.owner ? shortHash(token.owner) : '-'} />
-            <TokenMetric label="Verified Registry" value={token.verified ? 'Yes' : 'No'} />
+            <TokenMetric label="Verified Registry" value={(verification?.verified || token.verified) ? 'Yes' : 'No'} />
             <TokenMetric label="Contract Address" value={shortHash(address)} />
-            <TokenMetric label="Storage Keys" value={Object.keys(storage || {}).length.toLocaleString()} />
+            <TokenMetric label="Storage Keys" value={(verification?.storage_keys ?? Object.keys(storage || {}).length).toLocaleString()} />
+            <TokenMetric label="ABI Methods" value={verification?.abi_count ?? '-'} />
+            <TokenMetric label="Code Hash" value={verification?.code_hash ? shortHash(verification.code_hash) : '-'} />
+          </div>
+          <div className="contract-verify-box">
+            <h3>Contract Verification</h3>
+            <textarea
+              value={verifySource}
+              onChange={(e) => setVerifySource(e.target.value)}
+              placeholder="Paste deployed Go/DSL source code to verify against stored code hash"
+            />
+            <button type="button" onClick={submitVerification}>Verify Source</button>
+            {verifyMessage && <p>{verifyMessage}</p>}
           </div>
           <pre className="token-storage-preview">{JSON.stringify(storage || {}, null, 2).slice(0, 6000)}</pre>
         </section>

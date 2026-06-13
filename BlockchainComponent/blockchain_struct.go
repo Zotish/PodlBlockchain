@@ -53,12 +53,29 @@ type LiquidityProvider struct {
 }
 
 type BlockRewardBreakdown struct {
-	Validator            string            `json:"validator"`
-	ValidatorReward      string            `json:"validator_reward"`
-	ValidatorRewards     map[string]string `json:"validator_rewards"`
-	ValidatorPartRewards map[string]string `json:"validator_part_rewards"`
-	LiquidityRewards     map[string]string `json:"liquidity_rewards"`
-	ParticipantRewards   map[string]string `json:"participant_rewards"`
+	Validator                  string            `json:"validator"`
+	ValidatorReward            string            `json:"validator_reward"`
+	ValidatorRewards           map[string]string `json:"validator_rewards"`
+	ValidatorPartRewards       map[string]string `json:"validator_part_rewards"`
+	LiquidityRewards           map[string]string `json:"liquidity_rewards"`
+	ParticipantRewards         map[string]string `json:"participant_rewards"`
+	ParticipantRewardAddresses map[string]string `json:"participant_reward_addresses,omitempty"`
+	TreasuryReward             string            `json:"treasury_reward,omitempty"`
+}
+
+type RewardLedgerEntry struct {
+	ID            string `json:"id"`
+	BlockNumber   uint64 `json:"block_number,omitempty"`
+	BlockHash     string `json:"block_hash,omitempty"`
+	Timestamp     int64  `json:"timestamp"`
+	Address       string `json:"address"`
+	Bucket        string `json:"bucket"`
+	Source        string `json:"source"`
+	Amount        string `json:"amount"`
+	Status        string `json:"status"`
+	ClaimRequired bool   `json:"claim_required"`
+	TxHash        string `json:"tx_hash,omitempty"`
+	BalanceAfter  string `json:"balance_after,omitempty"`
 }
 type LockRecord struct {
 	Amount    *big.Int  `json:"amount"`
@@ -74,17 +91,19 @@ type RewardSnapshot struct {
 }
 
 type StrategyVaultMovement struct {
-	ID         string   `json:"id"`
-	VaultID    string   `json:"vault_id"`
-	FromPool   string   `json:"from_pool"`
-	ToPool     string   `json:"to_pool"`
-	Reason     string   `json:"reason"`
-	Status     string   `json:"status"`
-	MinOutBps  int      `json:"min_out_bps"`
-	AmountA    *big.Int `json:"amount_a"`
-	AmountB    *big.Int `json:"amount_b"`
-	Shares     *big.Int `json:"shares"`
-	ExecutedAt int64    `json:"executed_at"`
+	ID            string   `json:"id"`
+	VaultID       string   `json:"vault_id"`
+	FromPool      string   `json:"from_pool"`
+	ToPool        string   `json:"to_pool"`
+	Reason        string   `json:"reason"`
+	Status        string   `json:"status"`
+	MinOutBps     int      `json:"min_out_bps"`
+	MaxMoveBps    int      `json:"max_move_bps,omitempty"`
+	FailureReason string   `json:"failure_reason,omitempty"`
+	AmountA       *big.Int `json:"amount_a"`
+	AmountB       *big.Int `json:"amount_b"`
+	Shares        *big.Int `json:"shares"`
+	ExecutedAt    int64    `json:"executed_at"`
 }
 
 type StrategyVaultPosition struct {
@@ -102,6 +121,20 @@ type StrategyVaultPosition struct {
 	LastMove    *StrategyVaultMovement `json:"last_move,omitempty"`
 }
 
+type StrategyVaultSafetyConfig struct {
+	MinOutBps             int   `json:"min_out_bps"`
+	MaxMoveBps            int   `json:"max_move_bps"`
+	MinRebalanceIntervalS int64 `json:"min_rebalance_interval_s"`
+	LastKeeperTriggerUnix int64 `json:"last_keeper_trigger_unix,omitempty"`
+}
+
+type DynamicLiquidityOracleSignal struct {
+	PairAddress string `json:"pair_address"`
+	DemandBps   int64  `json:"demand_bps"`
+	Source      string `json:"source"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
 type Blockchain_struct struct {
 	Blocks           []*Block            `json:"blocks"`
 	Transaction_pool []*Transaction      `json:"transaction_pool"`
@@ -117,6 +150,7 @@ type Blockchain_struct struct {
 	LiquidityLocks       map[string][]LockRecord `json:"liquidity_locks"`
 	TotalLiquidity       *big.Int                `json:"total_liquidity"`
 	RewardHistory        []RewardSnapshot        `json:"reward_history"`
+	RewardLedger         []RewardLedgerEntry     `json:"reward_ledger,omitempty"`
 	RecentTxs            []*Transaction          `json:"recent_txs"`
 	PendingFeePool       map[string]*big.Int     `json:"pending_fee_pool"`
 	ContractEngine       *LQDContractEngine      `json:"-"`
@@ -131,15 +165,17 @@ type Blockchain_struct struct {
 	FixedBlockReward    uint64
 	GasRewardMultiplier uint64
 
-	MinLiquidityStake  *big.Int
-	LocalValidator     string
-	BlockVotes         map[string]map[string]bool
-	PendingBlocks      map[string]*Block
-	PendingBlockSeenAt map[string]int64                  `json:"pending_block_seen_at,omitempty"`
-	LastFinalizedAt    int64                             `json:"last_finalized_at,omitempty"`
-	recoveryWatchdogOn bool                              `json:"-"`
-	StrategyVaults     map[string]*StrategyVaultPosition `json:"strategy_vaults,omitempty"`
-	StrategyVaultMoves []StrategyVaultMovement           `json:"strategy_vault_moves,omitempty"`
+	MinLiquidityStake             *big.Int
+	LocalValidator                string
+	BlockVotes                    map[string]map[string]bool
+	PendingBlocks                 map[string]*Block
+	PendingBlockSeenAt            map[string]int64                        `json:"pending_block_seen_at,omitempty"`
+	LastFinalizedAt               int64                                   `json:"last_finalized_at,omitempty"`
+	recoveryWatchdogOn            bool                                    `json:"-"`
+	StrategyVaults                map[string]*StrategyVaultPosition       `json:"strategy_vaults,omitempty"`
+	StrategyVaultMoves            []StrategyVaultMovement                 `json:"strategy_vault_moves,omitempty"`
+	StrategyVaultSafety           StrategyVaultSafetyConfig               `json:"strategy_vault_safety,omitempty"`
+	DynamicLiquidityOracleSignals map[string]DynamicLiquidityOracleSignal `json:"dynamic_liquidity_oracle_signals,omitempty"`
 
 	DLEngine *DynamicLiquidityEngine `json:"-"`
 }
@@ -398,6 +434,9 @@ func (bc *Blockchain_struct) EnsureRuntimeState() {
 	if bc.RewardHistory == nil {
 		bc.RewardHistory = []RewardSnapshot{}
 	}
+	if bc.RewardLedger == nil {
+		bc.RewardLedger = []RewardLedgerEntry{}
+	}
 	if bc.RecentTxs == nil {
 		bc.RecentTxs = []*Transaction{}
 	}
@@ -439,6 +478,18 @@ func (bc *Blockchain_struct) EnsureRuntimeState() {
 	}
 	if bc.StrategyVaultMoves == nil {
 		bc.StrategyVaultMoves = []StrategyVaultMovement{}
+	}
+	if bc.StrategyVaultSafety.MinOutBps == 0 {
+		bc.StrategyVaultSafety.MinOutBps = 9900
+	}
+	if bc.StrategyVaultSafety.MaxMoveBps == 0 {
+		bc.StrategyVaultSafety.MaxMoveBps = 10000
+	}
+	if bc.StrategyVaultSafety.MinRebalanceIntervalS == 0 {
+		bc.StrategyVaultSafety.MinRebalanceIntervalS = 300
+	}
+	if bc.DynamicLiquidityOracleSignals == nil {
+		bc.DynamicLiquidityOracleSignals = make(map[string]DynamicLiquidityOracleSignal)
 	}
 	if bc.ContractEngine != nil && bc.ContractEngine.Registry != nil {
 		bc.ContractEngine.Registry.Blockchain = bc
@@ -744,6 +795,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		newBlockchain.LiquidityLocks = make(map[string][]LockRecord)
 		newBlockchain.TotalLiquidity = big.NewInt(0)
 		newBlockchain.RewardHistory = []RewardSnapshot{}
+		newBlockchain.RewardLedger = []RewardLedgerEntry{}
 		newBlockchain.RecentTxs = []*Transaction{}
 		newBlockchain.PendingFeePool = make(map[string]*big.Int)
 		newBlockchain.BlockVotes = make(map[string]map[string]bool)
@@ -2025,6 +2077,13 @@ func (bc *Blockchain_struct) ClaimLPRewards(address string) (*big.Int, string, e
 	rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, claimed)
 	bc.Transaction_pool = append(bc.Transaction_pool, rewardTx)
 	lp.PendingRewards = big.NewInt(0)
+	bc.RecordRewardClaim(address, claimed, rewardTx.TxHash, "manual_claim")
+
+	snap := *bc
+	snap.Mutex = sync.Mutex{}
+	if err := PutIntoDB(snap); err != nil {
+		return nil, "", err
+	}
 
 	return CopyAmount(claimed), rewardTx.TxHash, nil
 }
@@ -2049,12 +2108,14 @@ func (bc *Blockchain_struct) StartUnstake(address string) error {
 	}
 
 	if lp.PendingRewards != nil && lp.PendingRewards.Sign() > 0 {
-		bc.addAccountBalance(address, lp.PendingRewards)
-		rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, CopyAmount(lp.PendingRewards))
+		claimed := CopyAmount(lp.PendingRewards)
+		bc.addAccountBalance(address, claimed)
+		rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, CopyAmount(claimed))
 
 		//rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, address, lp.PendingRewards)
 
 		bc.Transaction_pool = append(bc.Transaction_pool, rewardTx)
+		bc.RecordRewardClaim(address, claimed, rewardTx.TxHash, "unstake_auto_claim")
 		lp.PendingRewards = big.NewInt(0)
 	}
 
@@ -2071,6 +2132,12 @@ func (bc *Blockchain_struct) StartUnstake(address string) error {
 	unstakeTx := bc.NewSystemTx("unstake", address, constantset.LiquidityPoolAddress, CopyAmount(lp.UnstakeAmount))
 	bc.Transaction_pool = append(bc.Transaction_pool, unstakeTx)
 
+	snap := *bc
+	snap.Mutex = sync.Mutex{}
+	if err := PutIntoDB(snap); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -2079,6 +2146,7 @@ func (bc *Blockchain_struct) ProcessUnstakeReleases() {
 	bc.Mutex.Lock()
 	defer bc.Mutex.Unlock()
 
+	changed := false
 	for _, lp := range bc.LiquidityProviders {
 		if !lp.IsUnstaking {
 			continue
@@ -2105,10 +2173,29 @@ func (bc *Blockchain_struct) ProcessUnstakeReleases() {
 			delta := new(big.Int).Sub(maxReleasable, lp.ReleasedSoFar)
 			lp.ReleasedSoFar = maxReleasable
 			bc.addAccountBalance(lp.Address, delta)
-			rewardTx := bc.NewSystemTx("lp_reward", constantset.LiquidityPoolAddress, lp.Address, CopyAmount(delta))
+			rewardTx := bc.NewSystemTx("unstake_release", constantset.LiquidityPoolAddress, lp.Address, CopyAmount(delta))
+			bc.recordRewardLedgerEntryLocked(RewardLedgerEntry{
+				ID:            fmt.Sprintf("unstake_release:%s:%s", normalizeAccountAddress(lp.Address), rewardTx.TxHash),
+				Timestamp:     time.Now().Unix(),
+				Address:       normalizeAccountAddress(lp.Address),
+				Bucket:        "unstake_release",
+				Source:        "unstake_vesting",
+				Amount:        AmountString(delta),
+				Status:        "credited",
+				ClaimRequired: false,
+				TxHash:        rewardTx.TxHash,
+				BalanceAfter:  bc.AccountBalanceString(lp.Address),
+			})
 
 			bc.Transaction_pool = append(bc.Transaction_pool, rewardTx)
+			changed = true
 		}
+	}
+
+	if changed {
+		snap := *bc
+		snap.Mutex = sync.Mutex{}
+		_ = PutIntoDB(snap)
 	}
 }
 

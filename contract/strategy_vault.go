@@ -113,6 +113,70 @@ func (v *StrategyVault) routingWeight(ctx *bc.Context, pair string) *big.Int {
 	return weight
 }
 
+func (v *StrategyVault) configInt(ctx *bc.Context, key string, fallback int64) int64 {
+	raw := strings.TrimSpace(ctx.Get(key))
+	if raw == "" {
+		return fallback
+	}
+	n := parseBig(raw)
+	if !n.IsInt64() || n.Sign() < 0 {
+		return fallback
+	}
+	return n.Int64()
+}
+
+func (v *StrategyVault) oracleDemand(ctx *bc.Context, pair string) *big.Int {
+	score := parseBig(ctx.Get("oracle_demand:" + norm(pair)))
+	if score.Sign() < 0 {
+		return big.NewInt(0)
+	}
+	if score.Cmp(big.NewInt(10000)) > 0 {
+		return big.NewInt(10000)
+	}
+	return score
+}
+
+func (v *StrategyVault) requireDeadline(ctx *bc.Context, deadline string) {
+	if strings.TrimSpace(deadline) == "" {
+		ctx.Revert("deadline required")
+	}
+	dl := parseBig(deadline)
+	if dl.Sign() <= 0 || !dl.IsInt64() {
+		ctx.Revert("invalid deadline")
+	}
+	if ctx.BlockTime > dl.Int64() {
+		ctx.Revert("rebalance deadline expired")
+	}
+}
+
+func (v *StrategyVault) requireSafety(ctx *bc.Context, fromPair string, toPair string, amt *big.Int, minSwapOut *big.Int, strictMinOut bool) {
+	position := v.positionOf(ctx, fromPair)
+	if position.Cmp(amt) < 0 {
+		ctx.Revert("insufficient vault source position")
+	}
+	maxMoveBps := v.configInt(ctx, "max_move_bps", 2500)
+	if maxMoveBps <= 0 || maxMoveBps > 10000 {
+		ctx.Revert("invalid max_move_bps")
+	}
+	if maxMoveBps < 10000 {
+		maxMove := new(big.Int).Div(new(big.Int).Mul(position, big.NewInt(maxMoveBps)), big.NewInt(10000))
+		if maxMove.Sign() == 0 {
+			maxMove = big.NewInt(1)
+		}
+		if amt.Cmp(maxMove) > 0 {
+			ctx.Revert("rebalance amount exceeds max_move_bps")
+		}
+	}
+	interval := v.configInt(ctx, "min_rebalance_interval", 300)
+	last := parseBig(ctx.Get("last_rebalance"))
+	if interval > 0 && last.IsInt64() && last.Int64() > 0 && ctx.BlockTime < last.Int64()+interval {
+		ctx.Revert("rebalance cooldown active")
+	}
+	if !v.sameTokenSet(ctx, fromPair, toPair) && strictMinOut && (minSwapOut == nil || minSwapOut.Sign() <= 0) {
+		ctx.Revert("cross-asset rebalance requires minSwapOut")
+	}
+}
+
 func (v *StrategyVault) sameTokenSet(ctx *bc.Context, fromPair string, toPair string) bool {
 	a0 := v.pairToken(ctx, fromPair, "Token0")
 	a1 := v.pairToken(ctx, fromPair, "Token1")
@@ -255,10 +319,14 @@ func (v *StrategyVault) Init(ctx *bc.Context, router string, manager string) {
 	ctx.Set("router", norm(router))
 	ctx.Set("manager", manager)
 	ctx.Set("totalShares", "0")
+	ctx.Set("max_move_bps", "2500")
+	ctx.Set("min_rebalance_interval", "300")
+	ctx.Set("max_slippage_bps", "500")
 	ctx.Commit()
 	ctx.Emit("VaultInitialized", map[string]interface{}{
-		"router":  norm(router),
-		"manager": manager,
+		"router":     norm(router),
+		"manager":    manager,
+		"maxMoveBps": "2500",
 	})
 }
 
@@ -350,9 +418,7 @@ func (v *StrategyVault) rebalance(ctx *bc.Context, fromPair string, toPair strin
 	if fromPair == "" || toPair == "" || fromPair == toPair {
 		ctx.Revert("invalid rebalance pair")
 	}
-	if v.positionOf(ctx, fromPair).Cmp(amt) < 0 {
-		ctx.Revert("insufficient vault source position")
-	}
+	v.requireSafety(ctx, fromPair, toPair, amt, big.NewInt(0), false)
 	if v.sameTokenSet(ctx, fromPair, toPair) {
 		v.rebalanceSameAsset(ctx, fromPair, toPair, amt)
 		return
@@ -442,11 +508,11 @@ func (v *StrategyVault) rebalanceCrossAsset(ctx *bc.Context, fromPair string, to
 			continue
 		}
 		if target0.Sign() == 0 {
-			target0 = new(big.Int).Add(target0, v.swapVaultToken(ctx, token, to0, amount, big.NewInt(0)))
+			target0 = new(big.Int).Add(target0, v.swapVaultToken(ctx, token, to0, amount, minSwapOut))
 			continue
 		}
 		if target1.Sign() == 0 {
-			target1 = new(big.Int).Add(target1, v.swapVaultToken(ctx, token, to1, amount, big.NewInt(0)))
+			target1 = new(big.Int).Add(target1, v.swapVaultToken(ctx, token, to1, amount, minSwapOut))
 			continue
 		}
 		v.addIdle(ctx, token, amount)
@@ -513,14 +579,76 @@ func (v *StrategyVault) RebalanceWithMinOut(ctx *bc.Context, fromPair string, to
 	if fromPair == "" || toPair == "" || fromPair == toPair {
 		ctx.Revert("invalid rebalance pair")
 	}
-	if v.positionOf(ctx, fromPair).Cmp(amt) < 0 {
-		ctx.Revert("insufficient vault source position")
-	}
+	v.requireSafety(ctx, fromPair, toPair, amt, minOut, true)
 	if v.sameTokenSet(ctx, fromPair, toPair) {
 		v.rebalanceSameAsset(ctx, fromPair, toPair, amt)
 		return
 	}
 	v.rebalanceCrossAsset(ctx, fromPair, toPair, amt, minOut)
+}
+
+func (v *StrategyVault) RebalanceWithLimits(ctx *bc.Context, fromPair string, toPair string, lpAmount string, minSwapOut string, maxSlippageBps string, deadline string) {
+	v.requireManager(ctx)
+	v.requireDeadline(ctx, deadline)
+	slippage := parseBig(maxSlippageBps)
+	maxAllowed := big.NewInt(v.configInt(ctx, "max_slippage_bps", 500))
+	if slippage.Sign() <= 0 || slippage.Cmp(maxAllowed) > 0 {
+		ctx.Revert("slippage limit exceeds vault safety")
+	}
+	fromPair = norm(fromPair)
+	toPair = norm(toPair)
+	amt := parseBig(lpAmount)
+	minOut := parseBig(minSwapOut)
+	requirePositive(ctx, "LP amount", amt)
+	if fromPair == "" || toPair == "" || fromPair == toPair {
+		ctx.Revert("invalid rebalance pair")
+	}
+	v.requireSafety(ctx, fromPair, toPair, amt, minOut, true)
+	if v.sameTokenSet(ctx, fromPair, toPair) {
+		v.rebalanceSameAsset(ctx, fromPair, toPair, amt)
+		return
+	}
+	v.rebalanceCrossAsset(ctx, fromPair, toPair, amt, minOut)
+}
+
+func (v *StrategyVault) SetSafetyLimits(ctx *bc.Context, maxMoveBps string, minRebalanceInterval string, maxSlippageBps string) {
+	v.requireManager(ctx)
+	maxMove := parseBig(maxMoveBps)
+	interval := parseBig(minRebalanceInterval)
+	slippage := parseBig(maxSlippageBps)
+	if !maxMove.IsInt64() || maxMove.Int64() <= 0 || maxMove.Int64() > 10000 {
+		ctx.Revert("maxMoveBps must be 1..10000")
+	}
+	if !interval.IsInt64() || interval.Sign() < 0 {
+		ctx.Revert("invalid minRebalanceInterval")
+	}
+	if !slippage.IsInt64() || slippage.Int64() <= 0 || slippage.Int64() > 10000 {
+		ctx.Revert("maxSlippageBps must be 1..10000")
+	}
+	ctx.Set("max_move_bps", maxMove.String())
+	ctx.Set("min_rebalance_interval", interval.String())
+	ctx.Set("max_slippage_bps", slippage.String())
+	ctx.Commit()
+	ctx.Emit("VaultSafetyLimitsUpdated", map[string]interface{}{
+		"maxMoveBps":           maxMove.String(),
+		"minRebalanceInterval": interval.String(),
+		"maxSlippageBps":       slippage.String(),
+	})
+}
+
+func (v *StrategyVault) SetOracleDemand(ctx *bc.Context, pair string, demandBps string) {
+	v.requireManager(ctx)
+	pair = norm(pair)
+	score := parseBig(demandBps)
+	if pair == "" {
+		ctx.Revert("pair required")
+	}
+	if !score.IsInt64() || score.Sign() < 0 || score.Int64() > 10000 {
+		ctx.Revert("demandBps must be 0..10000")
+	}
+	ctx.Set("oracle_demand:"+pair, score.String())
+	ctx.Commit()
+	ctx.Emit("VaultOracleDemandUpdated", map[string]interface{}{"pair": pair, "demandBps": score.String()})
 }
 
 // AutoRebalance picks the highest scoring pair from a comma-separated candidate
@@ -558,7 +686,9 @@ func (v *StrategyVault) bestPair(ctx *bc.Context, candidatePairsCSV string) stri
 			depth = r1
 		}
 		weight := v.routingWeight(ctx, pair)
-		score := new(big.Int).Mul(depth, weight)
+		oracle := new(big.Int).Div(v.oracleDemand(ctx, pair), big.NewInt(100))
+		scoreWeight := new(big.Int).Add(weight, oracle)
+		score := new(big.Int).Mul(depth, scoreWeight)
 		if score.Cmp(bestScore) > 0 {
 			bestScore = score
 			best = pair
@@ -589,15 +719,32 @@ func (v *StrategyVault) CurrentPair(ctx *bc.Context) {
 	ctx.Set("output", norm(ctx.Get("current_pair")))
 }
 
+func (v *StrategyVault) GetSafetyLimits(ctx *bc.Context) {
+	data := map[string]string{
+		"max_move_bps":           big.NewInt(v.configInt(ctx, "max_move_bps", 2500)).String(),
+		"min_rebalance_interval": big.NewInt(v.configInt(ctx, "min_rebalance_interval", 300)).String(),
+		"max_slippage_bps":       big.NewInt(v.configInt(ctx, "max_slippage_bps", 500)).String(),
+	}
+	encoded, _ := json.Marshal(data)
+	ctx.Set("output", string(encoded))
+}
+
+func (v *StrategyVault) GetOracleDemand(ctx *bc.Context, pair string) {
+	ctx.Set("output", v.oracleDemand(ctx, pair).String())
+}
+
 func (v *StrategyVault) GetVaultInfo(ctx *bc.Context, user string) {
 	user = norm(user)
 	data := map[string]string{
-		"manager":        norm(ctx.Get("manager")),
-		"router":         norm(ctx.Get("router")),
-		"current_pair":   norm(ctx.Get("current_pair")),
-		"last_rebalance": ctx.Get("last_rebalance"),
-		"total_shares":   v.totalShares(ctx).String(),
-		"user_shares":    v.shareOf(ctx, user).String(),
+		"manager":                norm(ctx.Get("manager")),
+		"router":                 norm(ctx.Get("router")),
+		"current_pair":           norm(ctx.Get("current_pair")),
+		"last_rebalance":         ctx.Get("last_rebalance"),
+		"total_shares":           v.totalShares(ctx).String(),
+		"user_shares":            v.shareOf(ctx, user).String(),
+		"max_move_bps":           big.NewInt(v.configInt(ctx, "max_move_bps", 2500)).String(),
+		"min_rebalance_interval": big.NewInt(v.configInt(ctx, "min_rebalance_interval", 300)).String(),
+		"max_slippage_bps":       big.NewInt(v.configInt(ctx, "max_slippage_bps", 500)).String(),
 	}
 	encoded, _ := json.Marshal(data)
 	ctx.Set("output", string(encoded))

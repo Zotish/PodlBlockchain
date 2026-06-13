@@ -359,6 +359,9 @@ func (bcs *BlockchainServer) GetBalance(w http.ResponseWriter, r *http.Request) 
 	// Calculate pending balance changes from transaction pool
 	pendingBalanceChange := big.NewInt(0)
 	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
+		if tx == nil || tx.IsSystem {
+			continue
+		}
 		if strings.EqualFold(strings.TrimSpace(tx.From), address) && tx.Status == constantset.StatusPending {
 			cost := new(big.Int).Add(blockchaincomponent.CopyAmount(tx.Value), blockchaincomponent.NewAmountFromUint64(tx.GasPrice*tx.CalculateGasCost()))
 			pendingBalanceChange.Sub(pendingBalanceChange, cost)
@@ -373,12 +376,35 @@ func (bcs *BlockchainServer) GetBalance(w http.ResponseWriter, r *http.Request) 
 		totalBalance = big.NewInt(0)
 	}
 
+	lpPendingRewards := big.NewInt(0)
+	lpTotalRewards := big.NewInt(0)
+	rewardClaimedTotal := big.NewInt(0)
+	if lp := lookupLiquidityProviderLocked(bcs.BlockchainPtr, address); lp != nil {
+		lpPendingRewards = blockchaincomponent.CopyAmount(lp.PendingRewards)
+		lpTotalRewards = blockchaincomponent.CopyAmount(lp.TotalRewards)
+	}
+	for _, entry := range bcs.BlockchainPtr.RewardLedgerForAddress(address, 500) {
+		if entry.Bucket != "liquidity_claim" {
+			continue
+		}
+		amt, err := blockchaincomponent.NewAmountFromString(entry.Amount)
+		if err == nil && amt != nil {
+			rewardClaimedTotal.Add(rewardClaimedTotal, amt)
+		}
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"address":                bcs.BlockchainPtr.CanonicalAccountAddress(address),
 		"requested_address":      address,
 		"balance":                blockchaincomponent.AmountString(totalBalance),
+		"available_balance":      blockchaincomponent.AmountString(confirmedBalance),
+		"spendable_balance":      blockchaincomponent.AmountString(totalBalance),
 		"confirmed_balance":      blockchaincomponent.AmountString(confirmedBalance),
 		"pending_balance_change": blockchaincomponent.AmountString(pendingBalanceChange),
+		"lp_pending_rewards":     blockchaincomponent.AmountString(lpPendingRewards),
+		"lp_total_rewards":       blockchaincomponent.AmountString(lpTotalRewards),
+		"reward_claimed_total":   blockchaincomponent.AmountString(rewardClaimedTotal),
+		"source_of_truth":        "chain_state",
 	})
 }
 
@@ -1792,6 +1818,42 @@ func (bcs *BlockchainServer) RewardsRecent(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(hist)
 }
 
+func (bcs *BlockchainServer) RewardsTable(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	address := strings.TrimSpace(r.URL.Query().Get("address"))
+
+	bcs.BlockchainPtr.Mutex.Lock()
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+	var rows []blockchaincomponent.RewardLedgerEntry
+	if address != "" {
+		rows = bcs.BlockchainPtr.RewardLedgerForAddress(address, limit)
+	} else {
+		rows = bcs.BlockchainPtr.RewardLedgerRecent(limit)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"rows":      rows,
+		"count":     len(rows),
+		"timestamp": time.Now().Unix(),
+	})
+}
+
 func (bcs *BlockchainServer) RewardsLatest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
@@ -1806,13 +1868,15 @@ func (bcs *BlockchainServer) RewardsLatest(w http.ResponseWriter, r *http.Reques
 
 	last := bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1]
 	out := map[string]interface{}{
-		"block_number":           last.BlockNumber,
-		"validator":              last.RewardBreakdown.Validator,
-		"validator_reward":       last.RewardBreakdown.ValidatorReward,
-		"validator_rewards":      last.RewardBreakdown.ValidatorRewards,
-		"validator_part_rewards": last.RewardBreakdown.ValidatorPartRewards,
-		"liquidity_rewards":      last.RewardBreakdown.LiquidityRewards,
-		"participant_rewards":    last.RewardBreakdown.ParticipantRewards,
+		"block_number":                 last.BlockNumber,
+		"validator":                    last.RewardBreakdown.Validator,
+		"validator_reward":             last.RewardBreakdown.ValidatorReward,
+		"validator_rewards":            last.RewardBreakdown.ValidatorRewards,
+		"validator_part_rewards":       last.RewardBreakdown.ValidatorPartRewards,
+		"liquidity_rewards":            last.RewardBreakdown.LiquidityRewards,
+		"participant_rewards":          last.RewardBreakdown.ParticipantRewards,
+		"participant_reward_addresses": last.RewardBreakdown.ParticipantRewardAddresses,
+		"treasury_reward":              last.RewardBreakdown.TreasuryReward,
 	}
 	json.NewEncoder(w).Encode(out)
 }
@@ -1839,21 +1903,25 @@ func (bcs *BlockchainServer) RewardsSummary(w http.ResponseWriter, r *http.Reque
 			last := bcs.BlockchainPtr.Blocks[len(bcs.BlockchainPtr.Blocks)-1]
 			if last != nil {
 				latest = map[string]interface{}{
-					"block_number":           last.BlockNumber,
-					"hash":                   last.CurrentHash,
-					"gas_used":               last.GasUsed,
-					"base_fee":               last.BaseFee,
-					"validator":              last.RewardBreakdown.Validator,
-					"validator_reward":       last.RewardBreakdown.ValidatorReward,
-					"validator_rewards":      last.RewardBreakdown.ValidatorRewards,
-					"validator_part_rewards": last.RewardBreakdown.ValidatorPartRewards,
-					"liquidity_rewards":      last.RewardBreakdown.LiquidityRewards,
-					"participant_rewards":    last.RewardBreakdown.ParticipantRewards,
+					"block_number":                 last.BlockNumber,
+					"hash":                         last.CurrentHash,
+					"gas_used":                     last.GasUsed,
+					"base_fee":                     last.BaseFee,
+					"validator":                    last.RewardBreakdown.Validator,
+					"validator_reward":             last.RewardBreakdown.ValidatorReward,
+					"validator_rewards":            last.RewardBreakdown.ValidatorRewards,
+					"validator_part_rewards":       last.RewardBreakdown.ValidatorPartRewards,
+					"liquidity_rewards":            last.RewardBreakdown.LiquidityRewards,
+					"participant_rewards":          last.RewardBreakdown.ParticipantRewards,
+					"participant_reward_addresses": last.RewardBreakdown.ParticipantRewardAddresses,
+					"treasury_reward":              last.RewardBreakdown.TreasuryReward,
 					"totals": map[string]string{
-						"validator_rewards":      sumAmountStrings(last.RewardBreakdown.ValidatorRewards),
-						"validator_part_rewards": sumAmountStrings(last.RewardBreakdown.ValidatorPartRewards),
-						"liquidity_rewards":      sumAmountStrings(last.RewardBreakdown.LiquidityRewards),
-						"participant_rewards":    sumAmountStrings(last.RewardBreakdown.ParticipantRewards),
+						"validator_rewards":            sumAmountStrings(last.RewardBreakdown.ValidatorRewards),
+						"validator_part_rewards":       sumAmountStrings(last.RewardBreakdown.ValidatorPartRewards),
+						"liquidity_rewards":            sumAmountStrings(last.RewardBreakdown.LiquidityRewards),
+						"participant_rewards":          sumAmountStrings(last.RewardBreakdown.ParticipantRewards),
+						"participant_reward_addresses": sumAmountStrings(last.RewardBreakdown.ParticipantRewardAddresses),
+						"treasury_rewards":             last.RewardBreakdown.TreasuryReward,
 					},
 				}
 			}
@@ -1875,7 +1943,7 @@ func (bcs *BlockchainServer) RewardsSummary(w http.ResponseWriter, r *http.Reque
 				{"bucket": "lp_providers_sqrt_curve", "percent": 30, "settlement": "pending_lp_rewards", "claim_required": true},
 				{"bucket": "long_lock_lp_365_2000_days", "percent": 5, "settlement": "pending_lp_rewards", "claim_required": true, "note": "legacy LP plus DEX locked LP positions"},
 				{"bucket": "validator_participants", "percent": 12, "settlement": "credited_to_balance_each_block", "claim_required": false},
-				{"bucket": "tx_participants", "percent": 2, "settlement": "participant_reward_accounting", "claim_required": true},
+				{"bucket": "tx_participants", "percent": 2, "settlement": "credited_to_balance_each_block", "claim_required": false},
 				{"bucket": "treasury", "percent": 11, "settlement": "credited_to_treasury_each_block", "claim_required": false},
 			},
 		},
@@ -1966,8 +2034,9 @@ func (bcs *BlockchainServer) RewardAddressStatus(w http.ResponseWriter, r *http.
 		appendReward("proposer_validator", false, block.RewardBreakdown.ValidatorRewards)
 		appendReward("validator_participant", false, block.RewardBreakdown.ValidatorPartRewards)
 		appendReward("liquidity", true, block.RewardBreakdown.LiquidityRewards)
-		appendReward("transaction_participant", true, block.RewardBreakdown.ParticipantRewards)
+		appendReward("transaction_participant", false, block.RewardBreakdown.ParticipantRewardAddresses)
 	}
+	ledgerRows := bcs.BlockchainPtr.RewardLedgerForAddress(address, 100)
 	bcs.BlockchainPtr.Mutex.Unlock()
 
 	sort.SliceStable(recent, func(i, j int) bool {
@@ -1985,6 +2054,7 @@ func (bcs *BlockchainServer) RewardAddressStatus(w http.ResponseWriter, r *http.
 			"transaction_participant": blockchaincomponent.AmountString(totals["transaction_participant"]),
 		},
 		"recent_rewards": recent,
+		"ledger":         ledgerRows,
 		"timestamp":      time.Now().Unix(),
 	})
 }
@@ -2024,6 +2094,7 @@ func (bcs *BlockchainServer) StrategyVaultStatus(w http.ResponseWriter, r *http.
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"positions": positions,
 		"movements": moves,
+		"safety":    bcs.BlockchainPtr.StrategyVaultSafetySnapshot(),
 		"count":     len(positions),
 		"timestamp": time.Now().Unix(),
 	})
@@ -2126,6 +2197,110 @@ func (bcs *BlockchainServer) StrategyVaultWithdraw(w http.ResponseWriter, r *htt
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "position": pos})
+}
+
+func (bcs *BlockchainServer) StrategyVaultSafety(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if !bridgeAdminKeyMatches(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		MinOutBps             int   `json:"min_out_bps"`
+		MaxMoveBps            int   `json:"max_move_bps"`
+		MinRebalanceIntervalS int64 `json:"min_rebalance_interval_s"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	cfg, err := bcs.BlockchainPtr.SetStrategyVaultSafety(req.MinOutBps, req.MaxMoveBps, req.MinRebalanceIntervalS)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "safety": cfg})
+}
+
+func (bcs *BlockchainServer) DynamicLiquidityStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	json.NewEncoder(w).Encode(bcs.BlockchainPtr.DynamicLiquidityStatus())
+}
+
+func (bcs *BlockchainServer) DynamicLiquidityTrigger(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if !bridgeAdminKeyMatches(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if strings.TrimSpace(req.Reason) == "" {
+		req.Reason = "keeper-ui"
+	}
+	metrics := bcs.BlockchainPtr.RunDynamicLiquidityEpochNow(req.Reason)
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "metrics": metrics, "timestamp": time.Now().Unix()})
+}
+
+func (bcs *BlockchainServer) DynamicLiquidityOracle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if !bridgeAdminKeyMatches(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		PairAddress string `json:"pair_address"`
+		DemandBps   int64  `json:"demand_bps"`
+		Source      string `json:"source"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	signal, err := bcs.BlockchainPtr.SetDynamicLiquidityOracleSignal(req.PairAddress, req.DemandBps, req.Source)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "signal": signal})
 }
 
 func (bcs *BlockchainServer) ActiveValidatorsLatest(w http.ResponseWriter, r *http.Request) {
@@ -3161,9 +3336,10 @@ func (bcs *BlockchainServer) ClaimLiquidityRewards(w http.ResponseWriter, r *htt
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":          "claimed",
 		"address":         req.Address,
-		"claimed":         claimed.String(),
+		"claimed":         blockchaincomponent.AmountString(claimed),
 		"tx_hash":         txHash,
 		"pending_rewards": "0",
+		"balance_after":   bcs.BlockchainPtr.AccountBalanceString(req.Address),
 		"provider":        req.Provider,
 	})
 }
@@ -3680,11 +3856,9 @@ func (b *BlockchainServer) ContractList(w http.ResponseWriter, r *http.Request) 
 		if err != nil || rec == nil || rec.Metadata == nil {
 			continue
 		}
-		out = append(out, map[string]any{
-			"address": addr,
-			"type":    rec.Metadata.Type,
-			"owner":   rec.Metadata.Owner,
-		})
+		if summary := explorerContractSummary(addr, rec); summary != nil {
+			out = append(out, summary)
+		}
 	}
 	json.NewEncoder(w).Encode(out)
 }
@@ -4807,8 +4981,12 @@ func (b *BlockchainServer) TreasuryStatus(w http.ResponseWriter, r *http.Request
 	balance := "0"
 	pendingLP := big.NewInt(0)
 	totalLP := big.NewInt(0)
+	treasuryEarned := big.NewInt(0)
+	lpClaimed := big.NewInt(0)
 	rewardEntries := 0
+	rewardLedgerEntries := 0
 	var latestReward interface{}
+	var recentLedger []blockchaincomponent.RewardLedgerEntry
 
 	if b.BlockchainPtr != nil {
 		b.BlockchainPtr.Mutex.Lock()
@@ -4826,18 +5004,36 @@ func (b *BlockchainServer) TreasuryStatus(w http.ResponseWriter, r *http.Request
 			}
 		}
 		rewardEntries = len(b.BlockchainPtr.RewardHistory)
+		rewardLedgerEntries = len(b.BlockchainPtr.RewardLedger)
 		if rewardEntries > 0 {
 			latestReward = b.BlockchainPtr.RewardHistory[rewardEntries-1]
 		}
+		for _, entry := range b.BlockchainPtr.RewardLedger {
+			amt, err := blockchaincomponent.NewAmountFromString(entry.Amount)
+			if err != nil || amt == nil {
+				continue
+			}
+			switch entry.Bucket {
+			case "treasury":
+				treasuryEarned.Add(treasuryEarned, amt)
+			case "liquidity_claim":
+				lpClaimed.Add(lpClaimed, amt)
+			}
+		}
+		recentLedger = b.BlockchainPtr.RewardLedgerRecent(25)
 		b.BlockchainPtr.Mutex.Unlock()
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"treasury_address":       treasuryAddress,
 		"balance":                balance,
+		"treasury_rewards_total": blockchaincomponent.AmountString(treasuryEarned),
 		"pending_lp_rewards":     blockchaincomponent.AmountString(pendingLP),
 		"total_lp_rewards":       blockchaincomponent.AmountString(totalLP),
+		"claimed_lp_rewards":     blockchaincomponent.AmountString(lpClaimed),
 		"reward_history_entries": rewardEntries,
+		"reward_ledger_entries":  rewardLedgerEntries,
+		"recent_reward_ledger":   recentLedger,
 		"latest_reward_snapshot": latestReward,
 		"height":                 height,
 		"latest_block_hash":      latestHash,
@@ -4982,6 +5178,7 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/liquidity/unlock", b.limiter.middleware(maxBytesMiddleware(b.LiquidityUnlock, maxBodySize)))
 	http.HandleFunc("/liquidity", b.LiquidityView)
 	http.HandleFunc("/rewards/recent", b.RewardsRecent)
+	http.HandleFunc("/rewards/table", b.RewardsTable)
 	http.HandleFunc("/rewards/latest", b.RewardsLatest)
 	http.HandleFunc("/rewards/summary", b.RewardsSummary)
 	http.HandleFunc("/rewards/address/{address}", b.RewardAddressStatus)
@@ -5010,7 +5207,11 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/contract/events", b.GetContractEvents) // address-only, no block required
 	http.HandleFunc("/basefee", b.BaseFee)
 	http.HandleFunc("/blocktime/latest", b.BlockTimeLatest)
+	http.HandleFunc("/address/{address}/overview", b.ExplorerAddressOverview)
 	http.HandleFunc("/address/{address}/transactions", b.GetAddressTransactions)
+	http.HandleFunc("/token/{address}/holders", b.ExplorerTokenHolders)
+	http.HandleFunc("/contract/verification", b.ContractVerificationStatus)
+	http.HandleFunc("/contract/verify", b.limiter.middleware(maxBytesMiddleware(b.VerifyContractSource, maxBodySize)))
 	http.HandleFunc("/liquidity/provide", b.limiter.middleware(maxBytesMiddleware(b.ProvideLiquidity, maxBodySize)))
 	http.HandleFunc("/liquidity/unstake", b.limiter.middleware(maxBytesMiddleware(b.UnstakeLiquidity, maxBodySize)))
 	http.HandleFunc("/liquidity/claim", b.limiter.middleware(maxBytesMiddleware(b.ClaimLiquidityRewards, maxBodySize)))
@@ -5022,6 +5223,10 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/liquidity/vault/deposit", b.limiter.middleware(maxBytesMiddleware(b.StrategyVaultDeposit, maxBodySize)))
 	http.HandleFunc("/liquidity/vault/rebalance", b.limiter.middleware(maxBytesMiddleware(b.StrategyVaultRebalance, maxBodySize)))
 	http.HandleFunc("/liquidity/vault/withdraw", b.limiter.middleware(maxBytesMiddleware(b.StrategyVaultWithdraw, maxBodySize)))
+	http.HandleFunc("/liquidity/vault/safety", b.limiter.middleware(maxBytesMiddleware(b.StrategyVaultSafety, maxBodySize)))
+	http.HandleFunc("/liquidity/dynamic/status", b.DynamicLiquidityStatus)
+	http.HandleFunc("/liquidity/dynamic/trigger", b.limiter.middleware(maxBytesMiddleware(b.DynamicLiquidityTrigger, maxBodySize)))
+	http.HandleFunc("/liquidity/dynamic/oracle", b.limiter.middleware(maxBytesMiddleware(b.DynamicLiquidityOracle, maxBodySize)))
 	http.HandleFunc("/liquidity/pools/sync", b.SyncPools)
 	http.HandleFunc("/liquidity/pools/register", b.limiter.middleware(maxBytesMiddleware(b.RegisterPoolManual, maxBodySize)))
 	http.HandleFunc("/bridge/requests", b.GetBridgeRequests)

@@ -955,6 +955,55 @@ code, pre, .monospace {
   white-space: pre-wrap;
 }
 
+.contract-verify-box {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+}
+
+.contract-verify-box h3 {
+  color: var(--text-primary);
+  margin: 0 0 var(--space-3);
+}
+
+.contract-verify-box input,
+.contract-verify-box textarea {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  display: block;
+  margin-bottom: var(--space-3);
+  min-height: 42px;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.contract-verify-box textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-height: 160px;
+  resize: vertical;
+}
+
+.contract-verify-box button,
+.verify-actions button {
+  background: var(--primary);
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: white;
+  cursor: pointer;
+  font-weight: 800;
+  padding: 10px 14px;
+}
+
+.verify-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .token-pool-grid {
   display: grid;
   gap: var(--space-4);
@@ -1666,6 +1715,10 @@ tr:hover td {
   gap: var(--space-4);
 }
 
+.address-summary-grid.compact .address-metric {
+  min-height: 92px;
+}
+
 .address-metric {
   display: flex;
   flex-direction: column;
@@ -1701,6 +1754,40 @@ tr:hover td {
 .asset-cell small,
 .address-nft-card small {
   color: var(--text-secondary);
+}
+
+.address-chart {
+  align-items: end;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: 10px;
+  min-height: 180px;
+  overflow-x: auto;
+  padding: var(--space-4);
+}
+
+.address-chart-bar {
+  align-items: center;
+  display: flex;
+  flex: 0 0 28px;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: flex-end;
+  min-height: 145px;
+}
+
+.address-chart-bar span {
+  background: var(--primary);
+  border-radius: 6px 6px 2px 2px;
+  display: block;
+  width: 100%;
+}
+
+.address-chart-bar small {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
 }
 
 .address-tabs {

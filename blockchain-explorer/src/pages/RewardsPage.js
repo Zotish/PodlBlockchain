@@ -48,6 +48,8 @@ const metric = (label, value, hint) => (
 export default function RewardsPage() {
   const [latest, setLatest] = useState(null);
   const [history, setHistory] = useState([]);
+  const [ledger, setLedger] = useState([]);
+  const [treasury, setTreasury] = useState(null);
   const [providers, setProviders] = useState([]);
   const [claimAddress, setClaimAddress] = useState('');
   const [claimStatus, setClaimStatus] = useState('');
@@ -59,9 +61,11 @@ export default function RewardsPage() {
   const load = useCallback(async () => {
     try {
       setError('');
-      const [latestResult, historyResult, providersResult] = await Promise.allSettled([
+      const [latestResult, historyResult, ledgerResult, treasuryResult, providersResult] = await Promise.allSettled([
         fetchJSON('/rewards/latest', { cacheTtlMs: 1500, timeoutMs: 10000 }),
         fetchJSON('/rewards/recent', { cacheTtlMs: 5000, timeoutMs: 10000 }),
+        fetchJSON('/rewards/table?limit=50', { cacheTtlMs: 5000, timeoutMs: 10000 }),
+        fetchJSON('/treasury', { cacheTtlMs: 5000, timeoutMs: 10000 }),
         fetchJSON('/liquidity/all', { cacheTtlMs: 4000, timeoutMs: 10000 }),
       ]);
 
@@ -71,6 +75,13 @@ export default function RewardsPage() {
       if (historyResult.status === 'fulfilled') {
         const payload = firstNodeResult(historyResult.value) || historyResult.value;
         setHistory(Array.isArray(payload) ? payload : []);
+      }
+      if (ledgerResult.status === 'fulfilled') {
+        const payload = firstNodeResult(ledgerResult.value) || ledgerResult.value;
+        setLedger(Array.isArray(payload) ? payload : (payload.rows || []));
+      }
+      if (treasuryResult.status === 'fulfilled') {
+        setTreasury(firstNodeResult(treasuryResult.value) || treasuryResult.value);
       }
       if (providersResult.status === 'fulfilled') {
         const list = Array.isArray(providersResult.value)
@@ -96,10 +107,13 @@ export default function RewardsPage() {
     const validatorPartRewards = sumMap(latest?.validator_part_rewards);
     const liquidityRewards = sumMap(latest?.liquidity_rewards);
     const participantRewards = sumMap(latest?.participant_rewards);
+    const participantAddressRewards = sumMap(latest?.participant_reward_addresses);
+    const treasuryReward = toBig(latest?.treasury_reward);
     const totalStaked = providers.reduce((acc, lp) => acc + toBig(lp.stake), 0n);
     const pendingLP = providers.reduce((acc, lp) => acc + toBig(lp.pendingRewards), 0n);
     const totalLPRewards = providers.reduce((acc, lp) => acc + toBig(lp.totalRewards), 0n);
-    const latestTotal = validatorReward + validatorPartRewards + liquidityRewards + participantRewards;
+    const txParticipantRewards = participantAddressRewards > 0n ? participantAddressRewards : participantRewards;
+    const latestTotal = validatorReward + validatorPartRewards + liquidityRewards + txParticipantRewards + treasuryReward;
     const annualBlocks = Math.floor(SECONDS_PER_YEAR / TARGET_BLOCK_SECONDS);
     const lpRewardPerBlock = liquidityRewards > 0n ? liquidityRewards : pendingLP;
     const apr =
@@ -112,15 +126,19 @@ export default function RewardsPage() {
       validatorReward,
       validatorPartRewards,
       liquidityRewards,
-      participantRewards,
+      participantRewards: txParticipantRewards,
+      treasuryReward,
       totalStaked,
       pendingLP,
       totalLPRewards,
+      treasuryBalance: toBig(treasury?.balance),
+      treasuryRewardsTotal: toBig(treasury?.treasury_rewards_total),
+      claimedLPRewards: toBig(treasury?.claimed_lp_rewards),
       latestTotal,
       apr,
       apy,
     };
-  }, [latest, providers]);
+  }, [latest, providers, treasury]);
 
   const topProviders = useMemo(
     () =>
@@ -197,8 +215,11 @@ export default function RewardsPage() {
         {metric('Latest Validator Reward', `${formatLQD(analytics.validatorReward)} LQD`, shortAddress(latest?.validator))}
         {metric('Latest LP Rewards', `${formatLQD(analytics.liquidityRewards)} LQD`, 'distributed to active liquidity providers')}
         {metric('Participant Rewards', `${formatLQD(analytics.participantRewards + analytics.validatorPartRewards)} LQD`, 'validator participants + transaction participants')}
+        {metric('Latest Treasury Reward', `${formatLQD(analytics.treasuryReward)} LQD`, 'credited to treasury each block')}
+        {metric('Treasury Balance', `${formatLQD(analytics.treasuryBalance)} LQD`, shortAddress(treasury?.treasury_address))}
         {metric('Total LP Rewards', `${formatLQD(analytics.totalLPRewards)} LQD`, 'lifetime reward accounting')}
         {metric('Pending LP Rewards', `${formatLQD(analytics.pendingLP)} LQD`, 'available/sync pending by provider')}
+        {metric('Claimed LP Rewards', `${formatLQD(analytics.claimedLPRewards)} LQD`, 'credited claim records')}
         {metric('Estimated LP APR / APY', `${analytics.apr.toFixed(2)}% / ${analytics.apy.toFixed(2)}%`, 'based on current latest LP reward pace')}
       </div>
 
@@ -264,6 +285,42 @@ export default function RewardsPage() {
           {claimStatus && <div className="reward-claim-status">{claimStatus}</div>}
         </aside>
       </div>
+
+      <section className="tracker-table-wrap reward-panel">
+        <div className="reward-panel-head">
+          <div>
+            <h3>Reward Ledger</h3>
+            <p>Address-level reward accounting, claim state, and settlement source.</p>
+          </div>
+          <span className="btn-secondary">{ledger.length} rows</span>
+        </div>
+        <table className="tracker-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Block</th>
+              <th>Address</th>
+              <th>Bucket</th>
+              <th>Amount</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ledger.length === 0 ? (
+              <tr><td colSpan={6} className="tracker-empty">No reward ledger rows found yet</td></tr>
+            ) : ledger.map((row, index) => (
+              <tr key={row.id || `${row.address}-${index}`}>
+                <td>{row.timestamp ? new Date(row.timestamp * 1000).toLocaleString() : '-'}</td>
+                <td>{row.block_number ? <Link to={`/blocks/${row.block_number}`}>#{row.block_number}</Link> : '-'}</td>
+                <td><Link to={`/address/${row.address}`}>{shortAddress(row.address)}</Link></td>
+                <td>{row.bucket || '-'}</td>
+                <td>{formatLQD(row.amount)} LQD</td>
+                <td>{row.claim_required ? `${row.status} / claim` : row.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
 
       <section className="tracker-table-wrap reward-panel">
         <div className="reward-panel-head">

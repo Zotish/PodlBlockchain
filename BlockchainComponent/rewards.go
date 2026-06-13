@@ -331,12 +331,14 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 	treasury := constantset.LiquidityPoolAddress
 
 	breakdown := BlockRewardBreakdown{
-		Validator:            validator,
-		ValidatorReward:      "0",
-		ValidatorRewards:     make(map[string]string),
-		ValidatorPartRewards: make(map[string]string),
-		LiquidityRewards:     make(map[string]string),
-		ParticipantRewards:   make(map[string]string),
+		Validator:                  validator,
+		ValidatorReward:            "0",
+		ValidatorRewards:           make(map[string]string),
+		ValidatorPartRewards:       make(map[string]string),
+		LiquidityRewards:           make(map[string]string),
+		ParticipantRewards:         make(map[string]string),
+		ParticipantRewardAddresses: make(map[string]string),
+		TreasuryReward:             "0",
 	}
 
 	// ── 1. Total pool = emission + gas ────────────────────────────────────────
@@ -465,13 +467,16 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 				}
 				portion := portionFromWeight(txPartShare, math.Sqrt(AmountToFloat64(tx.Value)+1), totalTxWeight)
 				addStringAmount(breakdown.ParticipantRewards, tx.TxHash, portion)
-				bc.AddParticipantReward(rewardParticipantAddress(tx), portion)
+				participantAddress := rewardParticipantAddress(tx)
+				addStringAmount(breakdown.ParticipantRewardAddresses, participantAddress, portion)
+				bc.AddParticipantReward(participantAddress, portion)
 			}
 		}
 	}
 
 	// ── 8. Treasury — 11 % (5 % LP redirect + 6 % validator redirect) ────────
 	if treasuryShare.Sign() > 0 {
+		breakdown.TreasuryReward = AmountString(treasuryShare)
 		bc.addAccountBalance(treasury, CopyAmount(treasuryShare))
 	}
 
@@ -523,4 +528,200 @@ func addStringAmount(dst map[string]string, key string, amt *big.Int) {
 		}
 	}
 	dst[key] = AmountString(amt)
+}
+
+const (
+	maxRewardLedgerEntries = 100000
+	maxRewardHistoryRows   = 10000
+)
+
+func (bc *Blockchain_struct) RecordBlockRewardLedger(block *Block) {
+	if bc == nil || block == nil {
+		return
+	}
+	bc.EnsureRuntimeState()
+	if block.RewardBreakdown.ParticipantRewardAddresses == nil {
+		block.RewardBreakdown.ParticipantRewardAddresses = make(map[string]string)
+	}
+
+	ts := int64(block.TimeStamp)
+	if ts <= 0 {
+		ts = time.Now().Unix()
+	}
+	dist := make(map[string]string)
+
+	addDist := func(address, amount string) {
+		amt, err := NewAmountFromString(amount)
+		if err != nil || amt == nil || amt.Sign() == 0 {
+			return
+		}
+		key := normalizeAccountAddress(address)
+		if key == "" {
+			return
+		}
+		addStringAmount(dist, key, amt)
+	}
+
+	recordMap := func(bucket, status, source string, claimRequired bool, values map[string]string) {
+		for address, amount := range values {
+			amt, err := NewAmountFromString(amount)
+			if err != nil || amt == nil || amt.Sign() == 0 {
+				continue
+			}
+			canonical := normalizeAccountAddress(address)
+			if canonical == "" {
+				continue
+			}
+			addDist(canonical, AmountString(amt))
+			bc.recordRewardLedgerEntryLocked(RewardLedgerEntry{
+				ID:            rewardLedgerID(block.BlockNumber, block.CurrentHash, bucket, canonical, source),
+				BlockNumber:   block.BlockNumber,
+				BlockHash:     block.CurrentHash,
+				Timestamp:     ts,
+				Address:       canonical,
+				Bucket:        bucket,
+				Source:        source,
+				Amount:        AmountString(amt),
+				Status:        status,
+				ClaimRequired: claimRequired,
+			})
+		}
+	}
+
+	recordMap("proposer_validator", "credited", "block_reward", false, block.RewardBreakdown.ValidatorRewards)
+	recordMap("validator_participant", "credited", "block_reward", false, block.RewardBreakdown.ValidatorPartRewards)
+	recordMap("liquidity", "pending_claim", "block_reward", true, block.RewardBreakdown.LiquidityRewards)
+	recordMap("transaction_participant", "credited", "block_reward", false, block.RewardBreakdown.ParticipantRewardAddresses)
+	if treasuryReward, err := NewAmountFromString(block.RewardBreakdown.TreasuryReward); err == nil && treasuryReward != nil && treasuryReward.Sign() > 0 {
+		treasuryAddress := normalizeAccountAddress(constantset.LiquidityPoolAddress)
+		addDist(treasuryAddress, AmountString(treasuryReward))
+		bc.recordRewardLedgerEntryLocked(RewardLedgerEntry{
+			ID:          rewardLedgerID(block.BlockNumber, block.CurrentHash, "treasury", treasuryAddress, "block_reward"),
+			BlockNumber: block.BlockNumber,
+			BlockHash:   block.CurrentHash,
+			Timestamp:   ts,
+			Address:     treasuryAddress,
+			Bucket:      "treasury",
+			Source:      "block_reward",
+			Amount:      AmountString(treasuryReward),
+			Status:      "credited",
+		})
+	}
+
+	if len(dist) > 0 {
+		bc.recordRewardSnapshotLocked(RewardSnapshot{
+			BlockNumber: block.BlockNumber,
+			BaseFee:     block.BaseFee,
+			GasUsed:     block.GasUsed,
+			Dist:        dist,
+		})
+	}
+
+	snap := *bc
+	snap.Mutex = sync.Mutex{}
+	if err := PutIntoDB(snap); err != nil {
+		fmt.Printf("warning: failed to persist reward ledger for block %d: %v\n", block.BlockNumber, err)
+	}
+}
+
+func rewardLedgerID(blockNumber uint64, blockHash, bucket, address, source string) string {
+	return fmt.Sprintf("%d:%s:%s:%s:%s", blockNumber, shortHash(blockHash), strings.ToLower(strings.TrimSpace(bucket)), normalizeAccountAddress(address), strings.ToLower(strings.TrimSpace(source)))
+}
+
+func (bc *Blockchain_struct) recordRewardLedgerEntryLocked(entry RewardLedgerEntry) {
+	if entry.Amount == "" || entry.Address == "" {
+		return
+	}
+	bc.EnsureRuntimeState()
+	entry.Address = normalizeAccountAddress(entry.Address)
+	if entry.Timestamp <= 0 {
+		entry.Timestamp = time.Now().Unix()
+	}
+	if entry.ID == "" {
+		entry.ID = fmt.Sprintf("%s:%s:%s:%d:%s", entry.Source, entry.Bucket, entry.Address, entry.Timestamp, entry.TxHash)
+	}
+	for i := range bc.RewardLedger {
+		if bc.RewardLedger[i].ID == entry.ID {
+			bc.RewardLedger[i] = entry
+			return
+		}
+	}
+	bc.RewardLedger = append(bc.RewardLedger, entry)
+	if len(bc.RewardLedger) > maxRewardLedgerEntries {
+		bc.RewardLedger = bc.RewardLedger[len(bc.RewardLedger)-maxRewardLedgerEntries:]
+	}
+}
+
+func (bc *Blockchain_struct) recordRewardSnapshotLocked(snapshot RewardSnapshot) {
+	if bc == nil {
+		return
+	}
+	bc.EnsureRuntimeState()
+	for i := range bc.RewardHistory {
+		if bc.RewardHistory[i].BlockNumber == snapshot.BlockNumber {
+			bc.RewardHistory[i] = snapshot
+			return
+		}
+	}
+	bc.RewardHistory = append(bc.RewardHistory, snapshot)
+	if len(bc.RewardHistory) > maxRewardHistoryRows {
+		bc.RewardHistory = bc.RewardHistory[len(bc.RewardHistory)-maxRewardHistoryRows:]
+	}
+}
+
+func (bc *Blockchain_struct) RecordRewardClaim(address string, amount *big.Int, txHash, source string) {
+	if bc == nil || amount == nil || amount.Sign() == 0 {
+		return
+	}
+	canonical := normalizeAccountAddress(address)
+	balanceAfter := bc.AccountBalanceString(canonical)
+	bc.recordRewardLedgerEntryLocked(RewardLedgerEntry{
+		ID:            fmt.Sprintf("claim:%s:%s:%s", canonical, strings.TrimSpace(txHash), strings.TrimSpace(source)),
+		Timestamp:     time.Now().Unix(),
+		Address:       canonical,
+		Bucket:        "liquidity_claim",
+		Source:        source,
+		Amount:        AmountString(amount),
+		Status:        "credited",
+		ClaimRequired: false,
+		TxHash:        strings.TrimSpace(txHash),
+		BalanceAfter:  balanceAfter,
+	})
+}
+
+func (bc *Blockchain_struct) RewardLedgerRecent(limit int) []RewardLedgerEntry {
+	if bc == nil {
+		return []RewardLedgerEntry{}
+	}
+	bc.EnsureRuntimeState()
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	start := len(bc.RewardLedger) - limit
+	if start < 0 {
+		start = 0
+	}
+	out := make([]RewardLedgerEntry, 0, len(bc.RewardLedger[start:]))
+	for i := len(bc.RewardLedger) - 1; i >= start; i-- {
+		out = append(out, bc.RewardLedger[i])
+	}
+	return out
+}
+
+func (bc *Blockchain_struct) RewardLedgerForAddress(address string, limit int) []RewardLedgerEntry {
+	if bc == nil {
+		return []RewardLedgerEntry{}
+	}
+	bc.EnsureRuntimeState()
+	canonical := normalizeAccountAddress(address)
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	out := make([]RewardLedgerEntry, 0, limit)
+	for i := len(bc.RewardLedger) - 1; i >= 0 && len(out) < limit; i-- {
+		if strings.EqualFold(bc.RewardLedger[i].Address, canonical) {
+			out = append(out, bc.RewardLedger[i])
+		}
+	}
+	return out
 }
