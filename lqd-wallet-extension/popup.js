@@ -176,7 +176,7 @@ function normalizeRegistryToken(token = {}) {
     address,
     name: token.name || token.symbol || "Token",
     symbol: token.symbol || address.slice(2, 6).toUpperCase(),
-    decimals: parseInt(token.decimals, 10) || 8,
+    decimals: normalizeDecimals(token.decimals),
     logo_url: readTokenLogo(token),
     price_usd: readTokenPrice(token),
     price_change_24h: readTokenChange(token),
@@ -229,6 +229,28 @@ function formatLQD(raw) {
   }
   const intPart = str.slice(0, str.length - DECIMALS);
   const fracPart = str.slice(str.length - DECIMALS).replace(/0+$/, "");
+  return fracPart ? `${intPart}.${fracPart}` : intPart;
+}
+
+function normalizeDecimals(decimals, fallback = 8) {
+  const parsed = Number.parseInt(decimals, 10);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 36) return fallback;
+  return parsed;
+}
+
+function formatUnits(raw, decimals = 8, maxFraction = 8) {
+  if (!raw && raw !== 0) return "0";
+  let str = String(raw).trim();
+  if (/^0x[0-9a-f]+$/i.test(str)) {
+    try { str = BigInt(str).toString(); } catch { str = "0"; }
+  }
+  str = str.replace(/[^0-9]/g, "");
+  if (!str || str === "0") return "0";
+  const places = normalizeDecimals(decimals);
+  if (places === 0) return str;
+  const padded = str.padStart(places + 1, "0");
+  const intPart = padded.slice(0, padded.length - places).replace(/^0+/, "") || "0";
+  const fracPart = padded.slice(padded.length - places).slice(0, maxFraction).replace(/0+$/, "");
   return fracPart ? `${intPart}.${fracPart}` : intPart;
 }
 
@@ -497,6 +519,7 @@ async function load() {
   const tokenWatchlist = await syncDexRegistryTokens(data.tokenWatchlist || []);
   renderTokens(tokenWatchlist);
   renderActivity(data.txActivity || []);
+  refreshActivity();
 
   // ── Auto-show dApps tab if there are pending approvals ──────────────────
   ext.runtime.sendMessage({ type: "LQD_GET_PENDING" }, (res) => {
@@ -909,7 +932,7 @@ async function fetchTokenMeta(contractAddr, nodeUrl) {
   return {
     symbol: symbol || "TOKEN",
     name: name || symbol || "Token",
-    decimals: parseInt(decimalsStr, 10) || 8
+    decimals: normalizeDecimals(decimalsStr)
   };
 }
 
@@ -1028,7 +1051,8 @@ async function renderTokens(watchlist) {
       addr ? fetchTokenBalance(contractAddr, addr, nodeUrl) : Promise.resolve("0")
     ]);
 
-    const fmtBal = formatLQD(rawBal);
+    const tokenDecimals = normalizeDecimals(meta.decimals);
+    const fmtBal = formatUnits(rawBal, tokenDecimals);
     const change = formatTokenChange(meta);
     const officialBadge = (meta.official || meta.registry) ? '<span class="token-official-badge">Official</span>' : "";
     div.innerHTML = `
@@ -1047,7 +1071,7 @@ async function renderTokens(watchlist) {
     const sendBtn = document.createElement("button");
     sendBtn.className = "secondary mini";
     sendBtn.textContent = "Send";
-    sendBtn.onclick = () => showTokenSendModal({ address: contractAddr, symbol: meta.symbol, decimals: meta.decimals });
+    sendBtn.onclick = () => showTokenSendModal({ address: contractAddr, symbol: meta.symbol, decimals: tokenDecimals });
     const removeBtn = document.createElement("button");
     removeBtn.className = "ghost mini";
     removeBtn.textContent = "✕";
@@ -1080,9 +1104,67 @@ on("addToken", "click", async () => {
 });
 
 // ── Activity ──────────────────────────────────────────────────────────────────
+function txHashOf(tx = {}) {
+  return String(tx.tx_hash || tx.TxHash || tx.hash || tx.Hash || "").trim();
+}
+
+function normalizeRemoteActivity(tx = {}, address = "") {
+  const hash = txHashOf(tx);
+  const from = tx.from || tx.From || "";
+  const to = tx.to || tx.To || tx.contract_address || tx.ContractAddress || "";
+  const fn = tx.function || tx.Function || "";
+  const value = tx.value ?? tx.Value ?? tx.amount ?? tx.Amount ?? "0";
+  const status = tx.status || tx.Status || (tx.block_number || tx.blockNumber ? "success" : "pending");
+  const ts = Number(tx.timestamp || tx.Timestamp || tx.time || tx.Time || 0);
+  const type = fn ? "contract" : (String(from).toLowerCase() === String(address).toLowerCase() ? "send" : "receive");
+  return {
+    ...tx,
+    type,
+    tx_hash: hash,
+    from,
+    to,
+    value: String(value ?? "0"),
+    status,
+    source: tx.source || tx.Source || "chain",
+    function: fn,
+    block_number: tx.block_number || tx.blockNumber || tx.BlockNumber,
+    time: ts ? (ts < 10_000_000_000 ? ts * 1000 : ts) : Date.now()
+  };
+}
+
+function mergeActivity(localList = [], remoteList = []) {
+  const byKey = new Map();
+  [...remoteList, ...localList].forEach((tx) => {
+    const hash = txHashOf(tx);
+    const key = hash || tx.activity_id || `${tx.type || "tx"}:${tx.time || Date.now()}:${tx.to || ""}`;
+    const existing = byKey.get(key);
+    byKey.set(key, { ...(existing || {}), ...tx });
+  });
+  return Array.from(byKey.values())
+    .sort((a, b) => Number(b.time || 0) - Number(a.time || 0))
+    .slice(0, 200);
+}
+
+async function fetchAddressActivity(address) {
+  if (!address) return [];
+  const base = await getNodeUrl();
+  const res = await fetch(`${base}/address/${encodeURIComponent(address)}/transactions?page_size=100`);
+  if (!res.ok) throw new Error("Activity sync failed");
+  const json = await res.json();
+  const list = Array.isArray(json) ? json : (json.transactions || []);
+  return list.map((tx) => normalizeRemoteActivity(tx, address));
+}
+
 async function refreshActivity() {
-  const data = await ext.storage.local.get(["txActivity"]);
-  renderActivity(data.txActivity || []);
+  const data = await ext.storage.local.get(["address", "txActivity"]);
+  const local = data.txActivity || [];
+  let merged = local;
+  try {
+    const remote = await fetchAddressActivity(data.address);
+    merged = mergeActivity(local, remote);
+    await ext.storage.local.set({ txActivity: merged, txActivitySyncedAt: Date.now() });
+  } catch { }
+  renderActivity(merged);
 }
 
 function renderActivity(list) {
@@ -1101,8 +1183,9 @@ function renderActivity(list) {
       lp_unlock: "Unstake / Unlock LP",
       lp_claim: "Claim LP Rewards",
       validator_register: "Validator Register",
+      receive: "Receive LQD",
     };
-    const icons = { send: "↑", token: "⬡", lp_lock: "🔒", lp_unlock: "🔓", lp_claim: "💧", validator_register: "✅" };
+    const icons = { send: "↑", receive: "↓", token: "⬡", lp_lock: "🔒", lp_unlock: "🔓", lp_claim: "💧", validator_register: "✅" };
     const typeLabel = typeLabels[tx.type] || "Contract Call";
     const icon = icons[tx.type] || "⚙";
     div.innerHTML = `
@@ -1219,19 +1302,24 @@ function renderPending(list) {
   for (const item of list) {
     const div = document.createElement("div");
     div.className = "item pending-item";
+    const summary = summarizeRequest(item);
+    const scope = requestScopeLabel(item.method);
     div.innerHTML = `
-      <div><strong>${item.method}</strong></div>
+      <div><strong>${requestTitle(item.method)}</strong></div>
       ${item.origin ? `<div class="mono origin-text">${item.origin}</div>` : ""}
-      <div class="mono">${summarizeRequest(item)}</div>`;
+      <div class="approval-summary">${summary}</div>
+      <div class="mono">Permission: ${scope}</div>`;
     const row = document.createElement("div");
     row.className = "row";
     const remember = document.createElement("input");
     remember.type = "checkbox";
     remember.title = "Remember this site";
+    remember.checked = item.method === "lqd_connect" || item.method === "lqd_requestAccounts";
+    remember.disabled = item.method === "lqd_connect" || item.method === "lqd_requestAccounts";
     const label = document.createElement("label");
     label.style.cssText = "display:flex;align-items:center;gap:4px;font-size:11px;flex:1";
     label.appendChild(remember);
-    label.appendChild(Object.assign(document.createElement("span"), { textContent: "Remember" }));
+    label.appendChild(Object.assign(document.createElement("span"), { textContent: remember.disabled ? "Connect this site" : "Remember this permission" }));
     const approve = document.createElement("button");
     approve.className = "primary";
     approve.textContent = "Approve";
@@ -1257,16 +1345,31 @@ function handleApproval(id, allow, remember) {
 
 function summarizeRequest(item) {
   const params = item.params || [];
-  if (item.method === "lqd_connect" || item.method === "lqd_requestAccounts") return "Request account access";
+  if (item.method === "lqd_connect" || item.method === "lqd_requestAccounts") return "This site will see your selected LQD address and chain ID.";
   if (item.method === "lqd_sendTransaction") {
     const p = params[0] || {};
-    return `To: ${truncate(p.to || "-", 8)} | Value: ${p.value || "0"}`;
+    return `To: ${truncate(p.to || "-", 8)} | Amount: ${formatLQD(p.value || "0")} LQD | Gas: ${p.gas || 21000}`;
   }
   if (item.method === "lqd_contractTx") {
     const p = params[0] || {};
-    return `Contract: ${truncate(p.contract_address || "-", 8)} | Fn: ${p.function || "-"}`;
+    const args = Array.isArray(p.args) ? p.args.map((arg) => truncate(String(arg), 10)).join(", ") : "";
+    return `Contract: ${truncate(p.contract_address || "-", 8)} | Fn: ${p.function || "-"}${args ? ` | Args: ${args}` : ""}`;
   }
   return JSON.stringify(params).slice(0, 60);
+}
+
+function requestTitle(method) {
+  if (method === "lqd_connect" || method === "lqd_requestAccounts") return "Connect LQD Wallet";
+  if (method === "lqd_sendTransaction") return "Send LQD";
+  if (method === "lqd_contractTx") return "Contract Transaction";
+  return method || "Wallet Request";
+}
+
+function requestScopeLabel(method) {
+  if (method === "lqd_connect" || method === "lqd_requestAccounts") return "Account access for this site only";
+  if (method === "lqd_sendTransaction") return "Send transaction";
+  if (method === "lqd_contractTx") return "Contract call transaction";
+  return "One-time request";
 }
 
 // ── Connected sites (allowlist) ───────────────────────────────────────────────

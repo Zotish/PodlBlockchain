@@ -19,6 +19,7 @@
   }
 
   window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
     const msg = event.data;
     if (!msg || msg.__LQD_EXT__ !== true) return;
 

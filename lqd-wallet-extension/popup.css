@@ -118,6 +118,7 @@ input:focus { border-color: #818cf8; background: #fff; }
 /* ── Pending requests ── */
 .pending-item { border-left: 3px solid var(--accent); }
 .origin-text { color: var(--accent); }
+.approval-summary { margin: 6px 0; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); font-size: 12px; line-height: 1.45; word-break: break-word; }
 .pending-section-title { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; display: flex; align-items: center; gap: 4px; }
 .pending-badge { background: var(--accent); color: #fff; border-radius: 999px; font-size: 10px; padding: 1px 6px; }
 
