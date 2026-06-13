@@ -199,6 +199,7 @@ const AddressPage = () => {
   const [tokenHoldings, setTokenHoldings] = useState([]);
   const [nftHoldings, setNftHoldings] = useState([]);
   const [contractInfo, setContractInfo] = useState(null);
+  const [analytics, setAnalytics] = useState(null);
   const [activeTab, setActiveTab] = useState("transactions");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -209,6 +210,33 @@ const AddressPage = () => {
     const fetchAddressData = async () => {
       try {
         setError(null);
+        const indexed = await fetchJSON(`/address/${address}/overview`, { cacheTtlMs: 2500, timeoutMs: 10000 }).catch(() => null);
+        if (indexed && indexed.address) {
+          if (cancelled) return;
+          const allTxs = Array.isArray(indexed.transactions) ? indexed.transactions : [];
+          setAddressData({
+            address,
+            balance: indexed.balance ?? "0",
+            confirmedBalance: indexed.confirmed_balance ?? indexed.balance ?? "0",
+            pendingBalance: indexed.pending_balance_change ?? "0",
+            isValidator: indexed.is_validator || indexed.isValidator || false
+          });
+          setTransactions(allTxs.map(normalizeTx));
+          setContractInfo(indexed.contract || null);
+          setTokenHoldings((indexed.token_balances || []).filter((token) => hasPositiveBalance(token.balance || "0")).map((token) => ({
+            ...token,
+            decimals: Number(token.decimals || 8) || 8,
+            balanceFormatted: formatTokenAmount(token.balance, token.decimals || 8),
+          })));
+          setNftHoldings((indexed.nft_balances || []).map((nft) => ({
+            ...nft,
+            tokenIds: nft.token_ids || nft.tokenIds || [],
+            count: nft.count || (nft.token_ids || []).length,
+          })));
+          setAnalytics(indexed.analytics || null);
+          setLoading(false);
+          return;
+        }
         const [balanceResult, txsData, contractData, registryTokens] = await Promise.all([
           fetchCombinedBalance(address),
           fetchJSON(`/address/${address}/transactions`, { cacheTtlMs: 2500 }).catch(() => []),
@@ -290,6 +318,13 @@ const AddressPage = () => {
         setContractInfo(currentContract);
         setTokenHoldings(tokenResults.filter((token) => hasPositiveBalance(token.balance || "0")));
         setNftHoldings(nftResults.filter((nft) => nft.count > 0));
+        setAnalytics({
+          tx_count: mergedTxs.length,
+          token_tx_count: mergedTxs.filter(isTokenTx).length,
+          internal_count: mergedTxs.filter(isInternalTx).length,
+          pending_count: mergedTxs.filter((tx) => lower(tx.status || tx.Status) === "pending").length,
+          daily: [],
+        });
       } catch (err) {
         if (!cancelled) setError(err.message || "Failed to load address details");
       } finally {
@@ -327,6 +362,7 @@ const AddressPage = () => {
     ["internal", `Internal Txns (${internalTransactions.length})`],
     ["holdings", `Tokens (${tokenHoldings.length})`],
     ["nfts", `NFTs (${nftCount})`],
+    ["analytics", "Analytics"],
     ["contract", contractInfo ? "Contract" : "Contract Info"],
   ];
 
@@ -464,6 +500,30 @@ const AddressPage = () => {
           ) : (
             <div className="empty-state">No NFT holdings found for this address.</div>
           )}
+        </section>
+      )}
+
+      {activeTab === "analytics" && (
+        <section className="address-panel">
+          <h3>Address Analytics</h3>
+          <div className="address-summary-grid compact">
+            <div className="address-metric"><span>Total Txns</span><strong>{analytics?.tx_count ?? transactions.length}</strong></div>
+            <div className="address-metric"><span>Pending</span><strong>{analytics?.pending_count ?? 0}</strong></div>
+            <div className="address-metric"><span>Internal</span><strong>{analytics?.internal_count ?? internalTransactions.length}</strong></div>
+            <div className="address-metric"><span>Token Txns</span><strong>{analytics?.token_tx_count ?? tokenTransactions.length}</strong></div>
+          </div>
+          <div className="address-chart">
+            {(analytics?.daily || []).length ? analytics.daily.map((row) => {
+              const max = Math.max(...analytics.daily.map((d) => Number(d.count || 0)), 1);
+              const height = Math.max(8, Math.round((Number(row.count || 0) / max) * 120));
+              return (
+                <div className="address-chart-bar" key={row.date}>
+                  <span style={{ height }} title={`${row.date}: ${row.count} tx`} />
+                  <small>{String(row.date || "").slice(5)}</small>
+                </div>
+              );
+            }) : <div className="empty-state">Analytics will appear after indexed confirmed activity.</div>}
+          </div>
         </section>
       )}
 

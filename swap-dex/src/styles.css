@@ -887,6 +887,12 @@ body {
   margin-bottom: 12px;
 }
 
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .settings-section h3 {
   font-size: 15px;
   font-weight: 700;
@@ -943,6 +949,7 @@ code {
 @media (max-width: 600px) {
   .header { padding: 12px 16px; }
   .nav-tabs { display: none; }
+  .settings-grid { grid-template-columns: 1fr; }
   .mobile-tabs {
     display: flex;
     gap: 0;

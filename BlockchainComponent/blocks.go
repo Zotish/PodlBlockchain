@@ -44,6 +44,7 @@ func NewBlock(blockNumber uint64, prevHash string) Block {
 	newBlock.BaseFee = 0
 	newBlock.RewardBreakdown.ValidatorReward = AmountString(new(big.Int).Mul(big.NewInt(200), big.NewInt(1e8)))
 	newBlock.RewardBreakdown.ParticipantRewards = make(map[string]string)
+	newBlock.RewardBreakdown.ParticipantRewardAddresses = make(map[string]string)
 	newBlock.RewardBreakdown.LiquidityRewards = make(map[string]string)
 	return *newBlock
 }
@@ -369,6 +370,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	bc.LastBlockMiningTime = time.Since(start)
 
 	if finalized {
+		bc.RecordBlockRewardLedger(&newBlock)
 		// Dynamic Liquidity Engine must only run after finalization; otherwise
 		// failed candidate blocks can mutate strategy state.
 		if bc.DLEngine != nil {

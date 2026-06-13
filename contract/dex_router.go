@@ -32,6 +32,15 @@ type swapRoute struct {
 	hops       int
 }
 
+type pairQuote struct {
+	amountOut      *big.Int
+	priceImpactBps *big.Int
+	reserveIn      *big.Int
+	reserveOut     *big.Int
+	fee            *big.Int
+	raw            string
+}
+
 func parseBig(v string) *big.Int {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -52,6 +61,14 @@ func normAddr(a string) string {
 	return a
 }
 
+func swapReceiver(ctx *bc.Context) string {
+	receiver := normAddr(ctx.OriginAddr)
+	if receiver == "" {
+		receiver = normAddr(ctx.CallerAddr)
+	}
+	return receiver
+}
+
 func pairKey(a, b string) (pk, t0, t1 string) {
 	a, b = normAddr(a), normAddr(b)
 	if a < b {
@@ -66,6 +83,27 @@ func sortPairAmounts(tokenA, tokenB, amountA, amountB string) (string, string) {
 		return amountA, amountB
 	}
 	return amountB, amountA
+}
+
+func requireDeadline(ctx *bc.Context, deadline string) {
+	dl := parseBig(deadline)
+	if dl.Sign() <= 0 {
+		ctx.Revert("deadline must be > 0")
+	}
+	if ctx.BlockTime > dl.Int64() {
+		ctx.Revert("transaction expired")
+	}
+}
+
+func quoteOutputBps(amountIn, amountOut, reserveIn, reserveOut *big.Int) *big.Int {
+	if amountIn.Sign() <= 0 || amountOut.Sign() <= 0 || reserveIn.Sign() <= 0 || reserveOut.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	spotOut := new(big.Int).Div(new(big.Int).Mul(amountIn, reserveOut), reserveIn)
+	if spotOut.Sign() <= 0 || spotOut.Cmp(amountOut) <= 0 {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Div(new(big.Int).Mul(new(big.Int).Sub(spotOut, amountOut), big.NewInt(10000)), spotOut)
 }
 
 func (r swapRoute) valid() bool {
@@ -166,6 +204,48 @@ func (r *Router) pairDepth(ctx *bc.Context, pairAddr string) *big.Int {
 		return r0
 	}
 	return r1
+}
+
+func (r *Router) quotePair(ctx *bc.Context, pairAddr, amountIn, tokenIn string) pairQuote {
+	zero := pairQuote{
+		amountOut:      big.NewInt(0),
+		priceImpactBps: big.NewInt(0),
+		reserveIn:      big.NewInt(0),
+		reserveOut:     big.NewInt(0),
+		fee:            big.NewInt(0),
+	}
+	if pairAddr == "" {
+		return zero
+	}
+	res, err := ctx.Call(pairAddr, "GetQuote", []string{amountIn, tokenIn})
+	if err != nil || res == nil || res.Output == "" {
+		legacy, legacyErr := ctx.Call(pairAddr, "GetAmountOut", []string{amountIn, tokenIn})
+		if legacyErr != nil || legacy == nil || legacy.Output == "" {
+			return zero
+		}
+		zero.amountOut = parseBig(legacy.Output)
+		zero.raw = legacy.Output
+		return zero
+	}
+	parts := strings.Split(res.Output, ",")
+	q := zero
+	q.raw = res.Output
+	if len(parts) > 0 {
+		q.amountOut = parseBig(parts[0])
+	}
+	if len(parts) > 1 {
+		q.priceImpactBps = parseBig(parts[1])
+	}
+	if len(parts) > 2 {
+		q.reserveIn = parseBig(parts[2])
+	}
+	if len(parts) > 3 {
+		q.reserveOut = parseBig(parts[3])
+	}
+	if len(parts) > 8 {
+		q.fee = parseBig(parts[8])
+	}
+	return q
 }
 
 func (r *Router) pairToken(ctx *bc.Context, pairAddr, fn string) string {
@@ -310,26 +390,45 @@ func (r *Router) SwapExactTokensForTokens(ctx *bc.Context, amountIn string, minA
 	}
 
 	if route.kind == "direct" {
+		quote := r.quotePair(ctx, route.directPair, amountIn, tokenIn)
+		if quote.amountOut.Cmp(parseBig(minAmountOut)) < 0 {
+			ctx.Revert("slippage: insufficient output amount")
+		}
 		if _, err := ctx.Call(route.directPair, "Swap", []string{amountIn, minAmountOut, tokenIn}); err != nil {
 			ctx.Revert("Swap failed: " + err.Error())
 		}
 		return
 	}
 
-	hop1Res, err := ctx.Call(route.hop1Addr, "GetAmountOut", []string{amountIn, tokenIn})
-	if err != nil || hop1Res == nil || hop1Res.Output == "" || hop1Res.Output == "0" {
+	hop1Quote := r.quotePair(ctx, route.hop1Addr, amountIn, tokenIn)
+	if hop1Quote.amountOut.Sign() <= 0 {
 		ctx.Revert("route hop1 gives zero output")
 	}
-	if _, err := ctx.Call(route.hop1Addr, "Swap", []string{amountIn, "0", tokenIn}); err != nil {
+	hop2Quote := r.quotePair(ctx, route.hop2Addr, hop1Quote.amountOut.String(), route.midToken)
+	if hop2Quote.amountOut.Cmp(parseBig(minAmountOut)) < 0 {
+		ctx.Revert("slippage: routed output below minimum")
+	}
+	if _, err := ctx.Call(route.hop1Addr, "SwapTo", []string{ctx.ContractAddr, amountIn, "0", tokenIn}); err != nil {
 		ctx.Revert("route hop1 swap failed: " + err.Error())
 	}
-	if _, err := ctx.Call(route.hop2Addr, "Swap", []string{hop1Res.Output, minAmountOut, route.midToken}); err != nil {
+	if route.midToken != NATIVE {
+		if _, err := ctx.Call(route.midToken, "Approve", []string{route.hop2Addr, hop1Quote.amountOut.String()}); err != nil {
+			ctx.Revert("route hop2 approval failed: " + err.Error())
+		}
+	}
+	if _, err := ctx.Call(route.hop2Addr, "SwapFromContract", []string{swapReceiver(ctx), hop1Quote.amountOut.String(), minAmountOut, route.midToken}); err != nil {
 		ctx.Revert("route hop2 swap failed: " + err.Error())
 	}
+	ctx.Set("output", hop2Quote.amountOut.String())
 	ctx.Emit("MultiHopSwap", map[string]interface{}{
 		"tokenIn": tokenIn, "midToken": route.midToken, "tokenOut": tokenOut,
-		"hop1": route.hop1Addr, "hop2": route.hop2Addr,
+		"hop1": route.hop1Addr, "hop2": route.hop2Addr, "amountOut": hop2Quote.amountOut.String(),
 	})
+}
+
+func (r *Router) SwapExactTokensForTokensWithDeadline(ctx *bc.Context, amountIn string, minAmountOut string, tokenIn string, tokenOut string, deadline string) {
+	requireDeadline(ctx, deadline)
+	r.SwapExactTokensForTokens(ctx, amountIn, minAmountOut, tokenIn, tokenOut)
 }
 
 func (r *Router) GetBestRoute(ctx *bc.Context, tokenIn string, tokenOut string) {
@@ -351,13 +450,57 @@ func (r *Router) GetBestRoute(ctx *bc.Context, tokenIn string, tokenOut string) 
 }
 
 func (r *Router) GetAmountOut(ctx *bc.Context, amountIn string, tokenIn string, tokenOut string) {
-	pairAddr := r.pairFor(ctx, tokenIn, tokenOut)
-	res, err := ctx.Call(pairAddr, "GetAmountOut", []string{amountIn, tokenIn})
-	if err != nil || res == nil {
+	route := r.selectBestSwapRoute(ctx, tokenIn, tokenOut)
+	if !route.valid() {
 		ctx.Set("output", "0")
 		return
 	}
-	ctx.Set("output", res.Output)
+	if route.kind == "direct" {
+		ctx.Set("output", r.quotePair(ctx, route.directPair, amountIn, tokenIn).amountOut.String())
+		return
+	}
+	hop1 := r.quotePair(ctx, route.hop1Addr, amountIn, tokenIn)
+	if hop1.amountOut.Sign() <= 0 {
+		ctx.Set("output", "0")
+		return
+	}
+	hop2 := r.quotePair(ctx, route.hop2Addr, hop1.amountOut.String(), route.midToken)
+	ctx.Set("output", hop2.amountOut.String())
+}
+
+func (r *Router) GetSwapQuote(ctx *bc.Context, amountIn string, tokenIn string, tokenOut string) {
+	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
+	route := r.selectBestSwapRoute(ctx, tokenIn, tokenOut)
+	if !route.valid() {
+		ctx.Set("output", "none|0|0")
+		ctx.Emit("SwapQuote", map[string]interface{}{"type": "none", "amountOut": "0"})
+		return
+	}
+	if route.kind == "direct" {
+		q := r.quotePair(ctx, route.directPair, amountIn, tokenIn)
+		ctx.Set("output", strings.Join([]string{"direct", q.amountOut.String(), q.priceImpactBps.String(), route.directPair, q.reserveIn.String(), q.reserveOut.String(), q.fee.String()}, "|"))
+		ctx.Emit("SwapQuote", map[string]interface{}{
+			"type": "direct", "amountOut": q.amountOut.String(), "priceImpactBps": q.priceImpactBps.String(), "pair": route.directPair,
+		})
+		return
+	}
+	hop1 := r.quotePair(ctx, route.hop1Addr, amountIn, tokenIn)
+	hop2 := r.quotePair(ctx, route.hop2Addr, hop1.amountOut.String(), route.midToken)
+	impact := big.NewInt(0)
+	if hop1.reserveIn.Sign() > 0 && hop1.reserveOut.Sign() > 0 && hop2.reserveIn.Sign() > 0 && hop2.reserveOut.Sign() > 0 {
+		spotMid := new(big.Int).Div(new(big.Int).Mul(parseBig(amountIn), hop1.reserveOut), hop1.reserveIn)
+		spotFinal := new(big.Int).Div(new(big.Int).Mul(spotMid, hop2.reserveOut), hop2.reserveIn)
+		if spotFinal.Sign() > 0 && spotFinal.Cmp(hop2.amountOut) > 0 {
+			impact.Div(new(big.Int).Mul(new(big.Int).Sub(spotFinal, hop2.amountOut), big.NewInt(10000)), spotFinal)
+		}
+	} else {
+		impact = quoteOutputBps(parseBig(amountIn), hop2.amountOut, hop1.reserveIn, hop1.reserveOut)
+	}
+	ctx.Set("output", strings.Join([]string{"2hop", hop2.amountOut.String(), impact.String(), route.hop1Addr + "," + route.hop2Addr, route.midToken, hop1.amountOut.String(), hop1.priceImpactBps.String(), hop2.priceImpactBps.String()}, "|"))
+	ctx.Emit("SwapQuote", map[string]interface{}{
+		"type": "2hop", "amountOut": hop2.amountOut.String(), "priceImpactBps": impact.String(), "midToken": route.midToken,
+		"hop1": route.hop1Addr, "hop2": route.hop2Addr, "hop1Out": hop1.amountOut.String(),
+	})
 }
 
 func (r *Router) GetPair(ctx *bc.Context, tokenA string, tokenB string) {

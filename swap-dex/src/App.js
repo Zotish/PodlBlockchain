@@ -10,10 +10,14 @@ import {
   getContractStorage,
   getDexRegistryConfig,
   getDexRegistryTokens,
+  getDynamicLiquidityStatus,
   getTokenAllowance,
   getTokenBalance,
   getTokenMeta,
   registerDexValidator,
+  setDynamicLiquidityOracle,
+  setStrategyVaultSafety,
+  triggerDynamicLiquidity,
   waitForTx,
   sendContractTx,
 } from "./api";
@@ -21,7 +25,7 @@ import { loadTokens, mergeTokens, saveTokens, upsertToken } from "./storage";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SECS_PER_DAY = 86400;
-const TABS = ["Swap", "Pool", "Validate", "Settings"];
+const TABS = ["Swap", "Pool", "Strategy", "Validate", "Settings"];
 const SLIPPAGE_PRESETS = ["0.1", "0.5", "1.0"];
 const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 const DEX_GAS = {
@@ -91,6 +95,34 @@ function shortAddr(a) {
 
 function extractHash(res) {
   return res?.tx_hash || res?.TxHash || res?.hash || "";
+}
+
+function txFailed(tx) {
+  return String(tx?.status || tx?.Status || "").toLowerCase() === "failed";
+}
+
+function parseSwapQuoteOutput(output = "") {
+  const parts = String(output || "").split("|");
+  if (parts.length < 3 || !parts[0] || parts[0] === "none") return null;
+  if (parts[0] === "direct") {
+    return {
+      type: "direct",
+      amountOut: parts[1] || "0",
+      impactBps: Number(safeBig(parts[2] || "0")),
+      route: parts[3] || "",
+      fee: parts[6] || "0",
+    };
+  }
+  return {
+    type: "2hop",
+    amountOut: parts[1] || "0",
+    impactBps: Number(safeBig(parts[2] || "0")),
+    route: parts[3] || "",
+    midToken: parts[4] || "",
+    hop1Out: parts[5] || "0",
+    hop1ImpactBps: Number(safeBig(parts[6] || "0")),
+    hop2ImpactBps: Number(safeBig(parts[7] || "0")),
+  };
 }
 
 // ─── Token icon letter ─────────────────────────────────────────────────────
@@ -164,6 +196,15 @@ export default function App() {
   const [valLPAmt,    setValLPAmt]    = useState("");
   const [valInfo,     setValInfo]     = useState(null);
 
+  // Strategy / keeper
+  const [strategyStatus, setStrategyStatus] = useState(null);
+  const [keeperKey, setKeeperKey] = useState(() => localStorage.getItem("lqd_keeper_api_key") || "");
+  const [oraclePair, setOraclePair] = useState("");
+  const [oracleDemand, setOracleDemand] = useState("7500");
+  const [vaultMinOutBps, setVaultMinOutBps] = useState("9900");
+  const [vaultMaxMoveBps, setVaultMaxMoveBps] = useState("2500");
+  const [vaultInterval, setVaultInterval] = useState("300");
+
   // Wallet dropdown
   const [showWalletMenu, setShowWalletMenu] = useState(false);
   const walletMenuRef = useRef(null);
@@ -199,7 +240,7 @@ export default function App() {
   const minReceived = amtOut && activeSlip
     ? fmtAmount(
         ((safeBig(parseHuman(amtOut, outDec)) * BigInt(Math.floor((1 - parseFloat(activeSlip) / 100) * 10000))) / 10000n).toString(),
-        outDec
+        decB
       )
     : "";
 
@@ -232,17 +273,52 @@ export default function App() {
   // tokenA/tokenB, so quoting stays top-to-bottom instead of using a second
   // hidden direction flag.
   useEffect(() => {
+    let alive = true;
     const inDec = decA;
     const rawIn  = safeBig(parseHuman(amtIn, inDec));
     const resA   = safeBig(pool.reserveA);
     const resB   = safeBig(pool.reserveB);
 
-    const rawOut = quoteOut(rawIn, resA, resB);
-    setAmtOut(rawOut > 0n ? fmtAmount(rawOut.toString(), decB) : "");
-    setImpact(priceImpactBps(rawIn, resA));
-    setQuoteAt(rawOut > 0n ? Date.now() : 0);
+    async function quote() {
+      if (!amtIn || rawIn <= 0n || !tokenA || !tokenB || !routeContractAddr) {
+        setAmtOut("");
+        setImpact(0);
+        setQuoteAt(0);
+        return;
+      }
+      try {
+        const res = await callContract({
+          address: routeContractAddr,
+          caller: wallet.address || ZERO_ADDR,
+          fn: "GetSwapQuote",
+          args: [rawIn.toString(), tokenA, tokenB],
+          value: "0"
+        });
+        if (!alive) return;
+        const q = parseSwapQuoteOutput(res?.output || res?.Output || "");
+        if (q && safeBig(q.amountOut) > 0n) {
+          setAmtOut(fmtAmount(q.amountOut, decB));
+          setImpact(q.impactBps);
+          setQuoteAt(Date.now());
+          if (q.type === "2hop") {
+            setRouteInfo(`Multi-hop · ${q.route.split(",").map(shortAddr).join(" → ")} · ${fmtBps(q.impactBps)}% impact`);
+          } else {
+            setRouteInfo(`Direct · ${shortAddr(q.route)}`);
+          }
+          return;
+        }
+      } catch {}
+      if (!alive) return;
+      const rawOut = quoteOut(rawIn, resA, resB);
+      setAmtOut(rawOut > 0n ? fmtAmount(rawOut.toString(), decB) : "");
+      setImpact(priceImpactBps(rawIn, resA));
+      setQuoteAt(rawOut > 0n ? Date.now() : 0);
+    }
+
+    quote();
+    return () => { alive = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amtIn, pool.reserveA, pool.reserveB, decA, decB]);
+  }, [amtIn, tokenA, tokenB, routeContractAddr, wallet.address, pool.reserveA, pool.reserveB, decA, decB]);
 
   useEffect(() => {
     let alive = true;
@@ -626,7 +702,10 @@ export default function App() {
       });
       const hash = extractHash(res);
       if (hash) {
-        await waitForTx(hash, 30000).catch(() => null);
+        const confirmed = await waitForTx(hash, 30000).catch(() => null);
+        if (txFailed(confirmed)) {
+          throw new Error(confirmed?.error || confirmed?.Error || confirmed?.failure_reason || "Transaction failed on-chain");
+        }
       }
       showToast(`${successMsg}${hash ? " · " + shortAddr(hash) : ""}`, "success");
       // Refresh balances + pool after TX mines
@@ -697,7 +776,7 @@ export default function App() {
     const rawIn = parseHuman(amtIn, inDec);
 
     const slipBps = parseFloat(activeSlip) * 100;
-    if (impact > slipBps * 100) {
+    if (impact > slipBps) {
       const ok = window.confirm(`Price impact (${fmtBps(impact)}%) exceeds your slippage tolerance (${activeSlip}%). Continue?`);
       if (!ok) return;
     }
@@ -722,9 +801,10 @@ export default function App() {
     const minOut = ((rawOutBig * BigInt(Math.floor((1 - slip) * 10000))) / 10000n).toString();
 
     const nativeValue = isNativeIn ? rawIn : "0";
+    const deadlineUnix = (Math.floor(Date.now() / 1000) + Math.max(1, parseInt(deadlineMinutes, 10) || 20) * 60).toString();
     const ok = await sendTx(
-      routeContractAddr, "SwapExactTokensForTokens",
-      [rawIn, minOut, tokenIn, tokenOut],
+      routeContractAddr, "SwapExactTokensForTokensWithDeadline",
+      [rawIn, minOut, tokenIn, tokenOut, deadlineUnix],
       "Swap submitted",
       nativeValue,
       DEX_GAS.swap
@@ -1016,6 +1096,79 @@ export default function App() {
     setModalOpen(false);
   }
 
+  const refreshStrategyStatus = useCallback(async () => {
+    const data = await getDynamicLiquidityStatus();
+    setStrategyStatus(data);
+    const safety = data?.safety || data?.vault_safety;
+    if (safety) {
+      if (safety.min_out_bps) setVaultMinOutBps(String(safety.min_out_bps));
+      if (safety.max_move_bps) setVaultMaxMoveBps(String(safety.max_move_bps));
+      if (safety.min_rebalance_interval_s) setVaultInterval(String(safety.min_rebalance_interval_s));
+    }
+    return data;
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "Strategy") return;
+    refreshStrategyStatus().catch(e => showToast(e.message || "Strategy status unavailable", "error"));
+  }, [tab, refreshStrategyStatus]);
+
+  async function runKeeperTrigger() {
+    setLoading(true);
+    try {
+      localStorage.setItem("lqd_keeper_api_key", keeperKey);
+      const data = await triggerDynamicLiquidity({ apiKey: keeperKey, reason: "keeper-ui" });
+      setStrategyStatus(s => ({ ...(s || {}), metrics: data.metrics || [], timestamp: data.timestamp }));
+      showToast(`Keeper updated ${data.metrics?.length || 0} pools`, "success");
+    } catch (e) {
+      showToast(e.message || "Keeper trigger failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveOracleSignal() {
+    if (!oraclePair) {
+      showToast("Pair address required", "error");
+      return;
+    }
+    setLoading(true);
+    try {
+      localStorage.setItem("lqd_keeper_api_key", keeperKey);
+      await setDynamicLiquidityOracle({
+        pairAddress: oraclePair,
+        demandBps: oracleDemand,
+        source: "keeper-ui",
+        apiKey: keeperKey
+      });
+      const data = await refreshStrategyStatus();
+      showToast(`Oracle signal saved (${data.oracle_signals?.length || 0} active)`, "success");
+    } catch (e) {
+      showToast(e.message || "Oracle update failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveVaultSafety() {
+    setLoading(true);
+    try {
+      localStorage.setItem("lqd_keeper_api_key", keeperKey);
+      const data = await setStrategyVaultSafety({
+        minOutBps: vaultMinOutBps,
+        maxMoveBps: vaultMaxMoveBps,
+        minRebalanceIntervalS: vaultInterval,
+        apiKey: keeperKey
+      });
+      setStrategyStatus(s => ({ ...(s || {}), safety: data.safety }));
+      showToast("Vault safety saved", "success");
+    } catch (e) {
+      showToast(e.message || "Vault safety update failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   // ── Filtered token list ───────────────────────────────────────────────────
   const filteredTokens = tokens.filter(t => {
     const q = modalSearch.toLowerCase();
@@ -1038,6 +1191,8 @@ export default function App() {
   const spotPrice = resA > 0n
     ? (Number(resB * 10000n / resA) / 10000).toFixed(4)
     : null;
+  const strategyRows = Array.isArray(strategyStatus?.metrics) ? strategyStatus.metrics : [];
+  const oracleSignals = Array.isArray(strategyStatus?.oracle_signals) ? strategyStatus.oracle_signals : [];
 
   // ════════════════════════════════════════════════════════════════════════════
   return (
@@ -1526,6 +1681,127 @@ export default function App() {
                 )}
               </>
             )}
+          </div>
+        </main>
+      )}
+
+      {/* ══════════════════ STRATEGY TAB ════════════════════════════════ */}
+      {tab === "Strategy" && (
+        <main className="page">
+          <div className="page-wide">
+            <div className="pool-header">
+              <h2>Dynamic Liquidity</h2>
+              <button className="pool-btn secondary" style={{ width: "auto", padding: "10px 20px" }}
+                onClick={() => refreshStrategyStatus().then(() => showToast("Strategy refreshed", "success")).catch(e => showToast(e.message || "Refresh failed", "error"))}>
+                Refresh
+              </button>
+            </div>
+
+            <div className="pool-card" style={{ marginBottom: 14 }}>
+              <div className="pool-stats">
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Tracked Pools</div>
+                  <div className="pool-stat-value">{strategyRows.length}</div>
+                </div>
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Oracle Signals</div>
+                  <div className="pool-stat-value">{oracleSignals.length}</div>
+                </div>
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Max Weight Step</div>
+                  <div className="pool-stat-value">{strategyStatus?.max_weight_step || "—"}</div>
+                </div>
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Oracle TTL</div>
+                  <div className="pool-stat-value">{strategyStatus?.max_oracle_age_seconds || "—"}s</div>
+                </div>
+              </div>
+
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: "var(--text2)", textAlign: "left" }}>
+                      <th style={{ padding: "8px 6px" }}>Pair</th>
+                      <th style={{ padding: "8px 6px" }}>Demand</th>
+                      <th style={{ padding: "8px 6px" }}>Oracle</th>
+                      <th style={{ padding: "8px 6px" }}>Price</th>
+                      <th style={{ padding: "8px 6px" }}>Weight</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {strategyRows.length === 0 ? (
+                      <tr><td colSpan="5" style={{ padding: 12, color: "var(--text2)" }}>No DEX pairs found yet.</td></tr>
+                    ) : strategyRows.map(row => (
+                      <tr key={row.pair_address} style={{ borderTop: "1px solid var(--border)" }}>
+                        <td style={{ padding: "10px 6px" }}>
+                          <div style={{ fontWeight: 700 }}>{row.token0 || "?"} / {row.token1 || "?"}</div>
+                          <div style={{ color: "var(--text2)" }}>{shortAddr(row.pair_address)}</div>
+                        </td>
+                        <td style={{ padding: "10px 6px" }}>{row.demand_weight || 0}</td>
+                        <td style={{ padding: "10px 6px" }}>{row.oracle_demand_bps || 0} bps</td>
+                        <td style={{ padding: "10px 6px" }}>+{row.price_bonus || 0}</td>
+                        <td style={{ padding: "10px 6px", fontWeight: 800 }}>
+                          {row.routing_weight || 0}{row.safety_capped ? " capped" : ""}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="settings-grid">
+              <div className="settings-section">
+                <h3>Keeper Trigger</h3>
+                <div className="field">
+                  <label>Admin API Key</label>
+                  <input type="password" value={keeperKey}
+                    onChange={e => setKeeperKey(e.target.value)}
+                    placeholder="X-API-Key when LQD_API_KEY is set" />
+                </div>
+                <button className="action-btn secondary" style={{ margin: "8px 0 0" }} onClick={runKeeperTrigger} disabled={loading}>
+                  {loading ? <span className="spinner" /> : "Run Keeper Epoch"}
+                </button>
+              </div>
+
+              <div className="settings-section">
+                <h3>Oracle Demand</h3>
+                <div className="field">
+                  <label>Pair Address</label>
+                  <input value={oraclePair} onChange={e => setOraclePair(e.target.value)} placeholder="0x..." />
+                </div>
+                <div className="field">
+                  <label>Demand Bps</label>
+                  <input type="number" min="0" max="10000" value={oracleDemand}
+                    onChange={e => setOracleDemand(e.target.value)} />
+                </div>
+                <button className="action-btn secondary" style={{ margin: "8px 0 0" }} onClick={saveOracleSignal} disabled={loading}>
+                  Save Oracle Signal
+                </button>
+              </div>
+
+              <div className="settings-section">
+                <h3>Vault Safety</h3>
+                <div className="field">
+                  <label>Min Out Bps</label>
+                  <input type="number" min="9000" max="10000" value={vaultMinOutBps}
+                    onChange={e => setVaultMinOutBps(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>Max Move Bps</label>
+                  <input type="number" min="1" max="10000" value={vaultMaxMoveBps}
+                    onChange={e => setVaultMaxMoveBps(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>Cooldown Seconds</label>
+                  <input type="number" min="0" value={vaultInterval}
+                    onChange={e => setVaultInterval(e.target.value)} />
+                </div>
+                <button className="action-btn secondary" style={{ margin: "8px 0 0" }} onClick={saveVaultSafety} disabled={loading}>
+                  Save Safety
+                </button>
+              </div>
+            </div>
           </div>
         </main>
       )}

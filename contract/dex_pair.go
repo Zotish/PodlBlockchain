@@ -84,6 +84,36 @@ func calcAmountOut(amtIn, resIn, resOut *big.Int) *big.Int {
 	return new(big.Int).Div(num, den)
 }
 
+func calcAmountIn(amtOut, resIn, resOut *big.Int) *big.Int {
+	if amtOut.Sign() == 0 || resIn.Sign() == 0 || resOut.Sign() == 0 || amtOut.Cmp(resOut) >= 0 {
+		return big.NewInt(0)
+	}
+	num := new(big.Int).Mul(new(big.Int).Mul(resIn, amtOut), big.NewInt(1000))
+	den := new(big.Int).Mul(new(big.Int).Sub(resOut, amtOut), big.NewInt(997))
+	return new(big.Int).Add(new(big.Int).Div(num, den), big.NewInt(1))
+}
+
+func calcPriceImpactBps(amtIn, amtOut, resIn, resOut *big.Int) *big.Int {
+	if amtIn.Sign() <= 0 || amtOut.Sign() <= 0 || resIn.Sign() <= 0 || resOut.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	spotOut := new(big.Int).Div(new(big.Int).Mul(amtIn, resOut), resIn)
+	if spotOut.Sign() <= 0 || spotOut.Cmp(amtOut) <= 0 {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Div(new(big.Int).Mul(new(big.Int).Sub(spotOut, amtOut), big.NewInt(10000)), spotOut)
+}
+
+func requireDeadline(ctx *bc.Context, deadline string) {
+	dl := parseBig(deadline)
+	if dl.Sign() <= 0 {
+		ctx.Revert("deadline must be > 0")
+	}
+	if ctx.BlockTime > dl.Int64() {
+		ctx.Revert("transaction expired")
+	}
+}
+
 // ─── Token transfer helpers ───────────────────────────────────────────────────
 
 func (p *Pair) pullToken(ctx *bc.Context, token, from string, amt *big.Int) {
@@ -399,12 +429,15 @@ func (p *Pair) RemoveLiquidityTo(ctx *bc.Context, receiver string, lpAmount stri
 
 // ─── Swap ─────────────────────────────────────────────────────────────────────
 
-// Swap: send amountIn of tokenIn, receive at least minAmountOut of the other token.
-func (p *Pair) Swap(ctx *bc.Context, amountIn string, minAmountOut string, tokenIn string) {
+func (p *Pair) swapTo(ctx *bc.Context, receiver string, amountIn string, minAmountOut string, tokenIn string, pullFromActor bool) *big.Int {
 	t0 := ctx.Get("token0")
 	t1 := ctx.Get("token1")
 	if t0 == "" {
 		ctx.Revert("pair not initialized")
+	}
+	receiver = strings.ToLower(strings.TrimSpace(receiver))
+	if receiver == "" {
+		ctx.Revert("invalid receiver")
 	}
 
 	tIn := strings.ToLower(strings.TrimSpace(tokenIn))
@@ -439,7 +472,11 @@ func (p *Pair) Swap(ctx *bc.Context, amountIn string, minAmountOut string, token
 		ctx.Revert("insufficient reserves")
 	}
 
-	p.pullToken(ctx, tIn, caller, amtIn)
+	if pullFromActor {
+		p.pullToken(ctx, tIn, caller, amtIn)
+	} else {
+		p.pullTokenFromCallerBalance(ctx, tIn, amtIn)
+	}
 
 	newResIn := new(big.Int).Add(resIn, amtIn)
 	newResOut := new(big.Int).Sub(resOut, amtOut)
@@ -474,15 +511,38 @@ func (p *Pair) Swap(ctx *bc.Context, amountIn string, minAmountOut string, token
 
 	ctx.Commit()
 
-	p.pushToken(ctx, tOut, caller, amtOut)
+	p.pushToken(ctx, tOut, receiver, amtOut)
 
 	ctx.Emit("Swap", map[string]interface{}{
-		"sender":    caller,
-		"tokenIn":   tIn,
-		"tokenOut":  tOut,
-		"amountIn":  amtIn.String(),
-		"amountOut": amtOut.String(),
+		"sender":         caller,
+		"receiver":       receiver,
+		"tokenIn":        tIn,
+		"tokenOut":       tOut,
+		"amountIn":       amtIn.String(),
+		"amountOut":      amtOut.String(),
+		"priceImpactBps": calcPriceImpactBps(amtIn, amtOut, resIn, resOut).String(),
 	})
+	ctx.Set("output", amtOut.String())
+	return amtOut
+}
+
+// Swap: send amountIn of tokenIn, receive at least minAmountOut of the other token.
+func (p *Pair) Swap(ctx *bc.Context, amountIn string, minAmountOut string, tokenIn string) {
+	p.swapTo(ctx, actorAddr(ctx), amountIn, minAmountOut, tokenIn, true)
+}
+
+func (p *Pair) SwapWithDeadline(ctx *bc.Context, amountIn string, minAmountOut string, tokenIn string, deadline string) {
+	requireDeadline(ctx, deadline)
+	p.Swap(ctx, amountIn, minAmountOut, tokenIn)
+}
+
+func (p *Pair) SwapTo(ctx *bc.Context, receiver string, amountIn string, minAmountOut string, tokenIn string) {
+	p.swapTo(ctx, receiver, amountIn, minAmountOut, tokenIn, true)
+}
+
+func (p *Pair) SwapToWithDeadline(ctx *bc.Context, receiver string, amountIn string, minAmountOut string, tokenIn string, deadline string) {
+	requireDeadline(ctx, deadline)
+	p.SwapTo(ctx, receiver, amountIn, minAmountOut, tokenIn)
 }
 
 // SwapFromContract swaps tokens held by the calling contract and sends output
@@ -562,13 +622,19 @@ func (p *Pair) SwapFromContract(ctx *bc.Context, receiver string, amountIn strin
 
 	p.pushToken(ctx, tOut, receiver, amtOut)
 	ctx.Emit("SwapFromContract", map[string]interface{}{
-		"sender":    strings.ToLower(strings.TrimSpace(ctx.CallerAddr)),
-		"receiver":  receiver,
-		"tokenIn":   tIn,
-		"tokenOut":  tOut,
-		"amountIn":  amtIn.String(),
-		"amountOut": amtOut.String(),
+		"sender":         strings.ToLower(strings.TrimSpace(ctx.CallerAddr)),
+		"receiver":       receiver,
+		"tokenIn":        tIn,
+		"tokenOut":       tOut,
+		"amountIn":       amtIn.String(),
+		"amountOut":      amtOut.String(),
+		"priceImpactBps": calcPriceImpactBps(amtIn, amtOut, resIn, resOut).String(),
 	})
+}
+
+func (p *Pair) SwapFromContractWithDeadline(ctx *bc.Context, receiver string, amountIn string, minAmountOut string, tokenIn string, deadline string) {
+	requireDeadline(ctx, deadline)
+	p.SwapFromContract(ctx, receiver, amountIn, minAmountOut, tokenIn)
 }
 
 // ─── View helpers ─────────────────────────────────────────────────────────────
@@ -624,7 +690,12 @@ func (p *Pair) GetRoutingWeight(ctx *bc.Context) {
 
 func (p *Pair) GetAmountOut(ctx *bc.Context, amountIn string, tokenIn string) {
 	t0 := ctx.Get("token0")
+	t1 := ctx.Get("token1")
 	tIn := strings.ToLower(strings.TrimSpace(tokenIn))
+	if tIn != t0 && tIn != t1 {
+		ctx.Set("output", "0")
+		return
+	}
 	res0 := parseBig(ctx.Get("reserve0"))
 	res1 := parseBig(ctx.Get("reserve1"))
 
@@ -637,6 +708,75 @@ func (p *Pair) GetAmountOut(ctx *bc.Context, amountIn string, tokenIn string) {
 	out := calcAmountOut(parseBig(amountIn), resIn, resOut)
 	ctx.Set("output", out.String())
 	ctx.Emit("AmountOut", map[string]interface{}{"amountOut": out.String()})
+}
+
+func (p *Pair) GetAmountIn(ctx *bc.Context, amountOut string, tokenOut string) {
+	t0 := ctx.Get("token0")
+	t1 := ctx.Get("token1")
+	tOut := strings.ToLower(strings.TrimSpace(tokenOut))
+	if tOut != t0 && tOut != t1 {
+		ctx.Set("output", "0")
+		return
+	}
+	res0 := parseBig(ctx.Get("reserve0"))
+	res1 := parseBig(ctx.Get("reserve1"))
+
+	var resIn, resOut *big.Int
+	if tOut == t1 {
+		resIn, resOut = res0, res1
+	} else {
+		resIn, resOut = res1, res0
+	}
+	amtIn := calcAmountIn(parseBig(amountOut), resIn, resOut)
+	ctx.Set("output", amtIn.String())
+	ctx.Emit("AmountIn", map[string]interface{}{"amountIn": amtIn.String()})
+}
+
+func (p *Pair) GetQuote(ctx *bc.Context, amountIn string, tokenIn string) {
+	t0 := ctx.Get("token0")
+	t1 := ctx.Get("token1")
+	tIn := strings.ToLower(strings.TrimSpace(tokenIn))
+	if tIn != t0 && tIn != t1 {
+		ctx.Set("output", "0,0,0,0,0,0,0,0")
+		return
+	}
+	amtIn := parseBig(amountIn)
+	res0 := parseBig(ctx.Get("reserve0"))
+	res1 := parseBig(ctx.Get("reserve1"))
+	var resIn, resOut *big.Int
+	var tokenOut string
+	if tIn == t0 {
+		resIn, resOut, tokenOut = res0, res1, t1
+	} else {
+		resIn, resOut, tokenOut = res1, res0, t0
+	}
+	amtOut := calcAmountOut(amtIn, resIn, resOut)
+	impact := calcPriceImpactBps(amtIn, amtOut, resIn, resOut)
+	spotPriceBps := big.NewInt(0)
+	if resIn.Sign() > 0 {
+		spotPriceBps.Div(new(big.Int).Mul(resOut, big.NewInt(10000)), resIn)
+	}
+	execPriceBps := big.NewInt(0)
+	if amtIn.Sign() > 0 {
+		execPriceBps.Div(new(big.Int).Mul(amtOut, big.NewInt(10000)), amtIn)
+	}
+	fee := new(big.Int).Div(new(big.Int).Mul(amtIn, big.NewInt(3)), big.NewInt(1000))
+	ctx.Set("output", strings.Join([]string{
+		amtOut.String(),
+		impact.String(),
+		resIn.String(),
+		resOut.String(),
+		res0.String(),
+		res1.String(),
+		spotPriceBps.String(),
+		execPriceBps.String(),
+		fee.String(),
+		tokenOut,
+	}, ","))
+	ctx.Emit("Quote", map[string]interface{}{
+		"tokenIn": tokenIn, "tokenOut": tokenOut, "amountIn": amtIn.String(), "amountOut": amtOut.String(),
+		"reserveIn": resIn.String(), "reserveOut": resOut.String(), "priceImpactBps": impact.String(),
+	})
 }
 
 // ─── LP token (ERC20-style) ───────────────────────────────────────────────────

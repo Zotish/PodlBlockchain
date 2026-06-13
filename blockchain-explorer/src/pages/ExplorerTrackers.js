@@ -864,22 +864,74 @@ export const BroadcastTransactionPage = () => (
   </TrackerShell>
 );
 
-export const DeveloperContractToolsPage = ({ mode = 'search' }) => (
-  <TrackerShell
-    title={mode === 'verify' ? 'Verify Contract' : 'Smart Contract Search'}
-    subtitle={mode === 'verify' ? 'Compiled/deployed contracts can be inspected through ABI, code, storage, and events APIs.' : 'Search deployed contracts from the registry and inspect runtime metadata.'}
-    loading={false}
-    error=""
-  >
-    <div className="tracker-card-grid">
-      <InfoCard title="Contract Registry" value="/contract/list" />
-      <InfoCard title="ABI Lookup" value="/contract/getAbi?address=0x..." />
-      <InfoCard title="Storage" value="/contract/storage?address=0x..." />
-      <InfoCard title="Code" value="/contract/code?address=0x..." />
-    </div>
-    <ContractTrackerPage />
-  </TrackerShell>
-);
+export const DeveloperContractToolsPage = ({ mode = 'search' }) => {
+  const [address, setAddress] = useState('');
+  const [source, setSource] = useState('');
+  const [status, setStatus] = useState(null);
+  const [message, setMessage] = useState('');
+
+  const checkStatus = async () => {
+    setMessage('');
+    try {
+      const data = await fetchJSON(`/contract/verification?address=${encodeURIComponent(address)}`, { timeoutMs: 10000 });
+      setStatus(data.contract || data);
+    } catch (err) {
+      setMessage(err.message || 'Status lookup failed');
+    }
+  };
+
+  const verify = async () => {
+    setMessage('');
+    try {
+      const data = await fetchJSON('/contract/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address, source_code: source, compiler_version: 'lqd-go-plugin', optimization: false }),
+        timeoutMs: 15000,
+      });
+      setMessage(`Verified ${data.address}: ${data.source_hash}`);
+      await checkStatus();
+    } catch (err) {
+      setMessage(err.message || 'Verification failed');
+    }
+  };
+
+  return (
+    <TrackerShell
+      title={mode === 'verify' ? 'Verify Contract' : 'Smart Contract Search'}
+      subtitle={mode === 'verify' ? 'Submit source and compare it with deployed contract code hash.' : 'Search deployed contracts from the registry and inspect runtime metadata.'}
+      loading={false}
+      error=""
+    >
+      {mode === 'verify' && (
+        <div className="contract-verify-box">
+          <h3>Verify Deployed Source</h3>
+          <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Contract address 0x..." />
+          <textarea value={source} onChange={(e) => setSource(e.target.value)} placeholder="Paste deployed Go/DSL source code" />
+          <div className="verify-actions">
+            <button type="button" onClick={checkStatus}>Check Status</button>
+            <button type="button" onClick={verify}>Verify Source</button>
+          </div>
+          {message && <p>{message}</p>}
+          {status && (
+            <div className="tracker-stat-grid">
+              <div>Verified <strong>{status.verified ? 'Yes' : 'No'}</strong></div>
+              <div>ABI Methods <strong>{status.abi_count ?? '-'}</strong></div>
+              <div>Code Hash <strong>{shortHash(status.code_hash || status.source_hash || '-')}</strong></div>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="tracker-card-grid">
+        <InfoCard title="Contract Registry" value="/contract/list" />
+        <InfoCard title="ABI Lookup" value="/contract/getAbi?address=0x..." />
+        <InfoCard title="Verification" value="/contract/verification?address=0x..." />
+        <InfoCard title="Verify Source" value="/contract/verify" />
+      </div>
+      <ContractTrackerPage />
+    </TrackerShell>
+  );
+};
 
 const TransactionTracker = ({ title, subtitle, txs, loading, error, empty }) => (
   <TrackerShell title={title} subtitle={subtitle} count={txs.length} loading={loading} error={error}>

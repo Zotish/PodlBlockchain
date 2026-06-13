@@ -68,16 +68,15 @@ func (bc *Blockchain_struct) StrategyVaultRebalance(vaultID, targetPool string, 
 	if vaultID == "" || targetPool == "" {
 		return nil, fmt.Errorf("vault id and target pool are required")
 	}
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+	bc.EnsureRuntimeState()
 	if minOutBps == 0 {
-		minOutBps = 9900
+		minOutBps = bc.StrategyVaultSafety.MinOutBps
 	}
 	if minOutBps < 9000 || minOutBps > 10000 {
 		return nil, fmt.Errorf("min_out_bps must be between 9000 and 10000")
 	}
-
-	bc.Mutex.Lock()
-	defer bc.Mutex.Unlock()
-	bc.EnsureRuntimeState()
 
 	pos, ok := bc.StrategyVaults[vaultID]
 	if !ok || pos == nil {
@@ -89,6 +88,26 @@ func (bc *Blockchain_struct) StrategyVaultRebalance(vaultID, targetPool string, 
 	if strings.EqualFold(pos.CurrentPool, targetPool) {
 		return nil, fmt.Errorf("target pool is already current")
 	}
+	cfg := bc.StrategyVaultSafety
+	if minOutBps < cfg.MinOutBps {
+		move := bc.failedStrategyVaultMoveLocked(pos, targetPool, minOutBps, reason, fmt.Sprintf("min_out_bps below safety floor %d", cfg.MinOutBps))
+		bc.persistRuntimeStateLocked()
+		return move, fmt.Errorf("%s", move.FailureReason)
+	}
+	if cfg.MaxMoveBps > 0 && cfg.MaxMoveBps < 10000 {
+		move := bc.failedStrategyVaultMoveLocked(pos, targetPool, minOutBps, reason, fmt.Sprintf("full-position move exceeds max_move_bps %d", cfg.MaxMoveBps))
+		bc.persistRuntimeStateLocked()
+		return move, fmt.Errorf("%s", move.FailureReason)
+	}
+	if cfg.MinRebalanceIntervalS > 0 && cfg.LastKeeperTriggerUnix > 0 {
+		waitUntil := cfg.LastKeeperTriggerUnix + cfg.MinRebalanceIntervalS
+		now := time.Now().Unix()
+		if now < waitUntil {
+			move := bc.failedStrategyVaultMoveLocked(pos, targetPool, minOutBps, reason, fmt.Sprintf("rebalance cooldown active for %d seconds", waitUntil-now))
+			bc.persistRuntimeStateLocked()
+			return move, fmt.Errorf("%s", move.FailureReason)
+		}
+	}
 
 	now := time.Now().Unix()
 	move := &StrategyVaultMovement{
@@ -99,6 +118,7 @@ func (bc *Blockchain_struct) StrategyVaultRebalance(vaultID, targetPool string, 
 		Reason:     reason,
 		Status:     "executed",
 		MinOutBps:  minOutBps,
+		MaxMoveBps: cfg.MaxMoveBps,
 		AmountA:    CopyAmount(pos.AmountA),
 		AmountB:    CopyAmount(pos.AmountB),
 		Shares:     CopyAmount(pos.Shares),
@@ -107,12 +127,49 @@ func (bc *Blockchain_struct) StrategyVaultRebalance(vaultID, targetPool string, 
 	pos.CurrentPool = targetPool
 	pos.UpdatedAt = now
 	pos.LastMove = move
-	bc.StrategyVaultMoves = append(bc.StrategyVaultMoves, *move)
-	if len(bc.StrategyVaultMoves) > 1000 {
-		bc.StrategyVaultMoves = bc.StrategyVaultMoves[len(bc.StrategyVaultMoves)-1000:]
-	}
+	bc.StrategyVaultSafety.LastKeeperTriggerUnix = now
+	bc.recordStrategyVaultMoveLocked(move)
 	bc.persistRuntimeStateLocked()
 	return move, nil
+}
+
+func (bc *Blockchain_struct) SetStrategyVaultSafety(minOutBps, maxMoveBps int, minIntervalS int64) (StrategyVaultSafetyConfig, error) {
+	if bc == nil {
+		return StrategyVaultSafetyConfig{}, fmt.Errorf("nil blockchain")
+	}
+	if minOutBps == 0 {
+		minOutBps = 9900
+	}
+	if maxMoveBps == 0 {
+		maxMoveBps = 10000
+	}
+	if minOutBps < 9000 || minOutBps > 10000 {
+		return StrategyVaultSafetyConfig{}, fmt.Errorf("min_out_bps must be between 9000 and 10000")
+	}
+	if maxMoveBps < 1 || maxMoveBps > 10000 {
+		return StrategyVaultSafetyConfig{}, fmt.Errorf("max_move_bps must be between 1 and 10000")
+	}
+	if minIntervalS < 0 {
+		return StrategyVaultSafetyConfig{}, fmt.Errorf("min_rebalance_interval_s cannot be negative")
+	}
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+	bc.EnsureRuntimeState()
+	bc.StrategyVaultSafety.MinOutBps = minOutBps
+	bc.StrategyVaultSafety.MaxMoveBps = maxMoveBps
+	bc.StrategyVaultSafety.MinRebalanceIntervalS = minIntervalS
+	bc.persistRuntimeStateLocked()
+	return bc.StrategyVaultSafety, nil
+}
+
+func (bc *Blockchain_struct) StrategyVaultSafetySnapshot() StrategyVaultSafetyConfig {
+	if bc == nil {
+		return StrategyVaultSafetyConfig{}
+	}
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+	bc.EnsureRuntimeState()
+	return bc.StrategyVaultSafety
 }
 
 func (bc *Blockchain_struct) StrategyVaultWithdraw(vaultID string) (*StrategyVaultPosition, error) {
@@ -175,6 +232,38 @@ func (bc *Blockchain_struct) StrategyVaultStatus(owner string) []*StrategyVaultP
 		return positions[i].UpdatedAt > positions[j].UpdatedAt
 	})
 	return positions
+}
+
+func (bc *Blockchain_struct) failedStrategyVaultMoveLocked(pos *StrategyVaultPosition, targetPool string, minOutBps int, reason, failure string) *StrategyVaultMovement {
+	now := time.Now().Unix()
+	move := &StrategyVaultMovement{
+		ID:            strategyMovementID(pos.ID, pos.CurrentPool, targetPool, "failed", now),
+		VaultID:       pos.ID,
+		FromPool:      pos.CurrentPool,
+		ToPool:        targetPool,
+		Reason:        reason,
+		Status:        "rolled_back",
+		MinOutBps:     minOutBps,
+		MaxMoveBps:    bc.StrategyVaultSafety.MaxMoveBps,
+		FailureReason: failure,
+		AmountA:       CopyAmount(pos.AmountA),
+		AmountB:       CopyAmount(pos.AmountB),
+		Shares:        CopyAmount(pos.Shares),
+		ExecutedAt:    now,
+	}
+	pos.LastMove = move
+	bc.recordStrategyVaultMoveLocked(move)
+	return move
+}
+
+func (bc *Blockchain_struct) recordStrategyVaultMoveLocked(move *StrategyVaultMovement) {
+	if move == nil {
+		return
+	}
+	bc.StrategyVaultMoves = append(bc.StrategyVaultMoves, *move)
+	if len(bc.StrategyVaultMoves) > 1000 {
+		bc.StrategyVaultMoves = bc.StrategyVaultMoves[len(bc.StrategyVaultMoves)-1000:]
+	}
 }
 
 func (bc *Blockchain_struct) persistRuntimeStateLocked() {

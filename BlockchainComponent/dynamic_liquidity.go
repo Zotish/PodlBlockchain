@@ -31,6 +31,7 @@ package blockchaincomponent
 // ─────────────────────────────────────────────────────────────────────────────
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"math/big"
@@ -60,8 +61,11 @@ const (
 	NormalMultiplier  float64 = 1.00 // transition hours
 
 	// Price-based bonus range
-	MaxPriceBonus   int64   = 20   // added to weight when price deviates
+	MaxPriceBonus     int64   = 20   // added to weight when price deviates
 	PriceDeviationPct float64 = 0.02 // 2 % gap triggers bonus
+
+	MaxRoutingWeightStep int64 = 25
+	MaxOracleAgeSeconds  int64 = 3600
 )
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -77,8 +81,10 @@ type PoolMetrics struct {
 	VolumeIn    *big.Int
 
 	// Strategy 1 — demand
-	UtilScore    float64
-	DemandWeight int64
+	UtilScore       float64
+	DemandWeight    int64
+	OracleDemandBps int64
+	OracleSource    string
 
 	// Strategy 2 — price
 	ImpliedPrice float64 // reserve1 / reserve0 (token0 price in token1 units)
@@ -88,7 +94,9 @@ type PoolMetrics struct {
 	TimeMultiplier float64
 
 	// Final
-	RoutingWeight int64
+	ExistingRoutingWeight int64
+	RoutingWeight         int64
+	SafetyCapped          bool
 }
 
 // DynamicLiquidityEngine is the protocol-level routing optimiser.
@@ -117,30 +125,124 @@ func (e *DynamicLiquidityEngine) RunEpoch(bc *Blockchain_struct, blockNumber uin
 	if !e.shouldRun(blockNumber) {
 		return
 	}
+	e.run(bc, blockNumber, "scheduled")
+}
 
+func (e *DynamicLiquidityEngine) RunNow(bc *Blockchain_struct, reason string) []PoolMetrics {
+	return e.run(bc, bc.LatestBlockNumber(), reason)
+}
+
+func (e *DynamicLiquidityEngine) Preview(bc *Blockchain_struct) []PoolMetrics {
 	metrics := e.scanPairs(bc)
 	if len(metrics) == 0 {
-		return
+		return nil
 	}
-
-	// ── Strategy 1: Demand-based ──────────────────────────────────────────────
 	e.applyDemandStrategy(metrics)
-
-	// ── Strategy 2: Price-based ───────────────────────────────────────────────
 	e.applyPriceStrategy(metrics)
-
-	// ── Strategy 3: Time-based ────────────────────────────────────────────────
 	e.applyTimeStrategy(metrics)
-
-	// ── Combine into final weight ─────────────────────────────────────────────
 	e.combineFinalWeights(metrics)
+	return metrics
+}
+
+func (bc *Blockchain_struct) SetDynamicLiquidityOracleSignal(pairAddress string, demandBps int64, source string) (DynamicLiquidityOracleSignal, error) {
+	if bc == nil {
+		return DynamicLiquidityOracleSignal{}, fmt.Errorf("nil blockchain")
+	}
+	pairAddress = strings.ToLower(strings.TrimSpace(pairAddress))
+	source = strings.TrimSpace(source)
+	if pairAddress == "" {
+		return DynamicLiquidityOracleSignal{}, fmt.Errorf("pair_address is required")
+	}
+	if demandBps < 0 || demandBps > 10000 {
+		return DynamicLiquidityOracleSignal{}, fmt.Errorf("demand_bps must be between 0 and 10000")
+	}
+	if source == "" {
+		source = "admin"
+	}
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+	bc.EnsureRuntimeState()
+	signal := DynamicLiquidityOracleSignal{
+		PairAddress: pairAddress,
+		DemandBps:   demandBps,
+		Source:      source,
+		UpdatedAt:   time.Now().Unix(),
+	}
+	bc.DynamicLiquidityOracleSignals[pairAddress] = signal
+	bc.persistRuntimeStateLocked()
+	return signal, nil
+}
+
+func (bc *Blockchain_struct) DynamicLiquidityOracleSnapshot() []DynamicLiquidityOracleSignal {
+	if bc == nil {
+		return nil
+	}
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+	bc.EnsureRuntimeState()
+	out := make([]DynamicLiquidityOracleSignal, 0, len(bc.DynamicLiquidityOracleSignals))
+	for _, signal := range bc.DynamicLiquidityOracleSignals {
+		out = append(out, signal)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].UpdatedAt > out[j].UpdatedAt
+	})
+	return out
+}
+
+func (bc *Blockchain_struct) RunDynamicLiquidityEpochNow(reason string) []map[string]interface{} {
+	if bc == nil {
+		return nil
+	}
+	if bc.DLEngine == nil {
+		bc.DLEngine = NewDynamicLiquidityEngine()
+	}
+	metrics := bc.DLEngine.RunNow(bc, reason)
+	return dynamicLiquidityMetricRows(metrics)
+}
+
+func (bc *Blockchain_struct) DynamicLiquidityStatus() map[string]interface{} {
+	if bc == nil {
+		return map[string]interface{}{"metrics": []map[string]interface{}{}}
+	}
+	if bc.DLEngine == nil {
+		bc.DLEngine = NewDynamicLiquidityEngine()
+	}
+	metrics := bc.DLEngine.Preview(bc)
+	return map[string]interface{}{
+		"metrics":                dynamicLiquidityMetricRows(metrics),
+		"oracle_signals":         bc.DynamicLiquidityOracleSnapshot(),
+		"safety":                 bc.StrategyVaultSafetySnapshot(),
+		"max_weight_step":        MaxRoutingWeightStep,
+		"max_oracle_age_seconds": MaxOracleAgeSeconds,
+		"timestamp":              time.Now().Unix(),
+	}
+}
+
+func (bc *Blockchain_struct) dynamicLiquidityOracleSignal(pairAddress string) DynamicLiquidityOracleSignal {
+	if bc == nil {
+		return DynamicLiquidityOracleSignal{}
+	}
+	bc.EnsureRuntimeState()
+	signal := bc.DynamicLiquidityOracleSignals[strings.ToLower(strings.TrimSpace(pairAddress))]
+	if signal.UpdatedAt == 0 || time.Now().Unix()-signal.UpdatedAt > MaxOracleAgeSeconds {
+		return DynamicLiquidityOracleSignal{}
+	}
+	return signal
+}
+
+func (e *DynamicLiquidityEngine) run(bc *Blockchain_struct, blockNumber uint64, reason string) []PoolMetrics {
+	metrics := e.Preview(bc)
+	if len(metrics) == 0 {
+		return nil
+	}
 
 	// ── Write routing weights to contract storage ────────────────────────────
 	updated := e.applyWeights(bc, metrics)
 	e.resetEpochCounters(bc, metrics)
 
-	log.Printf("🔄 DLEngine #%d — updated %d pair(s) | time=%s",
-		blockNumber, updated, currentTimeWindow())
+	log.Printf("🔄 DLEngine #%d — updated %d pair(s) | trigger=%s | time=%s",
+		blockNumber, updated, strings.TrimSpace(reason), currentTimeWindow())
 
 	// ── Strategy 4: Active Protocol Arbitrage ────────────────────────────────
 	// Runs AFTER weights are applied so it sees fresh utilisation scores.
@@ -153,6 +255,7 @@ func (e *DynamicLiquidityEngine) RunEpoch(bc *Blockchain_struct, blockNumber uin
 			shortAddr(m.PairAddress), m.Token0, m.Token1,
 			m.UtilScore, m.DemandWeight, m.PriceBonus, m.TimeMultiplier, m.RoutingWeight)
 	}
+	return metrics
 }
 
 // ── Strategy 1: DEMAND-BASED ──────────────────────────────────────────────────
@@ -181,6 +284,10 @@ func (e *DynamicLiquidityEngine) applyDemandStrategy(metrics []PoolMetrics) {
 		}
 
 		m.DemandWeight = int64(w)
+		if m.OracleDemandBps > 0 {
+			oracle := float64(MinRoutingWeight) + (float64(MaxRoutingWeight-MinRoutingWeight) * (float64(m.OracleDemandBps) / 10000.0))
+			m.DemandWeight = int64((w * 0.70) + (oracle * 0.30))
+		}
 	}
 }
 
@@ -213,7 +320,7 @@ func (e *DynamicLiquidityEngine) applyPriceStrategy(metrics []PoolMetrics) {
 		}
 		m.ImpliedPrice = r1f / r0f
 		byToken[strings.ToLower(m.Token0)] = append(byToken[strings.ToLower(m.Token0)], priceEntry{i, m.ImpliedPrice})
-		byToken[strings.ToLower(m.Token1)] = append(byToken[strings.ToLower(m.Token1)], priceEntry{i, 1.0/m.ImpliedPrice})
+		byToken[strings.ToLower(m.Token1)] = append(byToken[strings.ToLower(m.Token1)], priceEntry{i, 1.0 / m.ImpliedPrice})
 	}
 
 	// For each token that appears in 2+ pairs, find median and apply bonus.
@@ -275,6 +382,21 @@ func (e *DynamicLiquidityEngine) combineFinalWeights(metrics []PoolMetrics) {
 		if w > MaxRoutingWeight {
 			w = MaxRoutingWeight
 		}
+		if m.ExistingRoutingWeight > 0 {
+			upper := m.ExistingRoutingWeight + MaxRoutingWeightStep
+			lower := m.ExistingRoutingWeight - MaxRoutingWeightStep
+			if lower < MinRoutingWeight {
+				lower = MinRoutingWeight
+			}
+			if w > upper {
+				w = upper
+				m.SafetyCapped = true
+			}
+			if w < lower {
+				w = lower
+				m.SafetyCapped = true
+			}
+		}
 		m.RoutingWeight = w
 	}
 }
@@ -311,6 +433,7 @@ func (e *DynamicLiquidityEngine) scanPairs(bc *Blockchain_struct) []PoolMetrics 
 
 		vol := parseBigStr(storage["epoch_volume"])
 		swaps := parseBigStr(storage["epoch_swaps"])
+		existingWeight := parseBigStr(storage["routing_weight"]).Int64()
 
 		totalReserve := new(big.Int).Add(r0, r1)
 		utilScore := 0.0
@@ -322,15 +445,19 @@ func (e *DynamicLiquidityEngine) scanPairs(bc *Blockchain_struct) []PoolMetrics 
 			}
 		}
 
+		signal := bc.dynamicLiquidityOracleSignal(addr)
 		out = append(out, PoolMetrics{
-			PairAddress: addr,
-			Token0:      t0,
-			Token1:      t1,
-			Reserve0:    r0,
-			Reserve1:    r1,
-			SwapCount:   swaps.Uint64(),
-			VolumeIn:    vol,
-			UtilScore:   utilScore,
+			PairAddress:           addr,
+			Token0:                t0,
+			Token1:                t1,
+			Reserve0:              r0,
+			Reserve1:              r1,
+			SwapCount:             swaps.Uint64(),
+			VolumeIn:              vol,
+			UtilScore:             utilScore,
+			OracleDemandBps:       signal.DemandBps,
+			OracleSource:          signal.Source,
+			ExistingRoutingWeight: existingWeight,
 		})
 	}
 	return out
@@ -418,6 +545,43 @@ func parseBigStr(s string) *big.Int {
 	}
 	n.SetString(s, 10)
 	return n
+}
+
+func dynamicLiquidityMetricRows(metrics []PoolMetrics) []map[string]interface{} {
+	rows := make([]map[string]interface{}, 0, len(metrics))
+	for _, m := range metrics {
+		reserve0 := "0"
+		reserve1 := "0"
+		volume := "0"
+		if m.Reserve0 != nil {
+			reserve0 = m.Reserve0.String()
+		}
+		if m.Reserve1 != nil {
+			reserve1 = m.Reserve1.String()
+		}
+		if m.VolumeIn != nil {
+			volume = m.VolumeIn.String()
+		}
+		rows = append(rows, map[string]interface{}{
+			"pair_address":            strings.ToLower(m.PairAddress),
+			"token0":                  m.Token0,
+			"token1":                  m.Token1,
+			"reserve0":                reserve0,
+			"reserve1":                reserve1,
+			"swap_count":              m.SwapCount,
+			"volume_in":               volume,
+			"util_score":              m.UtilScore,
+			"demand_weight":           m.DemandWeight,
+			"oracle_demand_bps":       m.OracleDemandBps,
+			"oracle_source":           m.OracleSource,
+			"price_bonus":             m.PriceBonus,
+			"time_multiplier":         m.TimeMultiplier,
+			"existing_routing_weight": m.ExistingRoutingWeight,
+			"routing_weight":          m.RoutingWeight,
+			"safety_capped":           m.SafetyCapped,
+		})
+	}
+	return rows
 }
 
 func pctOfBig(amount *big.Int, pct float64) *big.Int {
