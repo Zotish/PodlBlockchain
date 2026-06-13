@@ -1,0 +1,10 @@
+[Unit]
+Description=PODL health monitor
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/podl
+Environment=PODL_ROOT=/opt/podl
+ExecStart=/bin/sh /opt/podl/app/scripts/ops/podl_monitor.sh

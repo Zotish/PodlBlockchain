@@ -1,0 +1,11 @@
+[Unit]
+Description=PODL data backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/podl
+Environment=PODL_ROOT=/opt/podl
+Environment=BACKUP_RETENTION_DAYS=14
+ExecStart=/bin/sh /opt/podl/app/scripts/ops/podl_snapshot.sh

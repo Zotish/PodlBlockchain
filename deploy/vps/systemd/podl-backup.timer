@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PODL backup every 6 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=podl-backup.service
+
+[Install]
+WantedBy=timers.target

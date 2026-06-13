@@ -71,8 +71,9 @@ jobs:
           DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
         run: |
           DEPLOY_PATH="${DEPLOY_PATH:-/opt/podl}"
-          ssh "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH'"
+          ssh "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/systemd'"
           scp deploy/vps/docker-compose.yml deploy/vps/Caddyfile deploy/vps/.env.example "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
+          scp deploy/vps/systemd/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/systemd/"
 
       - name: Pull image and restart services
         env:

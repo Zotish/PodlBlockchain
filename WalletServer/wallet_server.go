@@ -30,6 +30,12 @@ type WalletServer struct {
 	BlockchainNodeAddress string
 }
 
+func setWalletCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+}
+
 func resolveBridgeChainConfig(chainID string) *blockchaincomponent.BridgeChainConfig {
 	reg, err := blockchaincomponent.LoadBridgeChainRegistry()
 	if err != nil || reg == nil {
@@ -1343,8 +1349,29 @@ func apiKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (ws *WalletServer) Health(w http.ResponseWriter, r *http.Request) {
+	setWalletCORSHeaders(w)
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "ok",
+		"service":    "wallet",
+		"node":       ws.BlockchainNodeAddress,
+		"timestamp":  time.Now().Unix(),
+		"api_key_on": os.Getenv("LQD_API_KEY") != "",
+	})
+}
+
 func (ws *WalletServer) Start() {
 	portStr := fmt.Sprintf("%d", ws.Port)
+	http.HandleFunc("/health", ws.Health)
 	http.HandleFunc("/wallet/new", ws.CreateNewWallet)
 	http.HandleFunc("/wallet/import/mnemonic", ws.ImportFromMnemonic)
 	http.HandleFunc("/wallet/import/private-key", ws.ImportFromPrivateKey)

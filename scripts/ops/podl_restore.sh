@@ -17,6 +17,19 @@ if [ ! -f "$BACKUP_FILE" ]; then
   exit 1
 fi
 
+if [ -f "$BACKUP_FILE.sha256" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c "$BACKUP_FILE.sha256"
+  else
+    expected="$(awk '{print $1}' "$BACKUP_FILE.sha256")"
+    actual="$(shasum -a 256 "$BACKUP_FILE" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+      echo "Backup checksum mismatch for $BACKUP_FILE" >&2
+      exit 1
+    fi
+  fi
+fi
+
 cd "$PODL_ROOT"
 $COMPOSE down >/dev/null 2>&1 || true
 

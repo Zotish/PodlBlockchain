@@ -99,7 +99,7 @@ import {
   walletImportPrivateKey,
   walletSend,
 } from "./src/api";
-import { STORAGE_KEYS, loadJSON, loadString, removeItem, saveJSON, saveString } from "./src/storage";
+import { STORAGE_KEYS, loadJSON, loadString, removeItem, runSecureStorageAudit, saveJSON, saveString } from "./src/storage";
 import { runWalletMigrations } from "./src/migrations";
 import { installGlobalErrorReporter, recordError, recordTelemetry } from "./src/telemetry";
 import { createTrackedTransaction, mergeTrackedTransaction, refreshTrackedTransactions } from "./src/txTracker";
@@ -1135,16 +1135,19 @@ function App() {
 
   function addTrackedTx({ hash, type, symbol, to, network = currentNetwork, family = currentNetwork?.family }) {
     if (!settingsTxTrackingEnabled || !hash) return;
+    const normalizedFamily = network?.id?.startsWith("lqd") || ["0x8b", "0x8c"].includes(String(network?.chainId || "").toLowerCase())
+      ? "lqd"
+      : (family || network?.family || "evm");
     const tx = createTrackedTransaction({
       hash,
       type,
       symbol,
       to,
       networkId: network?.id || activeNetworkId,
-      family: network?.id === "lqd" ? "lqd" : (family || network?.family),
+      family: normalizedFamily,
     });
     if (!tx) return;
-    setTrackedTxs((prev) => mergeTrackedTransaction(prev, { ...tx, nodeUrl: getRpcCandidatesForFamily(network, family)[0] || nodeUrl }));
+    setTrackedTxs((prev) => mergeTrackedTransaction(prev, { ...tx, nodeUrl: getRpcCandidatesForFamily(network, normalizedFamily)[0] || nodeUrl }));
   }
 
   function isAllowedBrowserOrigin(origin) {
@@ -1223,6 +1226,9 @@ function App() {
   const [settingsAutoRefresh, setSettingsAutoRefresh] = useState(true);
   const [settingsTelemetryEnabled, setSettingsTelemetryEnabled] = useState(false);
   const [settingsTxTrackingEnabled, setSettingsTxTrackingEnabled] = useState(true);
+  const [settingsBackgroundTxTrackingEnabled, setSettingsBackgroundTxTrackingEnabled] = useState(true);
+  const [settingsStorageAuditEnabled, setSettingsStorageAuditEnabled] = useState(true);
+  const [securityAudit, setSecurityAudit] = useState(null);
   const [legalRiskAccepted, setLegalRiskAccepted] = useState(false);
   const [trackedTxs, setTrackedTxs] = useState([]);
   const [walletVisible, setWalletVisible] = useState(false);
@@ -2186,7 +2192,10 @@ function App() {
     // Security Hardening: Try to store raw private key in hardware-backed SecureStore if available
     if (SecureStore && typeof SecureStore.setItemAsync === "function") {
       try {
-        await SecureStore.setItemAsync(`pk_${vault.address}`, vault.privateKey);
+        const options = Platform.OS === "ios" && SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY
+          ? { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }
+          : {};
+        await SecureStore.setItemAsync(`pk_${vault.address}`, vault.privateKey, options);
       } catch (e) {
         console.warn("SecureStore set failed:", e.message);
       }
@@ -3483,6 +3492,18 @@ function App() {
     (async () => {
       try {
         await runWalletMigrations();
+        const audit = await runSecureStorageAudit({ repair: true }).catch((error) => ({
+          ok: false,
+          warnings: [error?.message || "Secure storage audit failed"],
+          checkedAt: Date.now(),
+        }));
+        if (alive) setSecurityAudit(audit);
+        if (audit && audit.ok === false) {
+          recordError("secure_storage_audit", new Error((audit.warnings || []).join("; ") || "Secure storage audit failed"), {
+            repairedKeys: audit.repairedKeys || [],
+            leakedKeys: audit.leakedKeys || [],
+          }).catch(() => {});
+        }
         const [vault, savedNetworks, savedNetworkId, savedEndpoints, savedWatchlist, savedActivity, savedFactory, savedBridgeChainId, savedSettings, savedApprovals, savedTrustedOrigins, savedWatchAddresses, savedHiddenTokens, savedRemovedTokens, savedLegalRiskAccepted, savedTrackedTxs] = await Promise.all([
           loadJSON(STORAGE_KEYS.vault, null),
           loadJSON(STORAGE_KEYS.networks, null),
@@ -3523,6 +3544,8 @@ function App() {
           setBiometricEnabled(savedSettings.biometricEnabled !== false);
           setSettingsTelemetryEnabled(Boolean(savedSettings.telemetryEnabled));
           setSettingsTxTrackingEnabled(savedSettings.txTrackingEnabled !== false);
+          setSettingsBackgroundTxTrackingEnabled(savedSettings.backgroundTxTrackingEnabled !== false);
+          setSettingsStorageAuditEnabled(savedSettings.storageAuditEnabled !== false);
         }
         if (Array.isArray(savedApprovals)) setPendingApprovals(savedApprovals);
         if (Array.isArray(savedTrustedOrigins)) setTrustedOrigins(savedTrustedOrigins);
@@ -3590,8 +3613,10 @@ function App() {
       biometricEnabled,
       telemetryEnabled: settingsTelemetryEnabled,
       txTrackingEnabled: settingsTxTrackingEnabled,
+      backgroundTxTrackingEnabled: settingsBackgroundTxTrackingEnabled,
+      storageAuditEnabled: settingsStorageAuditEnabled,
     }).catch(() => { });
-  }, [settingsAutoRefresh, biometricEnabled, settingsTelemetryEnabled, settingsTxTrackingEnabled]);
+  }, [settingsAutoRefresh, biometricEnabled, settingsTelemetryEnabled, settingsTxTrackingEnabled, settingsBackgroundTxTrackingEnabled, settingsStorageAuditEnabled]);
 
   useEffect(() => {
     saveJSON(STORAGE_KEYS.legalRiskAccepted, legalRiskAccepted).catch(() => { });
@@ -3636,32 +3661,43 @@ function App() {
   useEffect(() => {
     if (!settingsTxTrackingEnabled || !trackedTxs.some((tx) => tx.status === "pending")) return;
     let cancelled = false;
+    let appState = AppState.currentState || "active";
 
     const refresh = async () => {
+      if (!settingsBackgroundTxTrackingEnabled && appState !== "active") return;
       try {
-        const next = await refreshTrackedTransactions(trackedTxs, { getJson, postJson });
+        const enriched = trackedTxs.map((tx) => {
+          if (tx.nodeUrl) return tx;
+          const network = NETWORKS.find((n) => n.id === tx.networkId) || currentNetwork;
+          const family = tx.family || network?.family || "evm";
+          return { ...tx, nodeUrl: getRpcCandidatesForFamily(network, family)[0] || nodeUrl };
+        });
+        const next = await refreshTrackedTransactions(enriched, { getJson, postJson });
         if (cancelled) return;
         const confirmed = next.find((tx) => tx.status === "confirmed" && trackedTxs.find((old) => old.id === tx.id && old.status === "pending"));
         const failed = next.find((tx) => tx.status === "failed" && trackedTxs.find((old) => old.id === tx.id && old.status === "pending"));
+        const dropped = next.find((tx) => tx.status === "dropped" && trackedTxs.find((old) => old.id === tx.id && old.status === "pending"));
         setTrackedTxs(next);
         if (confirmed) showToast(`${confirmed.symbol || "Transaction"} confirmed`, "success");
         if (failed) showToast(`${failed.symbol || "Transaction"} failed`, "error");
+        if (dropped) showToast(`${dropped.symbol || "Transaction"} tracking expired`, "error");
       } catch (error) {
         recordError("tx_tracking", error, { network: activeNetworkId }).catch(() => {});
       }
     };
 
     const subscription = AppState.addEventListener("change", (state) => {
+      appState = state;
       if (state === "active") refresh();
     });
-    const timer = setInterval(refresh, 30000);
+    const timer = setInterval(refresh, appState === "active" ? 30000 : 90000);
     refresh();
     return () => {
       cancelled = true;
       clearInterval(timer);
       subscription?.remove?.();
     };
-  }, [settingsTxTrackingEnabled, trackedTxs, activeNetworkId]);
+  }, [settingsTxTrackingEnabled, settingsBackgroundTxTrackingEnabled, trackedTxs, activeNetworkId, currentNetwork, nodeUrl]);
 
   async function approveRequest(item) {
     setPendingApprovals((prev) => prev.filter((x) => x.id !== item.id));
@@ -7676,9 +7712,30 @@ function App() {
                     <Switch value={settingsTxTrackingEnabled} onValueChange={setSettingsTxTrackingEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
                   </View>
                   <View style={styles.settingRow}>
+                    <Text style={styles.settingName}>Background Tx Tracking</Text>
+                    <Switch value={settingsBackgroundTxTrackingEnabled} onValueChange={setSettingsBackgroundTxTrackingEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
+                  </View>
+                  <View style={styles.settingRow}>
+                    <Text style={styles.settingName}>Secure Storage Audit</Text>
+                    <Switch value={settingsStorageAuditEnabled} onValueChange={setSettingsStorageAuditEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
+                  </View>
+                  <View style={styles.settingRow}>
                     <Text style={styles.settingName}>Local Error Reporting</Text>
                     <Switch value={settingsTelemetryEnabled} onValueChange={setSettingsTelemetryEnabled} trackColor={{ false: "#1b2342", true: "#8a78ff" }} />
                   </View>
+                  <Text style={styles.helperText}>
+                    Storage audit: {securityAudit?.checkedAt ? `${securityAudit.ok ? "OK" : "Needs review"} · ${new Date(securityAudit.checkedAt).toLocaleString()}` : "not run yet"}
+                  </Text>
+                  <Button
+                    label="Run Storage Audit"
+                    onPress={async () => {
+                      const audit = await runSecureStorageAudit({ repair: true });
+                      setSecurityAudit(audit);
+                      showToast(audit.ok ? "Secure storage audit passed" : "Secure storage audit repaired or reported issues", audit.ok ? "success" : "info");
+                    }}
+                    compact
+                    secondary
+                  />
                   <Text style={styles.helperText}>Diagnostics stay on this device unless you export logs manually.</Text>
                 </View>
 

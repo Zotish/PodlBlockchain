@@ -9,3 +9,7 @@
 {$AGG_DOMAIN} {
 	reverse_proxy aggregator:9000
 }
+
+{$DEX_API_DOMAIN} {
+	reverse_proxy dex-api:9100
+}
