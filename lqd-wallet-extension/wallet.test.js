@@ -37,6 +37,28 @@ function parseAmount(human, decimals = 8) {
   return full.replace(/^0+/, "") || "0";
 }
 
+function normalizeDecimals(decimals, fallback = 8) {
+  const parsed = Number.parseInt(decimals, 10);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 36) return fallback;
+  return parsed;
+}
+
+function formatUnits(raw, decimals = 8, maxFraction = 8) {
+  if (!raw && raw !== 0) return "0";
+  let str = String(raw).trim();
+  if (/^0x[0-9a-f]+$/i.test(str)) {
+    try { str = BigInt(str).toString(); } catch { str = "0"; }
+  }
+  str = str.replace(/[^0-9]/g, "");
+  if (!str || str === "0") return "0";
+  const places = normalizeDecimals(decimals);
+  if (places === 0) return str;
+  const padded = str.padStart(places + 1, "0");
+  const intPart = padded.slice(0, padded.length - places).replace(/^0+/, "") || "0";
+  const fracPart = padded.slice(padded.length - places).slice(0, maxFraction).replace(/0+$/, "");
+  return fracPart ? `${intPart}.${fracPart}` : intPart;
+}
+
 function truncate(str, n) {
   if (!str) return "";
   if (str.length <= n * 2) return str;
@@ -160,6 +182,28 @@ describe('parseAmount', () => {
 
   test('round trip: 2 LQD', () => {
     expect(formatLQD(parseAmount("2"))).toBe("2");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// formatUnits — token balance display must respect each token's decimals
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('formatUnits', () => {
+  test('formats 18-decimal token balance without assuming LQD decimals', () => {
+    expect(formatUnits("1000000000000000000", 18)).toBe("1");
+  });
+
+  test('formats 6-decimal stablecoin balance', () => {
+    expect(formatUnits("1234567", 6)).toBe("1.234567");
+  });
+
+  test('supports hex raw balances from contract output', () => {
+    expect(formatUnits("0xf4240", 6)).toBe("1");
+  });
+
+  test('falls back to 8 decimals for invalid metadata', () => {
+    expect(formatUnits("100000000", "bad")).toBe("1");
   });
 });
 

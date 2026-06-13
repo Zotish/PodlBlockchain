@@ -95,6 +95,29 @@ async function getAllowlist() {
 async function setAllowlist(al) {
   await ext.storage.local.set({ allowlist: al });
 }
+async function hasOriginScope(origin, scope) {
+  if (!origin) return false;
+  const al = await getAllowlist();
+  return !!al[origin]?.[scope];
+}
+async function grantOriginScope(origin, scope) {
+  if (!origin || !scope) return;
+  const al = await getAllowlist();
+  al[origin] = al[origin] || {};
+  al[origin][scope] = {
+    grantedAt: Date.now(),
+    chainId: session.chainId,
+    address: session.address || ""
+  };
+  await setAllowlist(al);
+}
+async function revokeOriginScope(origin, scope) {
+  const al = await getAllowlist();
+  if (!al[origin]) return;
+  delete al[origin][scope];
+  if (Object.keys(al[origin]).length === 0) delete al[origin];
+  await setAllowlist(al);
+}
 
 // ── Network management ────────────────────────────────────────────────────────
 async function getNetworks() {
@@ -324,6 +347,9 @@ function safeBig(raw) {
 function readBalanceRaw(data) {
   return String(data?.balance ?? data?.confirmed_balance ?? data?.Balance ?? data?.confirmed ?? "0");
 }
+function requestAddressAccessAllowed(ctx = {}) {
+  return ctx.internal || ctx.approved || !ctx.origin;
+}
 async function callCombinedBalance(address) {
   const original = String(address || "").trim();
   if (!original) return "0";
@@ -366,14 +392,16 @@ async function recordActivity(entry) {
 
 // ── Push helpers ──────────────────────────────────────────────────────────────
 function pushAccounts() {
-  const accounts = session.unlocked && session.address ? [session.address] : [];
-  for (const [, port] of portsByTab.entries()) {
-    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch { }
-  }
+  getAllowlist().then((al) => {
+    for (const [, entry] of portsByTab.entries()) {
+      const accounts = session.unlocked && session.address && entry.origin && al[entry.origin]?.connect ? [session.address] : [];
+      try { entry.port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch { }
+    }
+  }).catch(() => { });
 }
 function pushChainId() {
-  for (const [, port] of portsByTab.entries()) {
-    try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch { }
+  for (const [, entry] of portsByTab.entries()) {
+    try { entry.port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch { }
   }
 }
 async function storePendingList() {
@@ -381,6 +409,12 @@ async function storePendingList() {
     id: p.id, method: p.method, params: p.params,
     tabId: p.tabId, createdAt: p.createdAt, origin: p.origin
   }));
+  await ext.storage.local.set({ pendingRequests: list });
+  updateBadge(list.length);
+}
+async function removeStoredPending(id) {
+  const data = await ext.storage.local.get(["pendingRequests"]);
+  const list = (data.pendingRequests || []).filter((item) => item.id !== id);
   await ext.storage.local.set({ pendingRequests: list });
   updateBadge(list.length);
 }
@@ -397,7 +431,7 @@ function methodScope(method) {
 }
 
 // ── Request handler ───────────────────────────────────────────────────────────
-async function handleRequest({ id, method, params }) {
+async function handleRequest({ id, method, params }, ctx = {}) {
   await loadConfig();
   await restoreSessionIfNeeded(); // restore after MV3 service-worker restart
   switch (method) {
@@ -405,10 +439,15 @@ async function handleRequest({ id, method, params }) {
     case "lqd_requestAccounts":
     case "lqd_connect":
       if (!session.unlocked) throw new Error("Wallet locked. Please unlock LQD Wallet.");
+      if (ctx.origin && !ctx.approved && !(await hasOriginScope(ctx.origin, "connect"))) {
+        throw new Error("Site is not connected. Open LQD Wallet and approve account access.");
+      }
       return { result: [session.address] };
 
     case "lqd_accounts":
-      return { result: session.unlocked && session.address ? [session.address] : [] };
+      if (!session.unlocked || !session.address) return { result: [] };
+      if (ctx.origin && !(await hasOriginScope(ctx.origin, "connect"))) return { result: [] };
+      return { result: [session.address] };
 
     case "lqd_chainId":
       return { result: session.chainId };
@@ -418,6 +457,9 @@ async function handleRequest({ id, method, params }) {
 
     case "lqd_getBalance": {
       const addr = (params && params[0]) || session.address;
+      if (!params?.[0] && !requestAddressAccessAllowed(ctx) && !(await hasOriginScope(ctx.origin, "connect"))) {
+        throw new Error("Site is not connected. Approve account access before reading wallet balance.");
+      }
       const balance = await callCombinedBalance(addr);
       return { result: balance };
     }
@@ -431,6 +473,9 @@ async function handleRequest({ id, method, params }) {
 
     case "lqd_getTokenBalance": {
       const [token, addr] = params || [];
+      if (!addr && !requestAddressAccessAllowed(ctx) && !(await hasOriginScope(ctx.origin, "connect"))) {
+        throw new Error("Site is not connected. Approve account access before reading token balance.");
+      }
       const res = await callNode("/contract/call", {
         address: token, caller: addr || session.address,
         fn: "BalanceOf", args: [addr || session.address], value: 0
@@ -453,6 +498,9 @@ async function handleRequest({ id, method, params }) {
     }
 
     case "lqd_getPrivateKey": {
+      if (!ctx.internal) {
+        throw new Error("Private key export is only available inside LQD Wallet.");
+      }
       if (!session.unlocked || !session.privateKey) {
         throw new Error("Wallet locked");
       }
@@ -503,6 +551,9 @@ async function handleRequest({ id, method, params }) {
 
     case "lqd_contractTx": {
       if (!session.unlocked) throw new Error("Wallet locked");
+      if (ctx.origin && !ctx.approved && !(await hasOriginScope(ctx.origin, "contract"))) {
+        throw new Error("Contract transaction permission not granted for this site.");
+      }
       const [payload] = params || [];
       const gp = payload.gas_price || await getBaseFee();
       const g = payload.gas || 50000;
@@ -530,6 +581,9 @@ async function handleRequest({ id, method, params }) {
 
     case "lqd_sendTransaction": {
       if (!session.unlocked) throw new Error("Wallet locked");
+      if (ctx.origin && !ctx.approved && !(await hasOriginScope(ctx.origin, "send"))) {
+        throw new Error("Send transaction permission not granted for this site.");
+      }
       const [payload] = params || [];
       const gp = payload.gas_price || await getBaseFee();
       const g = payload.gas || 21000;
@@ -562,13 +616,17 @@ ext.runtime.onConnect.addListener((port) => {
   let origin = "";
   try { origin = url ? new URL(url).origin : ""; } catch { }
   if (tabId == null) return;
-  portsByTab.set(tabId, port);
-  port.onDisconnect.addListener(() => portsByTab.delete(tabId));
+  portsByTab.set(tabId, { port, origin });
+  port.onDisconnect.addListener(() => {
+    const current = portsByTab.get(tabId);
+    if (current?.port === port) portsByTab.delete(tabId);
+  });
 
   // Push current state to the newly-connected tab (handles page reload).
   // restoreSessionIfNeeded() ensures the session is hydrated before we push.
   restoreSessionIfNeeded().then(async () => {
-    const accounts = session.unlocked && session.address ? [session.address] : [];
+    const connected = origin ? await hasOriginScope(origin, "connect") : false;
+    const accounts = session.unlocked && session.address && connected ? [session.address] : [];
     try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_ACCOUNTS", payload: accounts }); } catch { }
     try { port.postMessage({ type: "LQD_PUSH", subtype: "LQD_CHAIN_ID", payload: session.chainId }); } catch { }
 
@@ -603,7 +661,7 @@ ext.runtime.onConnect.addListener((port) => {
       getAllowlist().then((al) => {
         const scope = methodScope(payload.method);
         if (origin && al[origin]?.[scope]) {
-          handleRequest(payload)
+          handleRequest(payload, { origin })
             .then((res) => port.postMessage({ type: "LQD_RESPONSE", id: payload.id, result: res.result }))
             .catch((err) => port.postMessage({ type: "LQD_RESPONSE", id: payload.id, error: err.message }));
           return;
@@ -620,7 +678,7 @@ ext.runtime.onConnect.addListener((port) => {
       return;
     }
 
-    handleRequest(payload)
+    handleRequest(payload, { origin })
       .then((res) => port.postMessage({ type: "LQD_RESPONSE", id: payload.id, result: res.result }))
       .catch((err) => port.postMessage({ type: "LQD_RESPONSE", id: payload.id, error: err.message }));
   });
@@ -632,7 +690,7 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "LQD_REQUEST") {
     Promise.resolve()
-      .then(() => handleRequest(message.payload || {}))
+      .then(() => handleRequest(message.payload || {}, { internal: true }))
       .then((res) => sendResponse({ result: res.result }))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;
@@ -700,15 +758,22 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Restore from storage if SW was restarted and pending Map was cleared
     Promise.resolve().then(async () => {
       let req = pending.get(message.id);
+      let restoredFromStorage = false;
       if (!req) {
         const stored = await ext.storage.local.get(["pendingRequests"]);
         const list = stored.pendingRequests || [];
         req = list.find((p) => p.id === message.id);
+        restoredFromStorage = !!req;
       }
       if (!req) { sendResponse({ ok: false, error: "Request not found" }); return; }
       pending.delete(message.id);
-      storePendingList();
-      const port = portsByTab.get(req.tabId);
+      if (restoredFromStorage) {
+        await removeStoredPending(message.id);
+      } else {
+        await storePendingList();
+      }
+      const entry = portsByTab.get(req.tabId);
+      const port = entry?.port;
 
       // Helper: send result to DApp via port; if port is gone, save to session for reconnect
       async function deliverResult(resMsg) {
@@ -732,16 +797,12 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         return;
       }
-      if (message.remember && req.origin) {
-        getAllowlist().then((al) => {
-          const scope = methodScope(req.method);
-          al[req.origin] = al[req.origin] || {};
-          al[req.origin][scope] = true;
-          return setAllowlist(al);
-        });
+      const scope = methodScope(req.method);
+      if (req.origin && (message.remember || scope === "connect")) {
+        await grantOriginScope(req.origin, scope);
       }
       resetAutoLock();
-      handleRequest({ id: req.id, method: req.method, params: req.params })
+      handleRequest({ id: req.id, method: req.method, params: req.params }, { origin: req.origin, approved: true })
         .then(async (res) => {
           await deliverResult({ type: "LQD_RESPONSE", id: req.id, result: res.result });
           if (req.method === "lqd_connect" || req.method === "lqd_requestAccounts") {
@@ -761,13 +822,7 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === "LQD_REMOVE_ALLOW") {
-    getAllowlist().then((al) => {
-      if (al[message.origin]) {
-        delete al[message.origin][message.scope];
-        if (Object.keys(al[message.origin]).length === 0) delete al[message.origin];
-      }
-      return setAllowlist(al).then(() => sendResponse({ ok: true }));
-    });
+    revokeOriginScope(message.origin, message.scope).then(() => sendResponse({ ok: true }));
     return true;
   }
   if (message.type === "LQD_GET_NETWORKS") {
