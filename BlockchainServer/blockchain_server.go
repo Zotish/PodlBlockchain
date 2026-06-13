@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -5072,6 +5073,11 @@ func configuredAllowedOrigins() []string {
 		"https://warm-dragon-34d6ff.netlify.app",
 		"https://bright-crisp-91fe94.netlify.app",
 		"https://delightful-churros-767ded.netlify.app",
+		"https://178-105-133-94.sslip.io",
+		"https://api.178-105-133-94.sslip.io",
+		"https://chain.178-105-133-94.sslip.io",
+		"https://wallet.178-105-133-94.sslip.io",
+		"https://dex-api.178-105-133-94.sslip.io",
 		"chrome-extension://",
 	}
 	for _, envName := range []string{"LQD_ALLOWED_ORIGINS", "LQD_ALLOWED_ORIGIN"} {
@@ -5086,23 +5092,113 @@ func configuredAllowedOrigins() []string {
 	return origins
 }
 
-func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	allowed := false
-	for _, o := range configuredAllowedOrigins() {
-		if strings.HasPrefix(origin, o) {
-			allowed = true
-			break
+func configuredAllowedOriginSuffixes() []string {
+	suffixes := []string{
+		".netlify.app",
+		".vercel.app",
+		".railway.app",
+		".up.railway.app",
+		".sslip.io",
+	}
+	for _, envName := range []string{"LQD_ALLOWED_ORIGIN_SUFFIXES", "LQD_ALLOWED_ORIGIN_SUFFIX"} {
+		for _, raw := range strings.Split(os.Getenv(envName), ",") {
+			suffix := strings.TrimSpace(raw)
+			if suffix == "" {
+				continue
+			}
+			suffixes = append(suffixes, suffix)
 		}
 	}
-	if allowed {
+	return suffixes
+}
+
+func corsAllowAllOrigins() bool {
+	for _, envName := range []string{"LQD_CORS_ALLOW_ALL", "LQD_ALLOW_ALL_ORIGINS"} {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(envName))) {
+		case "1", "true", "yes", "all", "*":
+			return true
+		}
+	}
+	for _, envName := range []string{"LQD_ALLOWED_ORIGINS", "LQD_ALLOWED_ORIGIN"} {
+		for _, raw := range strings.Split(os.Getenv(envName), ",") {
+			origin := strings.TrimSpace(raw)
+			if origin == "*" || strings.EqualFold(origin, "all") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func originMatchesConfiguredSuffix(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" {
+		return false
+	}
+	for _, suffix := range configuredAllowedOriginSuffixes() {
+		suffix = strings.TrimSpace(strings.ToLower(suffix))
+		suffix = strings.TrimPrefix(suffix, "*")
+		if suffix == "" {
+			continue
+		}
+		if !strings.HasPrefix(suffix, ".") {
+			suffix = "." + suffix
+		}
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func originAllowed(origin string) bool {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return true
+	}
+	if corsAllowAllOrigins() {
+		return true
+	}
+	for _, allowedOrigin := range configuredAllowedOrigins() {
+		allowedOrigin = strings.TrimSpace(allowedOrigin)
+		if allowedOrigin == "" {
+			continue
+		}
+		if allowedOrigin == "*" || strings.EqualFold(allowedOrigin, "all") {
+			return true
+		}
+		if strings.HasPrefix(allowedOrigin, "*.") {
+			if strings.HasSuffix(strings.ToLower(origin), strings.TrimPrefix(strings.ToLower(allowedOrigin), "*")) {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(origin, allowedOrigin) {
+			return true
+		}
+	}
+	return originMatchesConfiguredSuffix(origin)
+}
+
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	w.Header().Add("Vary", "Origin")
+	if originAllowed(origin) && origin != "" {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	} else if origin == "" {
 		// Direct API call (no browser) - allow
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 	}
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Requested-With, Accept")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 }
 
