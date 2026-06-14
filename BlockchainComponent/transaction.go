@@ -12,25 +12,26 @@ import (
 )
 
 type Transaction struct {
-	From        string   `json:"from"`
-	To          string   `json:"to"`
-	Value       *big.Int `json:"value"`
-	Data        []byte   `json:"data"`
-	TxHash      string   `json:"tx_hash"`
-	Status      string   `json:"status"`
-	Gas         uint64   `json:"gas"`
-	GasPrice    uint64   `json:"gas_price"`
-	Sig         []byte   `json:"sig"`
-	Nonce       uint64   `json:"nonce"`
-	ChainID     uint64   `json:"chain_id"`
-	Timestamp   uint64   `json:"timestamp"`
-	PriorityFee uint64   `json:"priority_fee"`
-	IsContract  bool     `json:"is_contract"`
-	Function    string   `json:"function"`
-	Args        []string `json:"args"`
-	Type        string   `json:"type"`
-	ExtraData   []byte   `json:"extra_data"`
-	IsSystem    bool     `json:"is_system"`
+	From          string   `json:"from"`
+	To            string   `json:"to"`
+	Value         *big.Int `json:"value"`
+	Data          []byte   `json:"data"`
+	TxHash        string   `json:"tx_hash"`
+	Status        string   `json:"status"`
+	FailureReason string   `json:"failure_reason,omitempty"`
+	Gas           uint64   `json:"gas"`
+	GasPrice      uint64   `json:"gas_price"`
+	Sig           []byte   `json:"sig"`
+	Nonce         uint64   `json:"nonce"`
+	ChainID       uint64   `json:"chain_id"`
+	Timestamp     uint64   `json:"timestamp"`
+	PriorityFee   uint64   `json:"priority_fee"`
+	IsContract    bool     `json:"is_contract"`
+	Function      string   `json:"function"`
+	Args          []string `json:"args"`
+	Type          string   `json:"type"`
+	ExtraData     []byte   `json:"extra_data"`
+	IsSystem      bool     `json:"is_system"`
 }
 
 func NewTransaction(from string, to string, value *big.Int, data []byte) *Transaction {

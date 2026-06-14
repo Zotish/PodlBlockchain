@@ -88,12 +88,12 @@ func (ws *WalletServer) fetchNextNonce(client *http.Client, addr string) (uint64
 	}
 
 	switch {
-	case nonceResp.PendingCount == 0:
-		return nonceResp.ConfirmedNonce, nil
 	case nonceResp.NextNonce > 0:
 		return nonceResp.NextNonce, nil
 	case nonceResp.Nonce > 0:
 		return nonceResp.Nonce, nil
+	case nonceResp.PendingCount > 0:
+		return nonceResp.NextNonce, nil
 	default:
 		return nonceResp.ConfirmedNonce, nil
 	}

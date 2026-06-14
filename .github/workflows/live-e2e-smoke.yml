@@ -1,0 +1,46 @@
+name: Live E2E Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      chain_url:
+        description: "Chain API base URL"
+        required: true
+        default: "https://chain.178-105-133-94.sslip.io"
+      wallet_url:
+        description: "Wallet API base URL"
+        required: true
+        default: "https://wallet.178-105-133-94.sslip.io"
+      aggregator_url:
+        description: "Aggregator API base URL"
+        required: true
+        default: "https://api.178-105-133-94.sslip.io"
+      dex_api_url:
+        description: "DEX API base URL"
+        required: true
+        default: "https://dex-api.178-105-133-94.sslip.io"
+      explorer_url:
+        description: "Explorer frontend URL"
+        required: true
+        default: "https://warm-dragon-34d6ff.netlify.app"
+      dex_ui_url:
+        description: "DEX frontend URL"
+        required: true
+        default: "https://bright-crisp-91fe94.netlify.app"
+
+jobs:
+  live-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install smoke dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+      - name: Run live E2E smoke
+        env:
+          CHAIN: ${{ inputs.chain_url }}
+          WALLET: ${{ inputs.wallet_url }}
+          API: ${{ inputs.aggregator_url }}
+          DEXAPI: ${{ inputs.dex_api_url }}
+          EXPLORER: ${{ inputs.explorer_url }}
+          DEXUI: ${{ inputs.dex_ui_url }}
+        run: bash scripts/live_e2e_curl.sh

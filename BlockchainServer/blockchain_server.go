@@ -202,50 +202,69 @@ func (bcs *BlockchainServer) GetAccountNonce(w http.ResponseWriter, r *http.Requ
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
 
-	// GetAccountNonce already returns the next usable nonce.
-	confirmed := bcs.BlockchainPtr.GetAccountNonce(address)
-
-	// compute next free nonce including pending txs from this address
+	confirmed := bcs.BlockchainPtr.GetConfirmedAccountNonce(address)
 	next := confirmed
+	pendingNonces := make([]uint64, 0)
 	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
-		if tx.From == address && tx.Nonce >= next {
+		if tx != nil && strings.EqualFold(tx.From, address) && !strings.EqualFold(tx.Status, constantset.StatusFailed) {
+			pendingNonces = append(pendingNonces, tx.Nonce)
+		}
+		if tx != nil && strings.EqualFold(tx.From, address) && !strings.EqualFold(tx.Status, constantset.StatusFailed) && tx.Nonce >= next {
 			next = tx.Nonce + 1
 		}
 	}
 
 	// Backward-compatible: keep "nonce" (now meaning next usable)
-	_ = json.NewEncoder(w).Encode(map[string]uint64{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"confirmed_nonce": confirmed,
 		"next_nonce":      next,
 		"nonce":           next,
+		"pending_count":   uint64(len(pendingNonces)),
+		"pending_nonces":  pendingNonces,
 	})
 }
 
 func (b *BlockchainServer) sendTransaction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
-	if r.Method == http.MethodPost {
-
-		request, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Failed to read request body", http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close()
-		var tx blockchaincomponent.Transaction
-
-		err = json.Unmarshal(request, &tx)
-		if err != nil {
-			http.Error(w, "Invalid transaction data", http.StatusBadRequest)
-			return
-		}
-
-		go b.BlockchainPtr.AddNewTxToTheTransaction_pool(&tx)
-		io.WriteString(w, tx.ToJsonTx())
-	} else {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	request, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+	var tx blockchaincomponent.Transaction
+
+	err = json.Unmarshal(request, &tx)
+	if err != nil {
+		http.Error(w, "Invalid transaction data", http.StatusBadRequest)
+		return
+	}
+
+	err = b.BlockchainPtr.AddNewTxToTheTransaction_pool(&tx)
+	statusCode := http.StatusAccepted
+	resp := map[string]interface{}{
+		"accepted":       err == nil,
+		"tx_hash":        tx.TxHash,
+		"status":         tx.Status,
+		"failure_reason": tx.FailureReason,
+		"transaction":    &tx,
+	}
+	if err != nil {
+		statusCode = http.StatusBadRequest
+		resp["error"] = err.Error()
+	}
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (b *BlockchainServer) sendTransactionBatch(w http.ResponseWriter, r *http.Request) {
@@ -2943,8 +2962,10 @@ func (bcs *BlockchainServer) GetTransactionByHash(w http.ResponseWriter, r *http
 	for _, tx := range bcs.BlockchainPtr.Transaction_pool {
 		if strings.ToLower(tx.TxHash) == hash {
 			resp := map[string]interface{}{
-				"transaction": tx,
-				"source":      "mempool",
+				"transaction":    tx,
+				"source":         "mempool",
+				"status":         tx.Status,
+				"failure_reason": tx.FailureReason,
 			}
 			json.NewEncoder(w).Encode(resp)
 			return
@@ -2960,6 +2981,8 @@ func (bcs *BlockchainServer) GetTransactionByHash(w http.ResponseWriter, r *http
 				resp := map[string]interface{}{
 					"transaction":        item,
 					"source":             "block",
+					"status":             tx.Status,
+					"failure_reason":     tx.FailureReason,
 					"block_hash":         blk.CurrentHash,
 					"block_number":       blk.BlockNumber,
 					"tx_index":           idx,
@@ -2976,8 +2999,10 @@ func (bcs *BlockchainServer) GetTransactionByHash(w http.ResponseWriter, r *http
 	for _, tx := range bcs.BlockchainPtr.RecentTxs {
 		if strings.ToLower(tx.TxHash) == hash {
 			resp := map[string]interface{}{
-				"transaction": tx,
-				"source":      "recent",
+				"transaction":    tx,
+				"source":         "recent",
+				"status":         tx.Status,
+				"failure_reason": tx.FailureReason,
 			}
 			json.NewEncoder(w).Encode(resp)
 			return

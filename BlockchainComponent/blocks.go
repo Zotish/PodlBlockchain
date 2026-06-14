@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math/big"
 	"runtime"
@@ -99,18 +100,22 @@ func (bc *Blockchain_struct) verifyTxWorker(
 	for tx := range tasks {
 		gasUnits := tx.CalculateGasCost()
 		if gasUnits == 0 {
-			out <- VerifiedTx{Tx: tx, Valid: false}
+			out <- VerifiedTx{Tx: tx, Valid: false, Err: fmt.Errorf("gas cost is zero")}
 			continue
 		}
 
 		minRequired := tx.PriorityFee + baseFee
 		if tx.GasPrice < minRequired {
-			out <- VerifiedTx{Tx: tx, Valid: false}
+			out <- VerifiedTx{Tx: tx, Valid: false, Err: fmt.Errorf("gas_price < baseFee+tip (%d < %d)", tx.GasPrice, minRequired)}
 			continue
 		}
 
 		if !bc.VerifyTransaction(tx) {
-			out <- VerifiedTx{Tx: tx, Valid: false}
+			err := fmt.Errorf("transaction verification failed")
+			if strings.TrimSpace(tx.FailureReason) != "" {
+				err = fmt.Errorf("%s", tx.FailureReason)
+			}
+			out <- VerifiedTx{Tx: tx, Valid: false, Err: err}
 			continue
 		}
 
@@ -134,7 +139,7 @@ func (bc *Blockchain_struct) verifyTxWorker(
 		totalCost := new(big.Int).Add(CopyAmount(tx.Value), NewAmountFromUint64(feeTokens))
 
 		if senderBal.Cmp(totalCost) < 0 {
-			out <- VerifiedTx{Tx: tx, Valid: false}
+			out <- VerifiedTx{Tx: tx, Valid: false, Err: fmt.Errorf("insufficient funds (have %s need %s)", AmountString(senderBal), AmountString(totalCost))}
 			continue
 		}
 
@@ -221,11 +226,15 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	finalTxs := make([]*Transaction, 0, len(txPool))
 	failedTxHashes := make(map[string]struct{})
 
-	markFailed := func(tx *Transaction) {
+	markFailed := func(tx *Transaction, reason string) {
 		if tx == nil {
 			return
 		}
 		tx.Status = constantset.StatusFailed
+		if strings.TrimSpace(reason) == "" {
+			reason = "transaction failed during block execution"
+		}
+		tx.FailureReason = reason
 		if tx.TxHash == "" {
 			tx.TxHash = CalculateTransactionHash(*tx)
 		}
@@ -248,11 +257,15 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		}
 
 		if !res.Valid || res.Tx == nil {
-			markFailed(res.Tx)
+			reason := "transaction verification failed"
+			if res.Err != nil {
+				reason = res.Err.Error()
+			}
+			markFailed(res.Tx, reason)
 			continue
 		}
 		if totalGasUsed+res.GasUsed > newBlock.GasLimit {
-			markFailed(res.Tx)
+			markFailed(res.Tx, "block gas limit exceeded")
 			continue
 		}
 
@@ -264,7 +277,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 				)
 				if err != nil {
 					log.Printf("ContractTx FAILED fn=%s addr=%s err=%v", res.Tx.Function, res.Tx.To, err)
-					markFailed(res.Tx)
+					markFailed(res.Tx, err.Error())
 					continue
 				}
 			}
@@ -278,7 +291,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 			senderBal = big.NewInt(0)
 		}
 		if senderBal.Cmp(totalTxCost) < 0 {
-			markFailed(res.Tx)
+			markFailed(res.Tx, fmt.Sprintf("insufficient funds (have %s need %s)", AmountString(senderBal), AmountString(totalTxCost)))
 			continue
 		}
 
@@ -288,6 +301,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		}
 
 		res.Tx.Status = constantset.StatusSuccess
+		res.Tx.FailureReason = ""
 
 		if res.Tx.Type == "bridge_lock" || res.Tx.Type == "bridge_lock_private" {
 			toBSC := ""
