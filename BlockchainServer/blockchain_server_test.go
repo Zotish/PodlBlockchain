@@ -1,12 +1,19 @@
 package blockchainserver
 
 import (
+	"bytes"
+	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	blockchaincomponent "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/BlockchainComponent"
+	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
+	"github.com/gorilla/mux"
 )
 
 func TestBridgeAdminKeyMatches(t *testing.T) {
@@ -77,6 +84,117 @@ func TestSetCORSHeadersAllowsWildcardEnvOrigin(t *testing.T) {
 
 	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != origin {
 		t.Fatalf("expected env wildcard origin to be reflected, got %q", got)
+	}
+}
+
+func TestGetAccountNonceReportsConfirmedAndPending(t *testing.T) {
+	addr := "0x1111111111111111111111111111111111111111"
+	bc := &blockchaincomponent.Blockchain_struct{
+		Blocks: []*blockchaincomponent.Block{{
+			Transactions: []*blockchaincomponent.Transaction{{
+				From:   strings.ToUpper(addr),
+				Nonce:  0,
+				Status: "success",
+			}},
+		}},
+		Transaction_pool: []*blockchaincomponent.Transaction{{
+			From:   addr,
+			Nonce:  1,
+			Status: "pending",
+		}},
+	}
+	server := NewBlockchainServer(6500, bc)
+	req := httptest.NewRequest(http.MethodGet, "/account/"+addr+"/nonce", nil)
+	req = mux.SetURLVars(req, map[string]string{"address": addr})
+	rr := httptest.NewRecorder()
+
+	server.GetAccountNonce(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, needle := range []string{`"confirmed_nonce":1`, `"next_nonce":2`, `"pending_count":1`, `"pending_nonces":[1]`} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("expected nonce response to contain %s, got %s", needle, body)
+		}
+	}
+}
+
+func TestSendTransactionIndexesAcceptedAndFailedNonceTxs(t *testing.T) {
+	oldDBPath := constantset.BLOCKCHAIN_DB_PATH
+	constantset.BLOCKCHAIN_DB_PATH = filepath.Join(t.TempDir(), "evodb")
+	defer func() { constantset.BLOCKCHAIN_DB_PATH = oldDBPath }()
+
+	from := "0x1111111111111111111111111111111111111111"
+	to := "0x2222222222222222222222222222222222222222"
+	bc := &blockchaincomponent.Blockchain_struct{
+		Blocks: []*blockchaincomponent.Block{{
+			BlockNumber:  0,
+			Transactions: []*blockchaincomponent.Transaction{},
+		}},
+		Transaction_pool: []*blockchaincomponent.Transaction{},
+		RecentTxs:        []*blockchaincomponent.Transaction{},
+		BaseFee:          1,
+	}
+	server := NewBlockchainServer(6500, bc)
+	submit := func(tx blockchaincomponent.Transaction) map[string]interface{} {
+		body, _ := json.Marshal(tx)
+		req := httptest.NewRequest(http.MethodPost, "/send_tx", bytes.NewReader(body))
+		rr := httptest.NewRecorder()
+		server.sendTransaction(rr, req)
+		var resp map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("send_tx response is not JSON: status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		resp["_status_code"] = float64(rr.Code)
+		return resp
+	}
+	baseTx := blockchaincomponent.Transaction{
+		From:      from,
+		To:        to,
+		Value:     big.NewInt(0),
+		Data:      []byte("first"),
+		Gas:       uint64(constantset.MinGas),
+		GasPrice:  1,
+		Nonce:     0,
+		ChainID:   uint64(constantset.ChainID),
+		Timestamp: uint64(time.Now().Unix()),
+	}
+
+	accepted := submit(baseTx)
+	if accepted["_status_code"] != float64(http.StatusAccepted) {
+		t.Fatalf("expected accepted tx, got %#v", accepted)
+	}
+	acceptedHash, _ := accepted["tx_hash"].(string)
+	if acceptedHash == "" {
+		t.Fatalf("expected accepted tx hash, got %#v", accepted)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/tx/"+acceptedHash, nil)
+	rr := httptest.NewRecorder()
+	server.GetTransactionByHash(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"source":"mempool"`) || !strings.Contains(rr.Body.String(), `"status":"pending"`) {
+		t.Fatalf("expected accepted tx to be indexed as mempool pending, status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	duplicate := baseTx
+	duplicate.Data = []byte("second-same-nonce")
+	failed := submit(duplicate)
+	if failed["_status_code"] != float64(http.StatusBadRequest) {
+		t.Fatalf("expected duplicate nonce tx to fail, got %#v", failed)
+	}
+	failedHash, _ := failed["tx_hash"].(string)
+	if failedHash == "" || failedHash == acceptedHash {
+		t.Fatalf("expected distinct failed tx hash, accepted=%s failed=%#v", acceptedHash, failed)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/tx/"+failedHash, nil)
+	rr = httptest.NewRecorder()
+	server.GetTransactionByHash(rr, req)
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, `"source":"recent"`) || !strings.Contains(body, `"status":"failed"`) || !strings.Contains(body, "failure_reason") {
+		t.Fatalf("expected failed tx to be indexed with reason, status=%d body=%s", rr.Code, body)
 	}
 }
 

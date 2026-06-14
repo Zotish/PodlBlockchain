@@ -933,22 +933,61 @@ func (bc *Blockchain_struct) CopyTransactions() []*Transaction {
 	return txCopy
 }
 
+func (bc *Blockchain_struct) persistStateLocked() error {
+	dbCopy := *bc
+	dbCopy.Mutex = sync.Mutex{}
+	return PutIntoDB(dbCopy)
+}
+
+func (bc *Blockchain_struct) preparePendingTx(tx *Transaction) {
+	if tx == nil {
+		return
+	}
+	if tx.Timestamp == 0 {
+		tx.Timestamp = uint64(time.Now().Unix())
+	}
+	tx.Status = constantset.StatusPending
+	tx.FailureReason = ""
+	tx.TxHash = CalculateTransactionHash(*tx)
+}
+
+func (bc *Blockchain_struct) markTxFailedLocked(tx *Transaction, reason string) {
+	if tx == nil {
+		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "transaction failed"
+	}
+	if tx.TxHash == "" {
+		status := tx.Status
+		failureReason := tx.FailureReason
+		tx.Status = constantset.StatusPending
+		tx.FailureReason = ""
+		tx.TxHash = CalculateTransactionHash(*tx)
+		tx.Status = status
+		tx.FailureReason = failureReason
+	}
+	tx.Status = constantset.StatusFailed
+	tx.FailureReason = reason
+	bc.RecordRecentTx(tx)
+}
+
 func (bc *Blockchain_struct) AddNewTxToTheTransaction_pool(tx *Transaction) error {
 	bc.Mutex.Lock()
 	defer bc.Mutex.Unlock()
 
+	if tx == nil {
+		return fmt.Errorf("transaction required")
+	}
 	if bc.BaseFee == 0 {
 		bc.BaseFee = bc.CalculateBaseFee()
 	}
+	bc.preparePendingTx(tx)
 
 	// TTL check first – if expired, mark failed and store in recent story
 	if uint64(time.Now().Unix())-tx.Timestamp > uint64(TransactionTTL.Seconds()) {
-		tx.Status = constantset.StatusFailed
-		// make sure hash exists so explorer can reference it
-		if tx.TxHash == "" {
-			tx.TxHash = CalculateTransactionHash(*tx)
-		}
-		bc.RecordRecentTx(tx)
+		bc.markTxFailedLocked(tx, "transaction expired")
+		_ = bc.persistStateLocked()
 		return fmt.Errorf("transaction expired")
 	}
 
@@ -970,6 +1009,8 @@ func (bc *Blockchain_struct) AddNewTxToTheTransaction_pool(tx *Transaction) erro
 				bc.Transaction_pool[i] = tx
 				replaced = true
 			} else {
+				bc.markTxFailedLocked(tx, "replacement requires >=10% higher effective fee")
+				_ = bc.persistStateLocked()
 				return fmt.Errorf("replacement requires >=10%% higher effective fee")
 			}
 			break
@@ -977,7 +1018,18 @@ func (bc *Blockchain_struct) AddNewTxToTheTransaction_pool(tx *Transaction) erro
 	}
 
 	if !replaced {
+		expectedNonce := bc.GetAccountNonce(tx.From)
+		if !tx.IsSystem && tx.Type != "stake" && tx.Type != "unstake" && tx.Type != "lp_reward" && tx.Type != "reward" && tx.Nonce != expectedNonce {
+			reason := fmt.Sprintf("bad nonce (got %d want %d)", tx.Nonce, expectedNonce)
+			bc.markTxFailedLocked(tx, reason)
+			_ = bc.persistStateLocked()
+			return fmt.Errorf("%s", reason)
+		}
 		if bc.countTxsFrom(tx.From) >= constantset.MaxTxsPerAccount {
+			reason := fmt.Sprintf("account tx pool limit reached (%d/%d)",
+				bc.countTxsFrom(tx.From), constantset.MaxTxsPerAccount)
+			bc.markTxFailedLocked(tx, reason)
+			_ = bc.persistStateLocked()
 			return fmt.Errorf("account tx pool limit reached (%d/%d)",
 				bc.countTxsFrom(tx.From), constantset.MaxTxsPerAccount)
 		}
@@ -993,27 +1045,26 @@ func (bc *Blockchain_struct) AddNewTxToTheTransaction_pool(tx *Transaction) erro
 	})
 
 	if len(bc.Transaction_pool) > constantset.MaxTxPoolSize {
-		// Optionally mark this tx as failed + story
-		tx.Status = constantset.StatusFailed
-		if tx.TxHash == "" {
-			tx.TxHash = CalculateTransactionHash(*tx)
-		}
-		bc.RecordRecentTx(tx)
+		dropped := append([]*Transaction(nil), bc.Transaction_pool[constantset.MaxTxPoolSize:]...)
 		bc.Transaction_pool = bc.Transaction_pool[:constantset.MaxTxPoolSize]
-		return fmt.Errorf("txpool full")
+		submittedDropped := false
+		for _, droppedTx := range dropped {
+			if droppedTx == tx || strings.EqualFold(droppedTx.TxHash, tx.TxHash) {
+				submittedDropped = true
+			}
+			bc.markTxFailedLocked(droppedTx, "txpool full")
+		}
+		_ = bc.persistStateLocked()
+		if submittedDropped {
+			return fmt.Errorf("txpool full")
+		}
 	}
-
-	// Now that it *is* accepted into the pool, give it pending status + hash
-	tx.Status = constantset.StatusPending
-	tx.TxHash = CalculateTransactionHash(*tx)
 
 	// 🔥 THIS is where we add it to the global explorer story
 	bc.RecordRecentTx(tx)
 
 	// Persist chain state
-	dbCopy := *bc
-	dbCopy.Mutex = sync.Mutex{}
-	if err := PutIntoDB(dbCopy); err != nil {
+	if err := bc.persistStateLocked(); err != nil {
 		return fmt.Errorf("failed to update blockchain in DB: %v", err)
 	}
 	return nil
@@ -1036,15 +1087,13 @@ func (bc *Blockchain_struct) AddNewTxBatch(txs []*Transaction) (int, int) {
 			failed++
 			continue
 		}
+		bc.preparePendingTx(tx)
 
 		// TTL check first – if expired, mark failed and store in recent story
 		if uint64(time.Now().Unix())-tx.Timestamp > uint64(TransactionTTL.Seconds()) {
-			tx.Status = constantset.StatusFailed
-			if tx.TxHash == "" {
-				tx.TxHash = CalculateTransactionHash(*tx)
-			}
-			bc.RecordRecentTx(tx)
+			bc.markTxFailedLocked(tx, "transaction expired")
 			failed++
+			changed = true
 			continue
 		}
 
@@ -1066,28 +1115,37 @@ func (bc *Blockchain_struct) AddNewTxBatch(txs []*Transaction) (int, int) {
 					replaced = true
 					changed = true
 				} else {
+					bc.markTxFailedLocked(tx, "replacement requires >=10% higher effective fee")
 					failed++
+					changed = true
 				}
 				break
 			}
 		}
 
 		if replaced {
-			tx.Status = constantset.StatusPending
-			tx.TxHash = CalculateTransactionHash(*tx)
 			bc.RecordRecentTx(tx)
 			accepted++
 			continue
 		}
 
-		if bc.countTxsFrom(tx.From) >= constantset.MaxTxsPerAccount {
+		expectedNonce := bc.GetAccountNonce(tx.From)
+		if !tx.IsSystem && tx.Type != "stake" && tx.Type != "unstake" && tx.Type != "lp_reward" && tx.Type != "reward" && tx.Nonce != expectedNonce {
+			bc.markTxFailedLocked(tx, fmt.Sprintf("bad nonce (got %d want %d)", tx.Nonce, expectedNonce))
 			failed++
+			changed = true
+			continue
+		}
+
+		if bc.countTxsFrom(tx.From) >= constantset.MaxTxsPerAccount {
+			bc.markTxFailedLocked(tx, fmt.Sprintf("account tx pool limit reached (%d/%d)",
+				bc.countTxsFrom(tx.From), constantset.MaxTxsPerAccount))
+			failed++
+			changed = true
 			continue
 		}
 
 		bc.Transaction_pool = append(bc.Transaction_pool, tx)
-		tx.Status = constantset.StatusPending
-		tx.TxHash = CalculateTransactionHash(*tx)
 		bc.RecordRecentTx(tx)
 		accepted++
 		changed = true
@@ -1104,13 +1162,14 @@ func (bc *Blockchain_struct) AddNewTxBatch(txs []*Transaction) (int, int) {
 			overflow := len(bc.Transaction_pool) - constantset.MaxTxPoolSize
 			if overflow > 0 {
 				failed += overflow
+				for _, dropped := range bc.Transaction_pool[constantset.MaxTxPoolSize:] {
+					bc.markTxFailedLocked(dropped, "txpool full")
+				}
 				bc.Transaction_pool = bc.Transaction_pool[:constantset.MaxTxPoolSize]
 			}
 		}
 
-		dbCopy := *bc
-		dbCopy.Mutex = sync.Mutex{}
-		_ = PutIntoDB(dbCopy)
+		_ = bc.persistStateLocked()
 	}
 
 	return accepted, failed
@@ -1469,6 +1528,13 @@ func (bc *Blockchain_struct) CalculateAverageBlockTime() float64 {
 }
 
 func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
+	fail := func(format string, args ...interface{}) bool {
+		reason := fmt.Sprintf(format, args...)
+		tx.Status = constantset.StatusFailed
+		tx.FailureReason = reason
+		log.Printf("TX %s failed: %s", tx.TxHash, reason)
+		return false
+	}
 
 	isSystem := tx.IsSystem ||
 		tx.Type == "stake" ||
@@ -1483,32 +1549,25 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 		}
 		// No gas / sig / balance checks for internal bookkeeping txs
 		tx.Status = constantset.StatusPending
+		tx.FailureReason = ""
 		return true
 	}
 
 	// 0) Basic shape
 	if tx.From == "" || tx.To == "" {
-		tx.Status = constantset.StatusFailed
-		fmt.Printf("TX %s failed: missing from/to", tx.TxHash)
-		return false
+		return fail("missing from/to")
 	}
 	if (tx.Type == "bridge_lock" || tx.Type == "bridge_lock_private") && tx.To != constantset.BridgeEscrowAddress {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: bridge_lock must go to escrow", tx.TxHash)
-		return false
+		return fail("bridge_lock must go to escrow")
 	}
 
 	// 1) Address + ChainID
 	if !ValidateAddress(tx.From) || !ValidateAddress(tx.To) {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: invalid address format", tx.TxHash)
-		return false
+		return fail("invalid address format")
 	}
 
 	if tx.ChainID != uint64(constantset.ChainID) {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: invalid chain ID", tx.TxHash)
-		return false
+		return fail("invalid chain ID")
 	}
 
 	// 2) Timestamp sanity (allow small future skew)
@@ -1516,9 +1575,7 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	const maxPast = uint64(3600)  // 1h old -> reject
 	const maxFuture = uint64(600) // >10m in future -> reject
 	if tx.Timestamp > now+maxFuture || now-tx.Timestamp > maxPast {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: timestamp out of range (ts=%d now=%d)", tx.TxHash, tx.Timestamp, now)
-		return false
+		return fail("timestamp out of range (ts=%d now=%d)", tx.Timestamp, now)
 	}
 
 	// 3) Fee policy: require gas price to meet baseFee (+ optional priority)
@@ -1528,26 +1585,22 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 		tx.Gas = uint64(constantset.MinGas) // defensive default
 	}
 	if tx.GasPrice < minRequired {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: gas_price < baseFee+tip (%d < %d)", tx.TxHash, tx.GasPrice, minRequired)
-		return false
+		return fail("gas_price < baseFee+tip (%d < %d)", tx.GasPrice, minRequired)
 	}
 
-	// 4) Nonce policy - proper nonce validation
-	expected := bc.GetAccountNonce(tx.From)
-	if tx.Nonce != 0 && tx.Nonce != expected {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: bad nonce (got %d want %d)", tx.TxHash, tx.Nonce, expected)
-		return false
+	// 4) Mining-time nonce policy. Admission enforces the exact next nonce
+	// including pending txs; block verification only rejects stale/replayed
+	// nonces so sequential pending txs from the same account can mine together.
+	confirmed := bc.GetConfirmedAccountNonce(tx.From)
+	if tx.Nonce < confirmed {
+		return fail("nonce already used (got %d confirmed_next %d)", tx.Nonce, confirmed)
 	}
 
 	// 5) Signature (v normalized in wallet: v∈{27,28})
 
 	isVerifySig := bc.VerifyTransactionSignature(tx)
 	if !isVerifySig {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: signature verify", tx.TxHash)
-		return false
+		return fail("signature verify")
 	}
 
 	// 6) Balance (live wallet) — light precheck to avoid junk in pool
@@ -1555,44 +1608,46 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	totalCost := new(big.Int).Add(CopyAmount(tx.Value), NewAmountFromUint64(tx.GasPrice*tx.CalculateGasCost()))
 	bal, err := bc.GetWalletBalance(tx.From)
 	if err != nil {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: balance lookup error: %v", tx.TxHash, err)
-		return false
+		return fail("balance lookup error: %v", err)
 	}
 	if bal.Cmp(totalCost) < 0 {
-		tx.Status = constantset.StatusFailed
-		log.Printf("TX %s failed: insufficient funds (have %s need %s)", tx.TxHash, AmountString(bal), AmountString(totalCost))
-		return false
+		return fail("insufficient funds (have %s need %s)", AmountString(bal), AmountString(totalCost))
 	}
 
 	// Passes admission checks
 	tx.Status = constantset.StatusPending
+	tx.FailureReason = ""
 	return true
 }
 
 func (bc *Blockchain_struct) GetAccountNonce(address string) uint64 {
-	// Check confirmed transactions in blocks first
+	highestNonce := bc.GetConfirmedAccountNonce(address)
+
+	// Then check pending transactions
+	for _, tx := range bc.Transaction_pool {
+		if tx != nil && strings.EqualFold(tx.From, address) && !strings.EqualFold(tx.Status, constantset.StatusFailed) && tx.Nonce >= highestNonce {
+			highestNonce = tx.Nonce + 1
+		}
+	}
+
+	return highestNonce
+}
+
+func (bc *Blockchain_struct) GetConfirmedAccountNonce(address string) uint64 {
 	highestNonce := uint64(0)
 	for _, block := range bc.Blocks {
+		if block == nil {
+			continue
+		}
 		for _, tx := range block.Transactions {
-			if tx.From == address && tx.Nonce >= highestNonce {
-				fmt.Printf("Found confirmed tx: From=%s, Nonce=%d\n", tx.From, tx.Nonce)
+			if tx != nil && strings.EqualFold(tx.From, address) && !strings.EqualFold(tx.Status, constantset.StatusFailed) && tx.Nonce >= highestNonce {
 				highestNonce = tx.Nonce + 1
 			}
 		}
 	}
-
-	// Then check pending transactions
-	for _, tx := range bc.Transaction_pool {
-		if tx.From == address && tx.Nonce >= highestNonce {
-			fmt.Printf("Found pending tx: From=%s, Nonce=%d\n", tx.From, tx.Nonce)
-			highestNonce = tx.Nonce + 1
-		}
-	}
-	fmt.Printf("Returning nonce for %s: %d\n", address, highestNonce)
-
 	return highestNonce
 }
+
 func (bc *Blockchain_struct) GetConfirmations(txHash string) int {
 	for i, block := range bc.Blocks {
 		for _, tx := range block.Transactions {

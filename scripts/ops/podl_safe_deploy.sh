@@ -11,6 +11,7 @@ BRANCH="${BRANCH:-main}"
 COMPOSE="${COMPOSE:-docker compose}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-45}"
 RESTORE_ON_FAIL="${RESTORE_ON_FAIL:-false}"
+RUN_LIVE_E2E_SMOKE="${RUN_LIVE_E2E_SMOKE:-false}"
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
@@ -82,6 +83,22 @@ case "$readiness" in
     echo "$readiness" >&2
     ;;
 esac
+
+if [ "$RUN_LIVE_E2E_SMOKE" = "true" ]; then
+  if ! command -v bash >/dev/null 2>&1; then
+    echo "Deploy failed: bash is required for scripts/live_e2e_curl.sh. Backup: $backup_file" >&2
+    exit 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "Deploy failed: jq is required for scripts/live_e2e_curl.sh. Backup: $backup_file" >&2
+    exit 1
+  fi
+  CHAIN="$CHAIN_URL" \
+    WALLET="$WALLET_URL" \
+    API="$AGG_URL" \
+    DEXAPI="$DEX_API_URL" \
+    bash "$APP_ROOT/scripts/live_e2e_curl.sh"
+fi
 
 echo "Safe deploy completed."
 echo "Backup: $backup_file"

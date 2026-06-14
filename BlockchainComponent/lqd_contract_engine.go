@@ -254,7 +254,7 @@ func computePluginRuntimeFingerprint() (string, error) {
 			if walkErr != nil || info == nil || info.IsDir() {
 				return nil
 			}
-			if !strings.HasSuffix(info.Name(), ".go") {
+			if !strings.HasSuffix(info.Name(), ".go") || strings.HasSuffix(info.Name(), "_test.go") {
 				return nil
 			}
 			rel, err := filepath.Rel(cwd, path)
@@ -1318,10 +1318,20 @@ func (r *ContractRegistry) EnsurePluginLoaded(addr string, meta *ContractMetadat
 	previousFingerprint := meta.RuntimeFingerprint
 
 	if err := r.PluginVM.LoadPlugin(addr, meta.PluginPath); err != nil {
-		if previousFingerprint != "" && previousFingerprint != currentFingerprint {
-			return fmt.Errorf("legacy plugin load failed after runtime compatibility check for %s (stored runtime %s, current runtime %s): %w", addr, previousFingerprint, currentFingerprint, err)
+		loadErr := err
+		if migrated, migrateErr := r.rebindLegacyBuiltinPlugin(addr, meta, currentFingerprint); migrateErr != nil {
+			loadErr = fmt.Errorf("%w; builtin runtime migration failed: %v", err, migrateErr)
+		} else if migrated {
+			if retryErr := r.PluginVM.LoadPlugin(addr, meta.PluginPath); retryErr == nil {
+				return nil
+			} else {
+				loadErr = retryErr
+			}
 		}
-		return err
+		if previousFingerprint != "" && previousFingerprint != currentFingerprint {
+			return fmt.Errorf("legacy plugin load failed after runtime compatibility migration for %s (stored runtime %s, current runtime %s): %w", addr, previousFingerprint, currentFingerprint, loadErr)
+		}
+		return loadErr
 	}
 
 	if currentFingerprint != "" && (previousFingerprint == "" || previousFingerprint != currentFingerprint || !hasRuntimeFingerprint(meta, currentFingerprint)) {
@@ -1338,6 +1348,115 @@ func (r *ContractRegistry) EnsurePluginLoaded(addr string, meta *ContractMetadat
 	}
 
 	return nil
+}
+
+func (r *ContractRegistry) rebindLegacyBuiltinPlugin(addr string, meta *ContractMetadata, currentFingerprint string) (bool, error) {
+	builtinName := inferBuiltinName(meta)
+	if builtinName == "" {
+		return false, nil
+	}
+	soBytes, err := findPrebuiltBuiltinPlugin(builtinName)
+	if err != nil {
+		return false, err
+	}
+	pluginDir := ContractArtifactsDir()
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		return false, err
+	}
+	safeAddr := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(addr)), "0x")
+	if safeAddr == "" {
+		safeAddr = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(meta.Address)), "0x")
+	}
+	if safeAddr == "" {
+		safeAddr = "contract"
+	}
+	pluginPath := filepath.Join(pluginDir, fmt.Sprintf("%s_%s_runtime_%d.so", safeAddr, builtinName, time.Now().UnixNano()))
+	if err := os.WriteFile(pluginPath, soBytes, 0644); err != nil {
+		return false, err
+	}
+
+	previousFingerprint := meta.RuntimeFingerprint
+	if previousFingerprint != "" && previousFingerprint != currentFingerprint {
+		meta.RuntimeFingerprints = appendRuntimeFingerprint(meta.RuntimeFingerprints, previousFingerprint)
+		meta.RuntimeMigratedFrom = previousFingerprint
+		meta.RuntimeMigratedAt = time.Now().Unix()
+	}
+	if currentFingerprint != "" {
+		meta.RuntimeFingerprints = appendRuntimeFingerprint(meta.RuntimeFingerprints, currentFingerprint)
+		meta.RuntimeFingerprint = currentFingerprint
+	}
+	meta.PluginPath = pluginPath
+	meta.BuiltinName = builtinName
+	if err := r.DB.SaveContractMetadata(addr, meta); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func inferBuiltinName(meta *ContractMetadata) string {
+	if meta == nil {
+		return ""
+	}
+	known := map[string]bool{
+		"dex_factory":    true,
+		"dex_pair":       true,
+		"dex_router":     true,
+		"dex_swap":       true,
+		"lqd20":          true,
+		"wlqd":           true,
+		"strategy_vault": true,
+	}
+	if name := strings.ToLower(strings.TrimSpace(meta.BuiltinName)); known[name] {
+		return name
+	}
+	pathHint := strings.ToLower(filepath.Base(meta.PluginPath))
+	for name := range known {
+		if strings.Contains(pathHint, name) {
+			return name
+		}
+	}
+	abi := strings.ToLower(string(meta.ABI))
+	switch {
+	case strings.Contains(abi, "createpair") && strings.Contains(abi, "getpair"):
+		return "dex_factory"
+	case strings.Contains(abi, "getreserves") && strings.Contains(abi, "addliquidity"):
+		return "dex_pair"
+	case strings.Contains(abi, "getamountsout") || strings.Contains(abi, "swapexacttokensfortokens"):
+		return "dex_router"
+	case strings.Contains(abi, "balanceof") && strings.Contains(abi, "totalsupply") && strings.Contains(abi, "transfer"):
+		return "lqd20"
+	case strings.Contains(abi, "rebalance") && strings.Contains(abi, "keeper"):
+		return "strategy_vault"
+	}
+	return ""
+}
+
+func findPrebuiltBuiltinPlugin(name string) ([]byte, error) {
+	var roots []string
+	if dir := strings.TrimSpace(os.Getenv("LQD_BUILTINS_DIR")); dir != "" {
+		roots = append(roots, dir)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		for dir := cwd; dir != ""; dir = filepath.Dir(dir) {
+			roots = append(roots, filepath.Join(dir, "bin", "builtins"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
+	}
+	seen := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+		path := filepath.Join(root, name+".so")
+		if soBytes, err := os.ReadFile(path); err == nil && len(soBytes) > 0 {
+			return soBytes, nil
+		}
+	}
+	return nil, fmt.Errorf("prebuilt builtin plugin not found for %s", name)
 }
 
 func hasRuntimeFingerprint(meta *ContractMetadata, fingerprint string) bool {

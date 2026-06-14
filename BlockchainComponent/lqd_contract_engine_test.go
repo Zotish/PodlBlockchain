@@ -55,3 +55,23 @@ func TestEnsurePluginLoadedDoesNotRejectLegacyFingerprintBeforeLoad(t *testing.T
 		t.Fatalf("legacy fingerprint should not hard-fail before plugin load, got %v", err)
 	}
 }
+
+func TestInferBuiltinNameFromLegacyDexABI(t *testing.T) {
+	t.Parallel()
+
+	meta := &ContractMetadata{
+		Type: "plugin",
+		ABI:  []byte(`[{"name":"CreatePair"},{"name":"GetPair"}]`),
+	}
+	if got := inferBuiltinName(meta); got != "dex_factory" {
+		t.Fatalf("expected dex_factory, got %q", got)
+	}
+
+	meta = &ContractMetadata{
+		Type: "plugin",
+		ABI:  []byte(`[{"name":"AddLiquidity"},{"name":"GetReserves"},{"name":"Swap"}]`),
+	}
+	if got := inferBuiltinName(meta); got != "dex_pair" {
+		t.Fatalf("expected dex_pair, got %q", got)
+	}
+}
