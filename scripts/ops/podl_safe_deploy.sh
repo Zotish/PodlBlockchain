@@ -12,6 +12,8 @@ COMPOSE="${COMPOSE:-docker compose}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-45}"
 RESTORE_ON_FAIL="${RESTORE_ON_FAIL:-false}"
 RUN_LIVE_E2E_SMOKE="${RUN_LIVE_E2E_SMOKE:-false}"
+IMAGE_NAME="${LQD_IMAGE:-podl-blockchain:local}"
+ROLLBACK_IMAGE="${IMAGE_NAME}-rollback"
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
@@ -31,6 +33,25 @@ must_height() {
 pre_height="$(must_height)"
 backup_file="$(PODL_ROOT="$PODL_ROOT" sh "$SCRIPT_DIR/podl_snapshot.sh")"
 
+previous_image="$(docker image inspect "$IMAGE_NAME" --format '{{.Id}}' 2>/dev/null || true)"
+if [ -n "$previous_image" ]; then
+  docker tag "$previous_image" "$ROLLBACK_IMAGE"
+fi
+
+rollback_deploy() {
+  reason="$1"
+  echo "Deploy failed: $reason. Backup: $backup_file" >&2
+  if [ -n "$previous_image" ]; then
+    docker tag "$ROLLBACK_IMAGE" "$IMAGE_NAME"
+  fi
+  if [ "$RESTORE_ON_FAIL" = "true" ]; then
+    PODL_ROOT="$PODL_ROOT" sh "$SCRIPT_DIR/podl_restore.sh" "$backup_file" || true
+  elif [ -n "$previous_image" ]; then
+    $COMPOSE up -d --force-recreate --remove-orphans >/dev/null 2>&1 || true
+  fi
+  exit 1
+}
+
 if [ -d "$APP_ROOT/.git" ]; then
   cd "$APP_ROOT"
   git pull --ff-only origin "$BRANCH"
@@ -40,14 +61,24 @@ cp "$APP_ROOT/deploy/vps/docker-compose.yml" "$PODL_ROOT/docker-compose.yml"
 cp "$APP_ROOT/deploy/vps/Caddyfile" "$PODL_ROOT/Caddyfile"
 
 cd "$PODL_ROOT"
-docker build -t "${LQD_IMAGE:-podl-blockchain:local}" "$APP_ROOT" >/dev/null
-$COMPOSE up -d --no-deps dex-api wallet aggregator >/dev/null
-$COMPOSE up -d --no-deps chain >/dev/null
-$COMPOSE up -d --remove-orphans >/dev/null
+if ! docker build -t "$IMAGE_NAME" "$APP_ROOT" >/dev/null; then
+  rollback_deploy "image build failed"
+fi
+if ! $COMPOSE up -d --no-deps dex-api wallet aggregator >/dev/null; then
+  rollback_deploy "supporting services failed to start"
+fi
+if ! $COMPOSE up -d --no-deps chain >/dev/null; then
+  rollback_deploy "chain failed to start"
+fi
+if ! $COMPOSE up -d --remove-orphans >/dev/null; then
+  rollback_deploy "stack reconciliation failed"
+fi
 
 enable_caddy="$(sed -n 's/^ENABLE_CADDY=//p' "$PODL_ROOT/.env" | tail -1 | tr '[:upper:]' '[:lower:]')"
 if [ "$enable_caddy" = "true" ]; then
-  $COMPOSE --profile proxy up -d caddy >/dev/null
+  if ! $COMPOSE --profile proxy up -d caddy >/dev/null; then
+    rollback_deploy "Caddy failed to start"
+  fi
 else
   $COMPOSE rm -sf caddy >/dev/null 2>&1 || true
 fi
@@ -67,20 +98,12 @@ while [ "$i" -le "$WAIT_ATTEMPTS" ]; do
 done
 
 if [ "$ready" != "true" ]; then
-  echo "Deploy failed: chain health did not recover. Backup: $backup_file" >&2
-  if [ "$RESTORE_ON_FAIL" = "true" ]; then
-    PODL_ROOT="$PODL_ROOT" sh "$SCRIPT_DIR/podl_restore.sh" "$backup_file"
-  fi
-  exit 1
+  rollback_deploy "service health did not recover"
 fi
 
 post_height="$(must_height)"
 if [ "$post_height" -lt "$pre_height" ]; then
-  echo "Deploy failed: chain height regressed from $pre_height to $post_height. Backup: $backup_file" >&2
-  if [ "$RESTORE_ON_FAIL" = "true" ]; then
-    PODL_ROOT="$PODL_ROOT" sh "$SCRIPT_DIR/podl_restore.sh" "$backup_file"
-  fi
-  exit 1
+  rollback_deploy "chain height regressed from $pre_height to $post_height"
 fi
 
 readiness="$(curl -fsS "$CHAIN_URL/readiness/mainnet" 2>/dev/null || true)"
