@@ -5,12 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"math/big"
-	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -1463,38 +1460,14 @@ func (bc *Blockchain_struct) accountKeyForWriteLocked(address string) string {
 }
 
 func (bc *Blockchain_struct) GetWalletBalance(address string) (*big.Int, error) {
-	// First, try the in-memory cache if it’s fresh enough
-	if bal, ok := bc.getAccountBalance(address); ok {
-		return bal, nil
+	if bc == nil {
+		return nil, fmt.Errorf("blockchain state unavailable")
 	}
-
-	// Otherwise query the wallet server (or on-chain DB)
-	walletNode := "http://127.0.0.1:8080" // or use os.Getenv("WALLET_NODE")
-	resp, err := http.Get(fmt.Sprintf("%s/wallet/balance?address=%s", walletNode, url.QueryEscape(address)))
-	if err != nil {
-		return big.NewInt(0), fmt.Errorf("wallet node unreachable: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return big.NewInt(0), fmt.Errorf("wallet node error: %s", string(body))
-	}
-
-	var result struct {
-		Balance string `json:"balance"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode error: %v", err)
-	}
-
-	// Optionally update the local cache
-	amt, err := NewAmountFromString(result.Balance)
-	if err != nil {
-		return nil, err
-	}
-	bc.setAccountBalance(address, amt)
-	return amt, nil
+	// The chain state is authoritative. Calling the wallet HTTP service from
+	// consensus validation creates a circular dependency and makes a valid
+	// unknown account fail as "wallet node unreachable" inside containers.
+	// An address absent from Accounts has the canonical zero balance.
+	return bc.AccountBalanceAmount(address), nil
 }
 
 func (bc *Blockchain_struct) CalculateBaseFee() uint64 {
