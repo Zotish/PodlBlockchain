@@ -121,6 +121,34 @@ func TestGetAccountNonceReportsConfirmedAndPending(t *testing.T) {
 	}
 }
 
+func TestGetAccountNonceReadsStandardServeMuxPathValue(t *testing.T) {
+	addr := "0x1111111111111111111111111111111111111111"
+	bc := &blockchaincomponent.Blockchain_struct{
+		Blocks: []*blockchaincomponent.Block{{
+			Transactions: []*blockchaincomponent.Transaction{{
+				From:   addr,
+				Nonce:  0,
+				Status: "success",
+			}},
+		}},
+	}
+	server := NewBlockchainServer(6500, bc)
+	req := httptest.NewRequest(http.MethodGet, "/account/"+addr+"/nonce", nil)
+	req.SetPathValue("address", addr)
+	rr := httptest.NewRecorder()
+
+	server.GetAccountNonce(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	for _, needle := range []string{`"confirmed_nonce":1`, `"next_nonce":1`, `"nonce":1`} {
+		if !strings.Contains(rr.Body.String(), needle) {
+			t.Fatalf("expected standard ServeMux path value to produce %s, got %s", needle, rr.Body.String())
+		}
+	}
+}
+
 func TestSendTransactionIndexesAcceptedAndFailedNonceTxs(t *testing.T) {
 	oldDBPath := constantset.BLOCKCHAIN_DB_PATH
 	constantset.BLOCKCHAIN_DB_PATH = filepath.Join(t.TempDir(), "evodb")
