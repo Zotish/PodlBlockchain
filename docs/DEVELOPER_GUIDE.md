@@ -1,5 +1,25 @@
 # PoDL Developer Guide
 
+## Testnet SDK and localnet
+
+The zero-dependency client lives in `sdk/javascript` and includes TypeScript declarations, signed-control payload helpers, route/vault methods, suitability screening, and tests:
+
+```bash
+cd sdk/javascript
+npm test
+npm pack --dry-run
+```
+
+Run the isolated local stack without installing frontend dependencies:
+
+```bash
+./scripts/localnet.sh up
+./scripts/localnet.sh status
+./scripts/localnet.sh down
+```
+
+Oracle and governance operations must sign the SDK's `PODL-CONTROL-TX-V2` digest; signing only the legacy transfer fields is rejected.
+
 This guide explains how to write smart contracts, compile them, deploy them, and test them on PoDL.
 
 ## 1) What a developer needs

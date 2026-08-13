@@ -176,6 +176,35 @@ type Blockchain_struct struct {
 	StrategyVaultMoves            []StrategyVaultMovement                 `json:"strategy_vault_moves,omitempty"`
 	StrategyVaultSafety           StrategyVaultSafetyConfig               `json:"strategy_vault_safety,omitempty"`
 	DynamicLiquidityOracleSignals map[string]DynamicLiquidityOracleSignal `json:"dynamic_liquidity_oracle_signals,omitempty"`
+	ChainSpec                     ChainSpec                               `json:"chain_spec"`
+	ConsensusV2                   *BFTConsensusState                      `json:"consensus_v2,omitempty"`
+	OracleObservations            map[string]map[string]OracleObservation `json:"oracle_observations,omitempty"`
+	PoolPriceHistory              map[string][]PoolPriceObservation       `json:"pool_price_history,omitempty"`
+	EconomicPolicy                EconomicPolicy                          `json:"economic_policy"`
+	ProtocolRevenue               []ProtocolRevenueEntry                  `json:"protocol_revenue,omitempty"`
+	EconomicBalances              map[string]*big.Int                     `json:"economic_balances,omitempty"`
+	Governance                    *GovernanceState                        `json:"governance,omitempty"`
+	ProtocolPauses                map[string]bool                         `json:"protocol_pauses,omitempty"`
+	BridgeSecurity                *BridgeSecurityState                    `json:"bridge_security,omitempty"`
+	BusinessAgreements            map[string]*LiquidityServiceAgreement   `json:"business_agreements,omitempty"`
+	SlashingCases                 map[string]*SlashingCase                `json:"slashing_cases,omitempty"`
+	OraclePublishers              map[string]string                       `json:"oracle_publishers,omitempty"`
+	OracleNonces                  map[string]uint64                       `json:"oracle_nonces,omitempty"`
+	PairRiskPolicies              map[string]PairRiskPolicy               `json:"pair_risk_policies,omitempty"`
+	CongestionProfile             map[int]CongestionBucket                `json:"congestion_profile,omitempty"`
+	TotalBurned                   *big.Int                                `json:"total_burned,omitempty"`
+	TreasuryDeployments           []TreasuryDeployment                    `json:"treasury_deployments,omitempty"`
+	RevenueCheckpoints            map[string]*big.Int                     `json:"revenue_checkpoints,omitempty"`
+	CapturedRevenueAssets         map[string]*big.Int                     `json:"captured_revenue_assets,omitempty"`
+	CumulativeEmission            *big.Int                                `json:"cumulative_emission,omitempty"`
+	ArbPolicy                     ProtocolArbPolicy                       `json:"arb_policy"`
+	ArbAuctions                   map[string]*ArbAuction                  `json:"arb_auctions,omitempty"`
+	ArbKeeperBonds                map[string]*big.Int                     `json:"arb_keeper_bonds,omitempty"`
+	ArbKeeperUnbondAt             map[string]uint64                       `json:"arb_keeper_unbond_at,omitempty"`
+	ArbMarketLockMu               sync.Mutex                              `json:"-"`
+	ArbMarketLocks                map[string]*arbMarketLock               `json:"-"`
+	ReplayMu                      sync.Mutex                              `json:"-"`
+	PendingReplayTransitions      map[string]*BlockReplayTransition       `json:"-"`
 
 	DLEngine *DynamicLiquidityEngine `json:"-"`
 }
@@ -264,19 +293,28 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 		}
 	}
 
+	hasSignedQC := bc.HasPrecommitQC(block.BlockNumber, blockHash)
+	if !hasSignedQC && !bc.ChainSpec.AllowLegacyFinality {
+		log.Printf("Rejecting unsigned finality for block #%d: signed BFT mode is enforced", block.BlockNumber)
+		return false
+	}
 	activeVoters := bc.ActiveVotingSetSize()
 	required := int(math.Ceil(float64(activeVoters) * quorumPercent))
 	if required < 1 {
 		required = 1
 	}
 	votes := bc.BlockVotes[blockHash]
-	if len(votes) < required {
+	if !hasSignedQC && len(votes) < required {
 		hashPreview := blockHash
 		if len(hashPreview) > 10 {
 			hashPreview = hashPreview[:10]
 		}
 		log.Printf("⏳ Block #%d pending finalization | hash=%s... | votes=%d/%d active_voters=%d registered=%d",
 			block.BlockNumber, hashPreview, len(votes), required, activeVoters, len(bc.Validators))
+		return false
+	}
+	if err := bc.applyReplayTransition(block); err != nil {
+		log.Printf("Rejecting block #%d: state transition commit failed: %v", block.BlockNumber, err)
 		return false
 	}
 
@@ -290,6 +328,7 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 
 	bc.Blocks = append(bc.Blocks, block)
 	bc.LastFinalizedAt = time.Now().Unix()
+	bc.RecordBlockRewardLedger(block)
 	delete(bc.PendingBlocks, blockHash)
 	delete(bc.BlockVotes, blockHash)
 	delete(bc.PendingBlockSeenAt, blockHash)
@@ -315,14 +354,18 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 		}
 	}
 	bc.Transaction_pool = remaining
+	bc.pruneConsensusRounds(block.BlockNumber)
 
 	voteCount := len(votes)
 	hashPreview := blockHash
 	if len(hashPreview) > 10 {
 		hashPreview = hashPreview[:10]
 	}
-	log.Printf("✅ Block #%d finalized | hash=%s... | votes=%d/%d",
-		block.BlockNumber, hashPreview, voteCount, required)
+	if hasSignedQC {
+		log.Printf("✅ Block #%d finalized | hash=%s... | signed_precommit_qc=true", block.BlockNumber, hashPreview)
+	} else {
+		log.Printf("✅ Block #%d finalized | hash=%s... | legacy_votes=%d/%d", block.BlockNumber, hashPreview, voteCount, required)
+	}
 
 	return true
 }
@@ -490,6 +533,147 @@ func (bc *Blockchain_struct) EnsureRuntimeState() {
 	}
 	if bc.DynamicLiquidityOracleSignals == nil {
 		bc.DynamicLiquidityOracleSignals = make(map[string]DynamicLiquidityOracleSignal)
+	}
+	if bc.ChainSpec.ProtocolVersion == 0 {
+		genesisHash := ""
+		if len(bc.Blocks) > 0 && bc.Blocks[0] != nil {
+			genesisHash = bc.Blocks[0].CurrentHash
+		}
+		bc.ChainSpec = DefaultChainSpec(genesisHash)
+	}
+	if bc.ConsensusV2 == nil {
+		bc.ConsensusV2 = NewBFTConsensusState(bc.ChainSpec.EpochLength)
+	} else {
+		bc.ConsensusV2.ensure()
+	}
+	if bc.OracleObservations == nil {
+		bc.OracleObservations = make(map[string]map[string]OracleObservation)
+	}
+	if bc.PoolPriceHistory == nil {
+		bc.PoolPriceHistory = make(map[string][]PoolPriceObservation)
+	}
+	if bc.EconomicPolicy.InsuranceBPS == 0 {
+		bc.EconomicPolicy = DefaultEconomicPolicy()
+	}
+	if bc.EconomicPolicy.IssuanceCap == "" {
+		bc.EconomicPolicy.IssuanceCap = DefaultEconomicPolicy().IssuanceCap
+	}
+	if bc.EconomicPolicy.TreasuryDeployCapBPS == 0 {
+		bc.EconomicPolicy.TreasuryDeployCapBPS = DefaultEconomicPolicy().TreasuryDeployCapBPS
+	}
+	if bc.EconomicPolicy.LQDExposureCapBPS == 0 {
+		bc.EconomicPolicy.LQDExposureCapBPS = DefaultEconomicPolicy().LQDExposureCapBPS
+	}
+	if bc.ProtocolRevenue == nil {
+		bc.ProtocolRevenue = []ProtocolRevenueEntry{}
+	}
+	if bc.EconomicBalances == nil {
+		bc.EconomicBalances = make(map[string]*big.Int)
+	}
+	if bc.Governance == nil {
+		bc.Governance = NewGovernanceState()
+	}
+	if bc.Governance.Guardians == nil {
+		bc.Governance.Guardians = make(map[string]bool)
+		if ValidateAddress(bc.Governance.Guardian) {
+			bc.Governance.Guardians[strings.ToLower(bc.Governance.Guardian)] = true
+		}
+	}
+	if bc.Governance.GuardianActions == nil {
+		bc.Governance.GuardianActions = make(map[string]*GuardianAction)
+	}
+	if bc.Governance.GuardianThreshold <= 0 {
+		if len(bc.Governance.Guardians) <= 1 {
+			bc.Governance.GuardianThreshold = 1
+		} else {
+			bc.Governance.GuardianThreshold = 2
+		}
+	}
+	if bc.Governance.AuditTrail == nil {
+		bc.Governance.AuditTrail = []GovernanceAuditEvent{}
+	}
+	if bc.Governance.Delegations == nil {
+		bc.Governance.Delegations = make(map[string]string)
+	}
+	if bc.Governance.SlashingCouncil == nil {
+		bc.Governance.SlashingCouncil = make(map[string]bool)
+	}
+	if bc.ProtocolPauses == nil {
+		bc.ProtocolPauses = make(map[string]bool)
+	}
+	if bc.BridgeSecurity == nil {
+		bc.BridgeSecurity = NewBridgeSecurityState()
+	}
+	bc.BridgeSecurity.ensure()
+	if !bc.ChainSpec.AllowLegacyFinality {
+		bc.BridgeSecurity.Policy.EnforceAttestations = true
+	}
+	if bc.BusinessAgreements == nil {
+		bc.BusinessAgreements = make(map[string]*LiquidityServiceAgreement)
+	}
+	if bc.SlashingCases == nil {
+		bc.SlashingCases = make(map[string]*SlashingCase)
+	}
+	if bc.OraclePublishers == nil {
+		bc.OraclePublishers = make(map[string]string)
+	}
+	if bc.OracleNonces == nil {
+		bc.OracleNonces = make(map[string]uint64)
+	}
+	if bc.PairRiskPolicies == nil {
+		bc.PairRiskPolicies = make(map[string]PairRiskPolicy)
+	}
+	if bc.CongestionProfile == nil {
+		bc.CongestionProfile = make(map[int]CongestionBucket)
+	}
+	if bc.TotalBurned == nil {
+		bc.TotalBurned = big.NewInt(0)
+	}
+	if bc.TreasuryDeployments == nil {
+		bc.TreasuryDeployments = []TreasuryDeployment{}
+	}
+	if bc.RevenueCheckpoints == nil {
+		bc.RevenueCheckpoints = make(map[string]*big.Int)
+	}
+	if bc.CapturedRevenueAssets == nil {
+		bc.CapturedRevenueAssets = make(map[string]*big.Int)
+	}
+	if bc.CumulativeEmission == nil {
+		bc.CumulativeEmission = ScheduledEmissionThrough(bc.LatestBlockNumber())
+		cap := NewAmountFromStringOrZero(bc.EconomicPolicy.IssuanceCap)
+		if bc.CumulativeEmission.Cmp(cap) > 0 {
+			bc.CumulativeEmission.Set(cap)
+		}
+	}
+	if bc.ArbPolicy.MaxCapitalBPS == 0 {
+		bc.ArbPolicy = DefaultProtocolArbPolicy()
+	}
+	if bc.ArbPolicy.MinKeeperBond == "" {
+		bc.ArbPolicy.MinKeeperBond = DefaultProtocolArbPolicy().MinKeeperBond
+	}
+	if bc.ArbPolicy.ExecutionTimeout == 0 {
+		bc.ArbPolicy.ExecutionTimeout = DefaultProtocolArbPolicy().ExecutionTimeout
+	}
+	if bc.ArbPolicy.MissedSlashBPS == 0 {
+		bc.ArbPolicy.MissedSlashBPS = DefaultProtocolArbPolicy().MissedSlashBPS
+	}
+	if bc.ArbPolicy.UnbondDelay == 0 {
+		bc.ArbPolicy.UnbondDelay = DefaultProtocolArbPolicy().UnbondDelay
+	}
+	if bc.ArbAuctions == nil {
+		bc.ArbAuctions = make(map[string]*ArbAuction)
+	}
+	if bc.ArbKeeperBonds == nil {
+		bc.ArbKeeperBonds = make(map[string]*big.Int)
+	}
+	if bc.ArbKeeperUnbondAt == nil {
+		bc.ArbKeeperUnbondAt = make(map[string]uint64)
+	}
+	if bc.ArbMarketLocks == nil {
+		bc.ArbMarketLocks = make(map[string]*arbMarketLock)
+	}
+	if bc.PendingReplayTransitions == nil {
+		bc.PendingReplayTransitions = make(map[string]*BlockReplayTransition)
 	}
 	if bc.ContractEngine != nil && bc.ContractEngine.Registry != nil {
 		bc.ContractEngine.Registry.Blockchain = bc
@@ -822,9 +1006,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		}
 
 		// Save to DB
-		blockchainCopy := *newBlockchain
-		blockchainCopy.Mutex = sync.Mutex{}
-		err := PutIntoDB(blockchainCopy)
+		err := PutIntoDB(newBlockchain)
 		if err != nil {
 			log.Printf("Failed to save blockchain to DB: %v", err)
 			return nil
@@ -934,9 +1116,7 @@ func (bc *Blockchain_struct) CopyTransactions() []*Transaction {
 }
 
 func (bc *Blockchain_struct) persistStateLocked() error {
-	dbCopy := *bc
-	dbCopy.Mutex = sync.Mutex{}
-	return PutIntoDB(dbCopy)
+	return PutIntoDB(bc)
 }
 
 func (bc *Blockchain_struct) preparePendingTx(tx *Transaction) {
@@ -1404,17 +1584,20 @@ func (bc *Blockchain_struct) FetchBalanceOfWallet(address string) *big.Int {
 }
 
 func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {
+	if block == nil || len(bc.Blocks) == 0 || block.ProtocolVersion != CurrentProtocolVersion || strings.TrimSpace(block.StateRoot) == "" {
+		return false
+	}
 	// Reject blocks that don't extend the longest chain
 	lastBlock := bc.Blocks[len(bc.Blocks)-1]
-	if block.BlockNumber <= lastBlock.BlockNumber {
+	if lastBlock == nil || block.BlockNumber != lastBlock.BlockNumber+1 || block.PreviousHash != lastBlock.CurrentHash || block.TimeStamp < lastBlock.TimeStamp {
 		return false
 	}
 
 	// Existing hash/transaction validation
 	tempHash := block.CurrentHash
-	block.CurrentHash = ""
-	calculatedHash := CalculateHash(block)
-	block.CurrentHash = tempHash
+	blockCopy := *block
+	blockCopy.CurrentHash = ""
+	calculatedHash := CalculateHash(&blockCopy)
 
 	if calculatedHash != tempHash {
 		return false
@@ -1422,7 +1605,16 @@ func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {
 
 	// Verify transactions (existing logic)
 	for _, tx := range block.Transactions {
-		if !bc.VerifyTransaction(tx) {
+		if tx == nil {
+			return false
+		}
+		txCopy := *tx
+		txCopy.Value = CopyAmount(tx.Value)
+		txCopy.Sig = append([]byte(nil), tx.Sig...)
+		txCopy.Data = append([]byte(nil), tx.Data...)
+		txCopy.ExtraData = append([]byte(nil), tx.ExtraData...)
+		txCopy.Args = append([]string(nil), tx.Args...)
+		if !bc.VerifyTransaction(&txCopy) {
 			return false
 		}
 	}
@@ -1437,10 +1629,16 @@ func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {
 	// 2. Check gas limits
 	totalGas := uint64(0)
 	for _, tx := range block.Transactions {
-		totalGas += tx.Gas * tx.GasPrice
-		if totalGas > uint64(constantset.MaxBlockGas) {
+		if tx == nil || ^uint64(0)-totalGas < tx.Gas {
 			return false
 		}
+		totalGas += tx.Gas
+		if totalGas > uint64(constantset.MaxBlockGas) || (block.GasLimit > 0 && totalGas > block.GasLimit) {
+			return false
+		}
+	}
+	if block.GasUsed > block.GasLimit || block.GasUsed > uint64(constantset.MaxBlockGas) {
+		return false
 	}
 
 	// 3. Check validator is active
@@ -1460,6 +1658,12 @@ func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {
 			}
 		}
 	}
+	if expected, err := bc.SelectBlockProposer(block.BlockNumber, block.ConsensusRound); err != nil || !strings.EqualFold(expected.Address, block.RewardBreakdown.Validator) {
+		return false
+	}
+	if block.ProposerProof == nil || !bc.VerifyProposerCertificate(*block.ProposerProof) || !strings.EqualFold(block.ProposerProof.Proposer, block.RewardBreakdown.Validator) {
+		return false
+	}
 
 	expectedBaseFee := bc.CalculateBaseFee()
 	if block.BaseFee != expectedBaseFee {
@@ -1467,6 +1671,12 @@ func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {
 			block.BaseFee, expectedBaseFee)
 		return false
 	}
+	transition, err := bc.ReplayIncomingBlock(block)
+	if err != nil {
+		log.Printf("Invalid block state transition: %v", err)
+		return false
+	}
+	bc.stageReplayTransition(transition)
 	return validatorActive
 }
 
@@ -1527,6 +1737,18 @@ func (bc *Blockchain_struct) CalculateAverageBlockTime() float64 {
 	return totalTime / float64(len(bc.Blocks)-1)
 }
 
+const (
+	transactionMaxPastSeconds   uint64 = 3600
+	transactionMaxFutureSeconds uint64 = 600
+)
+
+func transactionTimestampWithinBounds(timestamp, now uint64) bool {
+	if timestamp > now {
+		return timestamp-now <= transactionMaxFutureSeconds
+	}
+	return now-timestamp <= transactionMaxPastSeconds
+}
+
 func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	fail := func(format string, args ...interface{}) bool {
 		reason := fmt.Sprintf(format, args...)
@@ -1572,9 +1794,7 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 
 	// 2) Timestamp sanity (allow small future skew)
 	now := uint64(time.Now().Unix())
-	const maxPast = uint64(3600)  // 1h old -> reject
-	const maxFuture = uint64(600) // >10m in future -> reject
-	if tx.Timestamp > now+maxFuture || now-tx.Timestamp > maxPast {
+	if !transactionTimestampWithinBounds(tx.Timestamp, now) {
 		return fail("timestamp out of range (ts=%d now=%d)", tx.Timestamp, now)
 	}
 
@@ -1601,6 +1821,16 @@ func (bc *Blockchain_struct) VerifyTransaction(tx *Transaction) bool {
 	isVerifySig := bc.VerifyTransactionSignature(tx)
 	if !isVerifySig {
 		return fail("signature verify")
+	}
+	if tx.Type == "oracle_update" {
+		if _, err := bc.ValidateOracleUpdateTransactionAt(tx, int64(tx.Timestamp)); err != nil {
+			return fail("oracle update: %v", err)
+		}
+	}
+	if tx.Type == "governance_action" {
+		if err := ValidateGovernanceTransaction(tx); err != nil {
+			return fail("governance action: %v", err)
+		}
 	}
 
 	// 6) Balance (live wallet) — light precheck to avoid junk in pool
@@ -1669,9 +1899,9 @@ func RemoveFailedTx(pool []*Transaction, tx *Transaction) []*Transaction {
 }
 
 func (bc *Blockchain_struct) VerifyTransactionSignature(tx *Transaction) bool {
-
-	// 0) Chain sanity
-
+	if tx == nil {
+		return false
+	}
 	if tx.ChainID != uint64(constantset.ChainID) {
 		log.Printf("Invalid chain ID: got %d, want %d", tx.ChainID, constantset.ChainID)
 		return false
@@ -1688,14 +1918,72 @@ func (bc *Blockchain_struct) VerifyTransactionSignature(tx *Transaction) bool {
 		return false
 	}
 
-	// Add timestamp validation (prevent replay of old transactions)
-	if uint64(time.Now().Unix())-tx.Timestamp > 3600 { // 1 hour expiry
+	// Timestamp validation avoids unsigned underflow on future timestamps.
+	now := uint64(time.Now().Unix())
+	if !transactionTimestampWithinBounds(tx.Timestamp, now) {
 		tx.Status = constantset.StatusFailed
 		log.Printf("Transaction %s expired", tx.TxHash)
 		return false
 	}
 
-	// 2) Rebuild EXACT signing payload (keep nonce omitted to match wallet right now)
+	digest, err := TransactionSigningDigest(tx)
+	if err != nil {
+		log.Printf("marshal signing data: %v", err)
+		return false
+	}
+
+	// Normalize V then recover.
+	sig := make([]byte, 65)
+	copy(sig, tx.Sig)
+	if sig[64] >= 27 {
+		sig[64] -= 27
+	}
+	pubKeyBytes, err := crypto.Ecrecover(digest, sig)
+	if err != nil || !crypto.VerifySignature(pubKeyBytes, digest, sig[:64]) {
+		log.Printf("Signature verification failed")
+		return false
+	}
+	pubKey, err := crypto.UnmarshalPubkey(pubKeyBytes)
+	if err != nil {
+		return false
+	}
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey).Hex()
+	if !strings.EqualFold(recoveredAddr, tx.From) {
+		log.Printf("Recovered %s != from %s", recoveredAddr, tx.From)
+		return false
+	}
+	return true
+}
+
+// TransactionSigningDigest uses a domain-separated full payload for protocol
+// control transactions. Ordinary transfers preserve the original wallet
+// digest until the public wallet migration is complete.
+func TransactionSigningDigest(tx *Transaction) ([]byte, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("nil transaction")
+	}
+	if tx.Type == "oracle_update" || tx.Type == "governance_action" {
+		type controlPayload struct {
+			Domain    string `json:"domain"`
+			From      string `json:"from"`
+			To        string `json:"to"`
+			Value     string `json:"value"`
+			Gas       uint64 `json:"gas"`
+			GasPrice  uint64 `json:"gas_price"`
+			ChainID   uint64 `json:"chain_id"`
+			Timestamp uint64 `json:"timestamp"`
+			Nonce     uint64 `json:"nonce"`
+			Type      string `json:"type"`
+			ExtraData string `json:"extra_data_hex"`
+		}
+		b, err := json.Marshal(controlPayload{Domain: "PODL-CONTROL-TX-V2", From: strings.ToLower(tx.From), To: strings.ToLower(tx.To), Value: AmountString(tx.Value), Gas: tx.Gas, GasPrice: tx.GasPrice, ChainID: tx.ChainID, Timestamp: tx.Timestamp, Nonce: tx.Nonce, Type: tx.Type, ExtraData: hex.EncodeToString(tx.ExtraData)})
+		if err != nil {
+			return nil, err
+		}
+		hash := sha256.Sum256(b)
+		return hash[:], nil
+	}
+
 	type signingPayload struct {
 		From      string `json:"from"`
 		To        string `json:"to"`
@@ -1717,43 +2005,11 @@ func (bc *Blockchain_struct) VerifyTransactionSignature(tx *Transaction) bool {
 		Timestamp: tx.Timestamp,
 	})
 	if err != nil {
-		log.Printf("marshal signing data: %v", err)
-		return false
+		return nil, err
 	}
-
-	// 3) Double SHA-256 (matches wallet)
 	h1 := sha256.Sum256(b)
 	hash := sha256.Sum256(h1[:])
-
-	// 4) Normalize V then recover
-	sig := make([]byte, 65)
-	copy(sig, tx.Sig)
-	if sig[64] >= 27 {
-		sig[64] -= 27 // 27/28 -> 0/1
-	}
-
-	pubKeyBytes, err := crypto.Ecrecover(hash[:], sig)
-	if err != nil {
-		log.Printf("Error recovering public key: %v", err)
-		return false
-	}
-	if !crypto.VerifySignature(pubKeyBytes, hash[:], sig[:64]) {
-		log.Printf("Signature verification failed (RS mismatch)")
-		return false
-	}
-
-	// 5) Check recovered address
-	pubKey, err := crypto.UnmarshalPubkey(pubKeyBytes)
-	if err != nil {
-		log.Printf("unmarshal pubkey: %v", err)
-		return false
-	}
-	recoveredAddr := crypto.PubkeyToAddress(*pubKey).Hex()
-	if !strings.EqualFold(recoveredAddr, tx.From) {
-		log.Printf("Recovered %s != from %s", recoveredAddr, tx.From)
-		return false
-	}
-	return true
+	return hash[:], nil
 }
 
 func (bc *Blockchain_struct) ResolveForks(newBlocks []*Block) error {
@@ -2134,9 +2390,7 @@ func (bc *Blockchain_struct) ClaimLPRewards(address string) (*big.Int, string, e
 	lp.PendingRewards = big.NewInt(0)
 	bc.RecordRewardClaim(address, claimed, rewardTx.TxHash, "manual_claim")
 
-	snap := *bc
-	snap.Mutex = sync.Mutex{}
-	if err := PutIntoDB(snap); err != nil {
+	if err := PutIntoDB(bc); err != nil {
 		return nil, "", err
 	}
 
@@ -2187,9 +2441,7 @@ func (bc *Blockchain_struct) StartUnstake(address string) error {
 	unstakeTx := bc.NewSystemTx("unstake", address, constantset.LiquidityPoolAddress, CopyAmount(lp.UnstakeAmount))
 	bc.Transaction_pool = append(bc.Transaction_pool, unstakeTx)
 
-	snap := *bc
-	snap.Mutex = sync.Mutex{}
-	if err := PutIntoDB(snap); err != nil {
+	if err := PutIntoDB(bc); err != nil {
 		return err
 	}
 
@@ -2248,9 +2500,7 @@ func (bc *Blockchain_struct) ProcessUnstakeReleases() {
 	}
 
 	if changed {
-		snap := *bc
-		snap.Mutex = sync.Mutex{}
-		_ = PutIntoDB(snap)
+		_ = PutIntoDB(bc)
 	}
 }
 

@@ -4,7 +4,7 @@ import "testing"
 
 func TestDynamicLiquidityOracleSignalSnapshot(t *testing.T) {
 	oldPersist := persistRuntimeState
-	persistRuntimeState = func(Blockchain_struct) error { return nil }
+	persistRuntimeState = func(*Blockchain_struct) error { return nil }
 	defer func() { persistRuntimeState = oldPersist }()
 
 	bc := &Blockchain_struct{}

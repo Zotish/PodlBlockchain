@@ -88,6 +88,7 @@ type PoolMetrics struct {
 
 	// Strategy 2 — price
 	ImpliedPrice float64 // reserve1 / reserve0 (token0 price in token1 units)
+	TWAPPrice    float64
 	PriceBonus   int64
 
 	// Strategy 3 — time (applied as a multiplier to the combined score)
@@ -97,6 +98,13 @@ type PoolMetrics struct {
 	ExistingRoutingWeight int64
 	RoutingWeight         int64
 	SafetyCapped          bool
+	LiquidityQuality      float64
+	QualityBPS            int64
+	CircuitBroken         bool
+	CircuitBreakReason    string
+	RiskClass             string
+	CorrelatedGroup       string
+	MaxExposureBPS        int64
 }
 
 // DynamicLiquidityEngine is the protocol-level routing optimiser.
@@ -122,31 +130,52 @@ func NewDynamicLiquidityEngine() *DynamicLiquidityEngine {
 // RunEpoch is called from MineNewBlock after every block.
 // It is a no-op unless blockNumber is exactly on an epoch boundary.
 func (e *DynamicLiquidityEngine) RunEpoch(bc *Blockchain_struct, blockNumber uint64) {
+	evaluationUnix := time.Now().Unix()
+	if bc != nil {
+		for _, block := range bc.Blocks {
+			if block != nil && block.BlockNumber == blockNumber {
+				evaluationUnix = int64(block.TimeStamp)
+				break
+			}
+		}
+	}
+	e.RunEpochAt(bc, blockNumber, evaluationUnix)
+}
+
+func (e *DynamicLiquidityEngine) RunEpochAt(bc *Blockchain_struct, blockNumber uint64, evaluationUnix int64) {
 	if !e.shouldRun(blockNumber) {
 		return
 	}
-	e.run(bc, blockNumber, "scheduled")
+	e.runAt(bc, blockNumber, "scheduled", evaluationUnix)
 }
 
 func (e *DynamicLiquidityEngine) RunNow(bc *Blockchain_struct, reason string) []PoolMetrics {
-	return e.run(bc, bc.LatestBlockNumber(), reason)
+	return e.runAt(bc, bc.LatestBlockNumber(), reason, time.Now().Unix())
 }
 
 func (e *DynamicLiquidityEngine) Preview(bc *Blockchain_struct) []PoolMetrics {
-	metrics := e.scanPairs(bc)
+	return e.PreviewAt(bc, time.Now().Unix())
+}
+
+func (e *DynamicLiquidityEngine) PreviewAt(bc *Blockchain_struct, evaluationUnix int64) []PoolMetrics {
+	metrics := e.scanPairsAt(bc, evaluationUnix)
 	if len(metrics) == 0 {
 		return nil
 	}
 	e.applyDemandStrategy(metrics)
 	e.applyPriceStrategy(metrics)
-	e.applyTimeStrategy(metrics)
+	e.applyLearnedTimeStrategyAt(bc, metrics, evaluationUnix)
 	e.combineFinalWeights(metrics)
+	e.applyExposurePolicy(metrics)
 	return metrics
 }
 
 func (bc *Blockchain_struct) SetDynamicLiquidityOracleSignal(pairAddress string, demandBps int64, source string) (DynamicLiquidityOracleSignal, error) {
 	if bc == nil {
 		return DynamicLiquidityOracleSignal{}, fmt.Errorf("nil blockchain")
+	}
+	if bc.strictConsensusMode() {
+		return DynamicLiquidityOracleSignal{}, fmt.Errorf("direct demand signals are disabled in strict consensus mode")
 	}
 	pairAddress = strings.ToLower(strings.TrimSpace(pairAddress))
 	source = strings.TrimSpace(source)
@@ -194,6 +223,9 @@ func (bc *Blockchain_struct) RunDynamicLiquidityEpochNow(reason string) []map[st
 	if bc == nil {
 		return nil
 	}
+	if bc.strictConsensusMode() {
+		return nil
+	}
 	if bc.DLEngine == nil {
 		bc.DLEngine = NewDynamicLiquidityEngine()
 	}
@@ -220,29 +252,49 @@ func (bc *Blockchain_struct) DynamicLiquidityStatus() map[string]interface{} {
 }
 
 func (bc *Blockchain_struct) dynamicLiquidityOracleSignal(pairAddress string) DynamicLiquidityOracleSignal {
+	return bc.dynamicLiquidityOracleSignalAt(pairAddress, time.Now().Unix())
+}
+
+func (bc *Blockchain_struct) dynamicLiquidityOracleSignalAt(pairAddress string, evaluationUnix int64) DynamicLiquidityOracleSignal {
 	if bc == nil {
+		return DynamicLiquidityOracleSignal{}
+	}
+	if bc.strictConsensusMode() {
 		return DynamicLiquidityOracleSignal{}
 	}
 	bc.EnsureRuntimeState()
 	signal := bc.DynamicLiquidityOracleSignals[strings.ToLower(strings.TrimSpace(pairAddress))]
-	if signal.UpdatedAt == 0 || time.Now().Unix()-signal.UpdatedAt > MaxOracleAgeSeconds {
+	if signal.UpdatedAt == 0 || evaluationUnix-signal.UpdatedAt > MaxOracleAgeSeconds || signal.UpdatedAt > evaluationUnix+30 {
 		return DynamicLiquidityOracleSignal{}
 	}
 	return signal
 }
 
+// strictConsensusMode distinguishes an initialized signed-finality network
+// from a zero-value Blockchain_struct used by compatibility callers and unit
+// tests. A configured chain can therefore never use the direct/manual DLE
+// signal path, while the legacy API remains usable off-chain.
+func (bc *Blockchain_struct) strictConsensusMode() bool {
+	return bc != nil && bc.ChainSpec.ProtocolVersion != 0 && !bc.ChainSpec.AllowLegacyFinality
+}
+
 func (e *DynamicLiquidityEngine) run(bc *Blockchain_struct, blockNumber uint64, reason string) []PoolMetrics {
-	metrics := e.Preview(bc)
+	return e.runAt(bc, blockNumber, reason, time.Now().Unix())
+}
+
+func (e *DynamicLiquidityEngine) runAt(bc *Blockchain_struct, blockNumber uint64, reason string, evaluationUnix int64) []PoolMetrics {
+	metrics := e.PreviewAt(bc, evaluationUnix)
 	if len(metrics) == 0 {
 		return nil
 	}
+	bc.learnCongestionProfile(metrics, evaluationUnix)
 
 	// ── Write routing weights to contract storage ────────────────────────────
 	updated := e.applyWeights(bc, metrics)
 	e.resetEpochCounters(bc, metrics)
 
 	log.Printf("🔄 DLEngine #%d — updated %d pair(s) | trigger=%s | time=%s",
-		blockNumber, updated, strings.TrimSpace(reason), currentTimeWindow())
+		blockNumber, updated, strings.TrimSpace(reason), currentTimeWindowAt(evaluationUnix))
 
 	// ── Strategy 4: Active Protocol Arbitrage ────────────────────────────────
 	// Runs AFTER weights are applied so it sees fresh utilisation scores.
@@ -319,6 +371,12 @@ func (e *DynamicLiquidityEngine) applyPriceStrategy(metrics []PoolMetrics) {
 			continue
 		}
 		m.ImpliedPrice = r1f / r0f
+		if m.TWAPPrice > 0 {
+			m.ImpliedPrice = m.TWAPPrice
+		}
+		// Persist a bounded history used by TWAP/volatility quality scoring.
+		// The history is consensus-visible and only advances at epoch evaluation.
+		// Duplicate timestamps are harmless for the volatility calculation.
 		byToken[strings.ToLower(m.Token0)] = append(byToken[strings.ToLower(m.Token0)], priceEntry{i, m.ImpliedPrice})
 		byToken[strings.ToLower(m.Token1)] = append(byToken[strings.ToLower(m.Token1)], priceEntry{i, 1.0 / m.ImpliedPrice})
 	}
@@ -363,7 +421,18 @@ func (e *DynamicLiquidityEngine) applyPriceStrategy(metrics []PoolMetrics) {
 // reducing fragmentation. During busy hours all pairs are competitive.
 
 func (e *DynamicLiquidityEngine) applyTimeStrategy(metrics []PoolMetrics) {
-	multiplier := timeMultiplier()
+	e.applyTimeStrategyAt(metrics, time.Now().Unix())
+}
+
+func (e *DynamicLiquidityEngine) applyTimeStrategyAt(metrics []PoolMetrics, evaluationUnix int64) {
+	multiplier := timeMultiplierAt(evaluationUnix)
+	for i := range metrics {
+		metrics[i].TimeMultiplier = multiplier
+	}
+}
+
+func (e *DynamicLiquidityEngine) applyLearnedTimeStrategyAt(bc *Blockchain_struct, metrics []PoolMetrics, evaluationUnix int64) {
+	multiplier := bc.learnedTimeMultiplier(evaluationUnix)
 	for i := range metrics {
 		metrics[i].TimeMultiplier = multiplier
 	}
@@ -398,7 +467,47 @@ func (e *DynamicLiquidityEngine) combineFinalWeights(metrics []PoolMetrics) {
 			}
 		}
 		m.RoutingWeight = w
+		if m.CircuitBroken {
+			m.RoutingWeight = MinRoutingWeight
+		}
 	}
+}
+
+func (e *DynamicLiquidityEngine) applyExposurePolicy(metrics []PoolMetrics) {
+	groupTotals := map[string]int64{}
+	for i := range metrics {
+		m := &metrics[i]
+		if m.MaxExposureBPS > 0 {
+			capWeight := m.MaxExposureBPS / 100
+			if capWeight < MinRoutingWeight {
+				capWeight = MinRoutingWeight
+			}
+			if m.RoutingWeight > capWeight {
+				m.RoutingWeight, m.SafetyCapped = capWeight, true
+			}
+		}
+		if m.CorrelatedGroup != "" {
+			groupTotals[m.CorrelatedGroup] += m.RoutingWeight
+		}
+	}
+	for group, total := range groupTotals {
+		if total <= MaxRoutingWeight || total == 0 {
+			continue
+		}
+		for i := range metrics {
+			if metrics[i].CorrelatedGroup == group {
+				metrics[i].RoutingWeight = maxInt64(MinRoutingWeight, metrics[i].RoutingWeight*MaxRoutingWeight/total)
+				metrics[i].SafetyCapped = true
+			}
+		}
+	}
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // ── Storage I/O ───────────────────────────────────────────────────────────────
@@ -406,6 +515,10 @@ func (e *DynamicLiquidityEngine) combineFinalWeights(metrics []PoolMetrics) {
 // scanPairs reads every deployed contract and returns metrics for DEX pairs
 // identified by having "token0" and "token1" in their contract storage.
 func (e *DynamicLiquidityEngine) scanPairs(bc *Blockchain_struct) []PoolMetrics {
+	return e.scanPairsAt(bc, time.Now().Unix())
+}
+
+func (e *DynamicLiquidityEngine) scanPairsAt(bc *Blockchain_struct, evaluationUnix int64) []PoolMetrics {
 	if bc.ContractEngine == nil {
 		return nil
 	}
@@ -445,7 +558,19 @@ func (e *DynamicLiquidityEngine) scanPairs(bc *Blockchain_struct) []PoolMetrics 
 			}
 		}
 
-		signal := bc.dynamicLiquidityOracleSignal(addr)
+		signal := bc.dynamicLiquidityOracleSignalAt(addr, evaluationUnix)
+		quality := bc.AssessLiquidityQualityAt(addr, evaluationUnix)
+		if r0.Sign() > 0 {
+			r0f, _ := new(big.Float).SetInt(r0).Float64()
+			r1f, _ := new(big.Float).SetInt(r1).Float64()
+			if r0f > 0 && r1f > 0 {
+				bc.recordPoolPriceObservation(addr, r1f/r0f, evaluationUnix)
+			}
+		}
+		policy, routable, policyReason := bc.pairRoutable(addr, bc.LatestBlockNumber(), evaluationUnix)
+		if !routable {
+			quality.CircuitBroken, quality.CircuitBreakReason, quality.QualityBPS, quality.QualityScore = true, policyReason, 0, 0
+		}
 		out = append(out, PoolMetrics{
 			PairAddress:           addr,
 			Token0:                t0,
@@ -458,6 +583,14 @@ func (e *DynamicLiquidityEngine) scanPairs(bc *Blockchain_struct) []PoolMetrics 
 			OracleDemandBps:       signal.DemandBps,
 			OracleSource:          signal.Source,
 			ExistingRoutingWeight: existingWeight,
+			LiquidityQuality:      quality.QualityScore,
+			QualityBPS:            quality.QualityBPS,
+			CircuitBroken:         quality.CircuitBroken,
+			CircuitBreakReason:    quality.CircuitBreakReason,
+			TWAPPrice:             quality.TWAPPrice,
+			RiskClass:             policy.RiskClass,
+			CorrelatedGroup:       policy.CorrelatedGroup,
+			MaxExposureBPS:        policy.MaxExposureBPS,
 		})
 	}
 	return out
@@ -484,7 +617,17 @@ func (e *DynamicLiquidityEngine) resetEpochCounters(bc *Blockchain_struct, metri
 	for _, m := range metrics {
 		_ = db.SaveStorage(m.PairAddress, "epoch_swaps", "0")
 		_ = db.SaveStorage(m.PairAddress, "epoch_volume", "0")
+		_ = db.SaveStorage(m.PairAddress, "epoch_organic_volume", "0")
+		_ = db.SaveStorage(m.PairAddress, "epoch_unique_traders", "0")
+		_ = db.SaveStorage(m.PairAddress, "unique_flow_bps", "0")
+		epoch := parseBigStr(mustLoadStorage(db, m.PairAddress, "flow_epoch"))
+		_ = db.SaveStorage(m.PairAddress, "flow_epoch", new(big.Int).Add(epoch, big.NewInt(1)).String())
 	}
+}
+
+func mustLoadStorage(db *ContractDB, address, key string) string {
+	value, _ := db.LoadStorage(address, key)
+	return value
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -495,7 +638,11 @@ func (e *DynamicLiquidityEngine) shouldRun(blockNumber uint64) bool {
 
 // timeMultiplier returns the time-based multiplier for the current UTC hour.
 func timeMultiplier() float64 {
-	hour := time.Now().UTC().Hour()
+	return timeMultiplierAt(time.Now().Unix())
+}
+
+func timeMultiplierAt(unix int64) float64 {
+	hour := time.Unix(unix, 0).UTC().Hour()
 	switch {
 	case hour >= OffPeakStart && hour < OffPeakEnd:
 		return OffPeakMultiplier // 00-08 UTC: consolidate
@@ -508,7 +655,11 @@ func timeMultiplier() float64 {
 
 // currentTimeWindow returns a human-readable label for the current time window.
 func currentTimeWindow() string {
-	hour := time.Now().UTC().Hour()
+	return currentTimeWindowAt(time.Now().Unix())
+}
+
+func currentTimeWindowAt(unix int64) string {
+	hour := time.Unix(unix, 0).UTC().Hour()
 	switch {
 	case hour >= OffPeakStart && hour < OffPeakEnd:
 		return "OFF-PEAK (consolidating)"
@@ -575,10 +726,18 @@ func dynamicLiquidityMetricRows(metrics []PoolMetrics) []map[string]interface{} 
 			"oracle_demand_bps":       m.OracleDemandBps,
 			"oracle_source":           m.OracleSource,
 			"price_bonus":             m.PriceBonus,
+			"twap_price":              m.TWAPPrice,
 			"time_multiplier":         m.TimeMultiplier,
 			"existing_routing_weight": m.ExistingRoutingWeight,
 			"routing_weight":          m.RoutingWeight,
 			"safety_capped":           m.SafetyCapped,
+			"liquidity_quality":       m.LiquidityQuality,
+			"quality_bps":             m.QualityBPS,
+			"circuit_broken":          m.CircuitBroken,
+			"circuit_break_reason":    m.CircuitBreakReason,
+			"risk_class":              m.RiskClass,
+			"correlated_group":        m.CorrelatedGroup,
+			"max_exposure_bps":        m.MaxExposureBPS,
 		})
 	}
 	return rows

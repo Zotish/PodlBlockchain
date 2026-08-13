@@ -43,6 +43,86 @@ const erc20MetaABI = `[
   {"inputs":[],"name":"decimals","outputs":[{"internalType":"uint8","name":"","type":"uint8"}],"stateMutability":"view","type":"function"}
 ]`
 
+func bridgeChainRelayerEndpoints(cfg *BridgeChainConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	endpoints := make([]string, 0, len(cfg.RPCs)+2)
+	if rpc := strings.TrimSpace(cfg.RPC); rpc != "" {
+		endpoints = append(endpoints, rpc)
+	}
+	endpoints = append(endpoints, cfg.RPCs...)
+	if strings.EqualFold(cfg.ID, "bsc-testnet") || strings.EqualFold(cfg.ChainID, "97") {
+		endpoints = append(endpoints, BridgeRPCEndpoints("")...)
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint == "" {
+			continue
+		}
+		key := strings.ToLower(endpoint)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, endpoint)
+	}
+	return out
+}
+
+func bridgeChainRelayerPrivateKey(cfg *BridgeChainConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	prefix := bridgeEnvKey(cfg.ID)
+	chainPrefix := bridgeEnvKey(cfg.ChainID)
+	names := []string{
+		"BRIDGE_" + prefix + "_PRIVATE_KEY",
+		"BRIDGE_" + chainPrefix + "_PRIVATE_KEY",
+		prefix + "_PRIVATE_KEY",
+	}
+	if strings.EqualFold(cfg.ID, "bsc-testnet") || strings.EqualFold(cfg.ChainID, "97") {
+		names = append(names, "BSC_TESTNET_PRIVATE_KEY")
+	}
+	return bridgeEnv(names...)
+}
+
+func bridgeChainUsesEVMRelayer(cfg *BridgeChainConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	family := strings.ToLower(strings.TrimSpace(cfg.Family))
+	adapter := strings.ToLower(strings.TrimSpace(cfg.Adapter))
+	return adapter == "evm" || family == "evm" || family == "harmony" || family == "sei" || family == "monad"
+}
+
+func startConfiguredBridgeRelayers(bc *Blockchain_struct, interval time.Duration, backfill uint64, privateBatchSize int, privateBatchMax int, privateBatchWait time.Duration) {
+	reg, err := LoadBridgeChainRegistry()
+	if err != nil || reg == nil {
+		log.Printf("Bridge relayer: chain registry unavailable: %v", err)
+		return
+	}
+	for _, cfg := range reg.List() {
+		if cfg == nil || !cfg.Enabled {
+			continue
+		}
+		if strings.EqualFold(cfg.ID, "bsc-testnet") || strings.EqualFold(cfg.ID, "bsc") {
+			continue
+		}
+		if !bridgeChainUsesEVMRelayer(cfg) {
+			log.Printf("Bridge relayer[%s]: waiting for %s adapter implementation", cfg.ID, cfg.Family)
+			continue
+		}
+		if len(bridgeChainRelayerEndpoints(cfg)) == 0 || strings.TrimSpace(cfg.BridgeAddress) == "" || strings.TrimSpace(cfg.LockAddress) == "" || bridgeChainRelayerPrivateKey(cfg) == "" {
+			log.Printf("Bridge relayer[%s]: disabled until RPC, bridge address, lock address, and private key are configured", cfg.ID)
+			continue
+		}
+		go runBridgeRelayerForChain(cfg, bc, interval, backfill, privateBatchSize, privateBatchMax, privateBatchWait)
+	}
+}
+
 func StartBridgeRelayer(bc *Blockchain_struct) {
 	rpc := os.Getenv("BSC_TESTNET_RPC")
 	pk := os.Getenv("BSC_TESTNET_PRIVATE_KEY")
@@ -54,11 +134,12 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 			_ = os.Setenv("BSC_LOCK_ADDRESS", v)
 		}
 	}
-	if len(BridgeRPCEndpoints(rpc)) == 0 || pk == "" || bridgeAddr == "" {
-		log.Println("Bridge relayer disabled: missing BSC_TESTNET_RPC(S) or BSC_TESTNET_PRIVATE_KEY or BSC_BRIDGE_ADDRESS")
-		return
+	bscReady := len(BridgeRPCEndpoints(rpc)) > 0 && pk != "" && bridgeAddr != "" && lockAddr != ""
+	if !bscReady {
+		log.Println("Bridge relayer[bsc-testnet]: disabled until BSC_TESTNET_RPC(S), BSC_TESTNET_PRIVATE_KEY, BSC_BRIDGE_ADDRESS, and BSC_LOCK_ADDRESS are configured")
+	} else {
+		log.Printf("Bridge relayer: rpc=%s bridge=%s lock=%s", rpc, bridgeAddr, lockAddr)
 	}
-	log.Printf("Bridge relayer: rpc=%s bridge=%s lock=%s", rpc, bridgeAddr, lockAddr)
 
 	interval := 5 * time.Second
 	if v := os.Getenv("BRIDGE_POLL_INTERVAL_SEC"); v != "" {
@@ -71,6 +152,33 @@ func StartBridgeRelayer(bc *Blockchain_struct) {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
 			backfill = n
 		}
+	}
+
+	registryPrivateBatchSize := 3
+	if v := os.Getenv("BRIDGE_PRIVATE_BATCH_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			registryPrivateBatchSize = n
+		}
+	}
+	registryPrivateBatchMax := 8
+	if v := os.Getenv("BRIDGE_PRIVATE_BATCH_MAX_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			registryPrivateBatchMax = n
+		}
+	}
+	if registryPrivateBatchMax < registryPrivateBatchSize {
+		registryPrivateBatchMax = registryPrivateBatchSize
+	}
+	registryPrivateBatchWait := 45 * time.Second
+	if v := os.Getenv("BRIDGE_PRIVATE_BATCH_WAIT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			registryPrivateBatchWait = time.Duration(n) * time.Second
+		}
+	}
+
+	if !bscReady {
+		startConfiguredBridgeRelayers(bc, interval, backfill, registryPrivateBatchSize, registryPrivateBatchMax, registryPrivateBatchWait)
+		return
 	}
 
 	chainID := int64(97)
@@ -442,6 +550,9 @@ func readEnvKey(path, key string) string {
 }
 
 func sendMint(client *ethclient.Client, parsedABI abi.ABI, bridge common.Address, privKeyHex string, chainID int64, r *BridgeRequest, bc *Blockchain_struct) error {
+	if err := bc.BridgeExecutionAuthorized(r.ID, time.Now().Unix()); err != nil {
+		return fmt.Errorf("bridge security authorization: %w", err)
+	}
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(privKeyHex, "0x"))
 	if err != nil {
 		return err
@@ -872,6 +983,9 @@ func deployBridgeToken(bc *Blockchain_struct, name, symbol, decimals, bscToken s
 }
 
 func sendRelease(client *ethclient.Client, parsedABI abi.ABI, lock common.Address, privKeyHex string, chainID int64, bc *Blockchain_struct, r *BridgeRequest, targetCfg *BridgeChainConfig) error {
+	if err := bc.BridgeExecutionAuthorized(r.ID, time.Now().Unix()); err != nil {
+		return fmt.Errorf("bridge security authorization: %w", err)
+	}
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(privKeyHex, "0x"))
 	if err != nil {
 		return err
@@ -909,6 +1023,9 @@ func sendRelease(client *ethclient.Client, parsedABI abi.ABI, lock common.Addres
 }
 
 func mintFromBscRequest(client *ethclient.Client, erc20ABI abi.ABI, r *BridgeRequest, bc *Blockchain_struct) error {
+	if err := bc.BridgeExecutionAuthorized(r.ID, time.Now().Unix()); err != nil {
+		return fmt.Errorf("bridge security authorization: %w", err)
+	}
 	tokenAddr := common.HexToAddress(r.Token)
 	info := bc.GetBridgeTokenMappingForChain(r.SourceChainID, tokenAddr.Hex())
 	if info == nil {
@@ -969,14 +1086,16 @@ func runBridgeRelayerForChain(cfg *BridgeChainConfig, bc *Blockchain_struct, int
 	if cfg == nil || bc == nil || !cfg.Enabled {
 		return
 	}
-	rpc := strings.TrimSpace(cfg.RPC)
-	if rpc == "" && len(cfg.RPCs) > 0 {
-		rpc = strings.TrimSpace(cfg.RPCs[0])
-	}
-	if rpc == "" || strings.TrimSpace(cfg.BridgeAddress) == "" {
+	if !bridgeChainUsesEVMRelayer(cfg) {
+		log.Printf("Bridge relayer[%s]: waiting for %s adapter implementation", cfg.ID, cfg.Family)
 		return
 	}
-	endpoints := BridgeRPCEndpoints(rpc)
+	endpoints := bridgeChainRelayerEndpoints(cfg)
+	relayerKey := bridgeChainRelayerPrivateKey(cfg)
+	if len(endpoints) == 0 || strings.TrimSpace(cfg.BridgeAddress) == "" || strings.TrimSpace(cfg.LockAddress) == "" || relayerKey == "" {
+		log.Printf("Bridge relayer[%s]: disabled until RPC, bridge address, lock address, and private key are configured", cfg.ID)
+		return
+	}
 	client, activeRPC, err := DialBscClient(endpoints)
 	if err != nil {
 		log.Printf("Bridge relayer[%s]: cannot connect: %v", cfg.ID, err)
@@ -1001,9 +1120,6 @@ func runBridgeRelayerForChain(cfg *BridgeChainConfig, bc *Blockchain_struct, int
 	checkpoint, _ := loadBridgeRelayerCheckpointFor(cfg.ID)
 	bridge := common.HexToAddress(cfg.BridgeAddress)
 	lockAddr := strings.TrimSpace(cfg.LockAddress)
-	if lockAddr == "" {
-		lockAddr = cfg.BridgeAddress
-	}
 	lock := common.HexToAddress(lockAddr)
 	var lastChecked, lastLockChecked uint64
 	if checkpoint != nil {
@@ -1115,7 +1231,7 @@ func runBridgeRelayerForChain(cfg *BridgeChainConfig, bc *Blockchain_struct, int
 			from = to + 1
 		}
 
-		processQueuedPrivateBridgeBatches(client, parsedABI, parsedLockABI, parsedErc20ABI, bridge, lock, os.Getenv("BSC_TESTNET_PRIVATE_KEY"), chainID, bc, privateBatchSize, privateBatchMax, privateBatchWait, cfg.ID, "lqd", nil)
+		processQueuedPrivateBridgeBatches(client, parsedABI, parsedLockABI, parsedErc20ABI, bridge, lock, relayerKey, chainID, bc, privateBatchSize, privateBatchMax, privateBatchWait, cfg.ID, "lqd", nil)
 
 		reqs := bc.ListBridgeRequests("")
 		releaseBatch := selectPrivateBridgeBatch(reqs, "LQD", cfg.ID, privateBatchSize, privateBatchMax, privateBatchWait, time.Now())
@@ -1130,7 +1246,7 @@ func runBridgeRelayerForChain(cfg *BridgeChainConfig, bc *Blockchain_struct, int
 					bc.MarkBridgeFailed(r.ID)
 					continue
 				}
-				if err := sendRelease(client, parsedLockABI, lock, os.Getenv("BSC_TESTNET_PRIVATE_KEY"), chainID, bc, r, cfg); err != nil {
+				if err := sendRelease(client, parsedLockABI, lock, relayerKey, chainID, bc, r, cfg); err != nil {
 					log.Printf("Bridge relayer[%s]: release failed for %s: %v", cfg.ID, r.ID, err)
 					bc.MarkBridgeFailed(r.ID)
 				}

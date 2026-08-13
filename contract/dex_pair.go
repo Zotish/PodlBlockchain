@@ -29,6 +29,7 @@ import (
 
 const NATIVE = "lqd"
 const minLiquidity = int64(1000)
+const protocolRevenueEscrow = "0x0000000000000000000000000000000000000e01"
 
 type Pair struct{}
 
@@ -75,13 +76,91 @@ func actorAddr(ctx *bc.Context) string {
 }
 
 func calcAmountOut(amtIn, resIn, resOut *big.Int) *big.Int {
+	return calcAmountOutWithFee(amtIn, resIn, resOut, 30)
+}
+
+func calcAmountOutWithFee(amtIn, resIn, resOut *big.Int, feeBPS int64) *big.Int {
 	if amtIn.Sign() == 0 || resIn.Sign() == 0 || resOut.Sign() == 0 {
 		return big.NewInt(0)
 	}
-	fee := new(big.Int).Mul(amtIn, big.NewInt(997))
-	num := new(big.Int).Mul(fee, resOut)
-	den := new(big.Int).Add(new(big.Int).Mul(resIn, big.NewInt(1000)), fee)
+	if feeBPS < 1 {
+		feeBPS = 1
+	}
+	if feeBPS > 100 {
+		feeBPS = 100
+	}
+	feeAdjusted := new(big.Int).Mul(amtIn, big.NewInt(10000-feeBPS))
+	num := new(big.Int).Mul(feeAdjusted, resOut)
+	den := new(big.Int).Add(new(big.Int).Mul(resIn, big.NewInt(10000)), feeAdjusted)
 	return new(big.Int).Div(num, den)
+}
+
+func dynamicFeeBPS(ctx *bc.Context, amtIn, resIn *big.Int) int64 {
+	fee := int64(30)
+	if resIn.Sign() > 0 {
+		utilBPS := new(big.Int).Div(new(big.Int).Mul(amtIn, big.NewInt(10000)), resIn).Int64()
+		if utilBPS > 100 {
+			fee += (utilBPS - 100) / 100
+		}
+	}
+	if weight := parseBig(ctx.Get("routing_weight")).Int64(); weight > 0 && weight < 25 {
+		fee += 10
+	}
+	if fee > 100 {
+		fee = 100
+	}
+	return fee
+}
+
+func (p *Pair) updateTWAPAccumulator(ctx *bc.Context, reserve0, reserve1 *big.Int) {
+	now := ctx.BlockTime
+	last := parseBig(ctx.Get("twap_last_timestamp")).Int64()
+	if last == 0 {
+		ctx.Set("twap_last_timestamp", big.NewInt(now).String())
+		return
+	}
+	if now <= last || reserve0.Sign() <= 0 || reserve1.Sign() <= 0 {
+		return
+	}
+	elapsed := big.NewInt(now - last)
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	price0 := new(big.Int).Div(new(big.Int).Mul(reserve1, scale), reserve0)
+	price1 := new(big.Int).Div(new(big.Int).Mul(reserve0, scale), reserve1)
+	c0 := new(big.Int).Add(parseBig(ctx.Get("price0_cumulative_x18")), new(big.Int).Mul(price0, elapsed))
+	c1 := new(big.Int).Add(parseBig(ctx.Get("price1_cumulative_x18")), new(big.Int).Mul(price1, elapsed))
+	ctx.Set("price0_cumulative_x18", c0.String())
+	ctx.Set("price1_cumulative_x18", c1.String())
+	ctx.Set("twap_last_timestamp", big.NewInt(now).String())
+}
+
+func (p *Pair) recordOrganicFlow(ctx *bc.Context, actor string, amount, totalReserve *big.Int) {
+	epoch := ctx.Get("flow_epoch")
+	if epoch == "" {
+		epoch = "0"
+	}
+	key := "flow:" + epoch + ":" + strings.ToLower(actor)
+	prior := parseBig(ctx.Get(key))
+	// One identity can contribute at most 5% of epoch-start-like reserves to
+	// organic demand. Repeated self-trading therefore has sharply diminishing
+	// consensus credit and always pays the AMM fee.
+	capPerActor := new(big.Int).Div(totalReserve, big.NewInt(20))
+	remaining := new(big.Int).Sub(capPerActor, prior)
+	credit := new(big.Int).Set(amount)
+	if remaining.Sign() <= 0 {
+		credit.SetInt64(0)
+	} else if credit.Cmp(remaining) > 0 {
+		credit.Set(remaining)
+	}
+	if prior.Sign() == 0 && credit.Sign() > 0 {
+		ctx.Set("epoch_unique_traders", new(big.Int).Add(parseBig(ctx.Get("epoch_unique_traders")), big.NewInt(1)).String())
+	}
+	ctx.Set(key, new(big.Int).Add(prior, credit).String())
+	organic := new(big.Int).Add(parseBig(ctx.Get("epoch_organic_volume")), credit)
+	ctx.Set("epoch_organic_volume", organic.String())
+	total := new(big.Int).Add(parseBig(ctx.Get("epoch_volume")), amount)
+	if total.Sign() > 0 {
+		ctx.Set("unique_flow_bps", new(big.Int).Div(new(big.Int).Mul(organic, big.NewInt(10000)), total).String())
+	}
 }
 
 func calcAmountIn(amtOut, resIn, resOut *big.Int) *big.Int {
@@ -213,6 +292,8 @@ func (p *Pair) Init(ctx *bc.Context, factory string, token0 string, token1 strin
 	ctx.Set("reserve0", "0")
 	ctx.Set("reserve1", "0")
 	ctx.Set("totalLP", "0")
+	ctx.Set("protocol_fee_bps", "5")
+	ctx.Set("protocol_fee_collector", protocolRevenueEscrow)
 	ctx.Commit()
 
 	ctx.Emit("PairInitialized", map[string]interface{}{
@@ -220,6 +301,43 @@ func (p *Pair) Init(ctx *bc.Context, factory string, token0 string, token1 strin
 		"token0":  t0,
 		"token1":  t1,
 	})
+}
+
+func (p *Pair) collectProtocolFee(ctx *bc.Context, token string, amountIn *big.Int, totalFeeBPS int64) (*big.Int, int64) {
+	protocolBPS := parseBig(ctx.Get("protocol_fee_bps")).Int64()
+	if protocolBPS < 0 {
+		protocolBPS = 0
+	}
+	if protocolBPS > totalFeeBPS {
+		protocolBPS = totalFeeBPS
+	}
+	fee := new(big.Int).Div(new(big.Int).Mul(amountIn, big.NewInt(protocolBPS)), big.NewInt(10000))
+	if fee.Sign() > 0 {
+		collector := strings.ToLower(strings.TrimSpace(ctx.Get("protocol_fee_collector")))
+		if collector == "" {
+			collector = protocolRevenueEscrow
+		}
+		p.pushToken(ctx, token, collector, fee)
+		key := "protocol_fee_total:" + strings.ToLower(token)
+		ctx.Set(key, new(big.Int).Add(parseBig(ctx.Get(key)), fee).String())
+	}
+	return fee, protocolBPS
+}
+
+// SetProtocolFee is factory-governed and capped at half of the minimum base
+// fee so LPs always receive the majority of swap fees.
+func (p *Pair) SetProtocolFee(ctx *bc.Context, feeBPS string, collector string) {
+	if !strings.EqualFold(ctx.CallerAddr, ctx.Get("factory")) && !strings.EqualFold(ctx.OriginAddr, ctx.Get("factory")) {
+		ctx.Revert("factory only")
+	}
+	fee := parseBig(feeBPS)
+	collector = strings.ToLower(strings.TrimSpace(collector))
+	if !fee.IsInt64() || fee.Int64() < 0 || fee.Int64() > 15 || collector == "" {
+		ctx.Revert("protocol fee must be 0..15 bps with collector")
+	}
+	ctx.Set("protocol_fee_bps", fee.String())
+	ctx.Set("protocol_fee_collector", collector)
+	ctx.Emit("ProtocolFeePolicyUpdated", map[string]interface{}{"feeBps": fee.String(), "collector": collector})
 }
 
 // ─── AddLiquidity ─────────────────────────────────────────────────────────────
@@ -464,7 +582,8 @@ func (p *Pair) swapTo(ctx *bc.Context, receiver string, amountIn string, minAmou
 		resIn, resOut, tOut = res1, res0, t0
 	}
 
-	amtOut := calcAmountOut(amtIn, resIn, resOut)
+	feeBPS := dynamicFeeBPS(ctx, amtIn, resIn)
+	amtOut := calcAmountOutWithFee(amtIn, resIn, resOut, feeBPS)
 	if amtOut.Cmp(minOut) < 0 {
 		ctx.Revert("slippage: insufficient output amount")
 	}
@@ -477,18 +596,20 @@ func (p *Pair) swapTo(ctx *bc.Context, receiver string, amountIn string, minAmou
 	} else {
 		p.pullTokenFromCallerBalance(ctx, tIn, amtIn)
 	}
+	protocolFee, protocolBPS := p.collectProtocolFee(ctx, tIn, amtIn, feeBPS)
 
-	newResIn := new(big.Int).Add(resIn, amtIn)
+	p.updateTWAPAccumulator(ctx, res0, res1)
+	newResIn := new(big.Int).Add(resIn, new(big.Int).Sub(amtIn, protocolFee))
 	newResOut := new(big.Int).Sub(resOut, amtOut)
 
 	// k-invariant check (1000x to account for fee)
 	lhs := new(big.Int).Mul(
-		new(big.Int).Sub(new(big.Int).Mul(newResIn, big.NewInt(1000)), new(big.Int).Mul(amtIn, big.NewInt(3))),
-		new(big.Int).Mul(newResOut, big.NewInt(1000)),
+		new(big.Int).Sub(new(big.Int).Mul(newResIn, big.NewInt(10000)), new(big.Int).Mul(amtIn, big.NewInt(feeBPS-protocolBPS))),
+		new(big.Int).Mul(newResOut, big.NewInt(10000)),
 	)
 	rhs := new(big.Int).Mul(
-		new(big.Int).Mul(resIn, big.NewInt(1000)),
-		new(big.Int).Mul(resOut, big.NewInt(1000)),
+		new(big.Int).Mul(resIn, big.NewInt(10000)),
+		new(big.Int).Mul(resOut, big.NewInt(10000)),
 	)
 	if lhs.Cmp(rhs) < 0 {
 		ctx.Revert("k-invariant violated")
@@ -506,6 +627,7 @@ func (p *Pair) swapTo(ctx *bc.Context, receiver string, amountIn string, minAmou
 	epochSwaps := new(big.Int).Add(parseBig(ctx.Get("epoch_swaps")), big.NewInt(1))
 	epochVol := new(big.Int).Add(parseBig(ctx.Get("epoch_volume")), amtIn)
 	ctx.Set("epoch_swaps", epochSwaps.String())
+	p.recordOrganicFlow(ctx, caller, amtIn, new(big.Int).Add(res0, res1))
 	ctx.Set("epoch_volume", epochVol.String())
 	// ─────────────────────────────────────────────────────────────────────────
 
@@ -521,6 +643,8 @@ func (p *Pair) swapTo(ctx *bc.Context, receiver string, amountIn string, minAmou
 		"amountIn":       amtIn.String(),
 		"amountOut":      amtOut.String(),
 		"priceImpactBps": calcPriceImpactBps(amtIn, amtOut, resIn, resOut).String(),
+		"feeBps":         feeBPS,
+		"protocolFee":    protocolFee.String(),
 	})
 	ctx.Set("output", amtOut.String())
 	return amtOut
@@ -581,7 +705,8 @@ func (p *Pair) SwapFromContract(ctx *bc.Context, receiver string, amountIn strin
 		resIn, resOut, tOut = res1, res0, t0
 	}
 
-	amtOut := calcAmountOut(amtIn, resIn, resOut)
+	feeBPS := dynamicFeeBPS(ctx, amtIn, resIn)
+	amtOut := calcAmountOutWithFee(amtIn, resIn, resOut, feeBPS)
 	if amtOut.Cmp(minOut) < 0 {
 		ctx.Revert("slippage: insufficient output amount")
 	}
@@ -590,16 +715,18 @@ func (p *Pair) SwapFromContract(ctx *bc.Context, receiver string, amountIn strin
 	}
 
 	p.pullTokenFromCallerBalance(ctx, tIn, amtIn)
+	protocolFee, protocolBPS := p.collectProtocolFee(ctx, tIn, amtIn, feeBPS)
 
-	newResIn := new(big.Int).Add(resIn, amtIn)
+	p.updateTWAPAccumulator(ctx, res0, res1)
+	newResIn := new(big.Int).Add(resIn, new(big.Int).Sub(amtIn, protocolFee))
 	newResOut := new(big.Int).Sub(resOut, amtOut)
 	lhs := new(big.Int).Mul(
-		new(big.Int).Sub(new(big.Int).Mul(newResIn, big.NewInt(1000)), new(big.Int).Mul(amtIn, big.NewInt(3))),
-		new(big.Int).Mul(newResOut, big.NewInt(1000)),
+		new(big.Int).Sub(new(big.Int).Mul(newResIn, big.NewInt(10000)), new(big.Int).Mul(amtIn, big.NewInt(feeBPS-protocolBPS))),
+		new(big.Int).Mul(newResOut, big.NewInt(10000)),
 	)
 	rhs := new(big.Int).Mul(
-		new(big.Int).Mul(resIn, big.NewInt(1000)),
-		new(big.Int).Mul(resOut, big.NewInt(1000)),
+		new(big.Int).Mul(resIn, big.NewInt(10000)),
+		new(big.Int).Mul(resOut, big.NewInt(10000)),
 	)
 	if lhs.Cmp(rhs) < 0 {
 		ctx.Revert("k-invariant violated")
@@ -616,6 +743,7 @@ func (p *Pair) SwapFromContract(ctx *bc.Context, receiver string, amountIn strin
 	epochSwaps := new(big.Int).Add(parseBig(ctx.Get("epoch_swaps")), big.NewInt(1))
 	epochVol := new(big.Int).Add(parseBig(ctx.Get("epoch_volume")), amtIn)
 	ctx.Set("epoch_swaps", epochSwaps.String())
+	p.recordOrganicFlow(ctx, actorAddr(ctx), amtIn, new(big.Int).Add(res0, res1))
 	ctx.Set("epoch_volume", epochVol.String())
 	ctx.Set("output", amtOut.String())
 	ctx.Commit()
@@ -629,6 +757,8 @@ func (p *Pair) SwapFromContract(ctx *bc.Context, receiver string, amountIn strin
 		"amountIn":       amtIn.String(),
 		"amountOut":      amtOut.String(),
 		"priceImpactBps": calcPriceImpactBps(amtIn, amtOut, resIn, resOut).String(),
+		"feeBps":         feeBPS,
+		"protocolFee":    protocolFee.String(),
 	})
 }
 
@@ -688,6 +818,21 @@ func (p *Pair) GetRoutingWeight(ctx *bc.Context) {
 	})
 }
 
+func (p *Pair) ObserveTWAP(ctx *bc.Context) {
+	r0, r1 := parseBig(ctx.Get("reserve0")), parseBig(ctx.Get("reserve1"))
+	p.updateTWAPAccumulator(ctx, r0, r1)
+	ctx.Set("output", strings.Join([]string{ctx.Get("price0_cumulative_x18"), ctx.Get("price1_cumulative_x18"), ctx.Get("twap_last_timestamp")}, ","))
+}
+
+func (p *Pair) GetDynamicFeeBPS(ctx *bc.Context, amountIn string, tokenIn string) {
+	t0 := ctx.Get("token0")
+	resIn := parseBig(ctx.Get("reserve1"))
+	if strings.EqualFold(strings.TrimSpace(tokenIn), t0) {
+		resIn = parseBig(ctx.Get("reserve0"))
+	}
+	ctx.Set("output", big.NewInt(dynamicFeeBPS(ctx, parseBig(amountIn), resIn)).String())
+}
+
 func (p *Pair) GetAmountOut(ctx *bc.Context, amountIn string, tokenIn string) {
 	t0 := ctx.Get("token0")
 	t1 := ctx.Get("token1")
@@ -705,7 +850,7 @@ func (p *Pair) GetAmountOut(ctx *bc.Context, amountIn string, tokenIn string) {
 	} else {
 		resIn, resOut = res1, res0
 	}
-	out := calcAmountOut(parseBig(amountIn), resIn, resOut)
+	out := calcAmountOutWithFee(parseBig(amountIn), resIn, resOut, dynamicFeeBPS(ctx, parseBig(amountIn), resIn))
 	ctx.Set("output", out.String())
 	ctx.Emit("AmountOut", map[string]interface{}{"amountOut": out.String()})
 }
@@ -750,7 +895,8 @@ func (p *Pair) GetQuote(ctx *bc.Context, amountIn string, tokenIn string) {
 	} else {
 		resIn, resOut, tokenOut = res1, res0, t0
 	}
-	amtOut := calcAmountOut(amtIn, resIn, resOut)
+	feeBPS := dynamicFeeBPS(ctx, amtIn, resIn)
+	amtOut := calcAmountOutWithFee(amtIn, resIn, resOut, feeBPS)
 	impact := calcPriceImpactBps(amtIn, amtOut, resIn, resOut)
 	spotPriceBps := big.NewInt(0)
 	if resIn.Sign() > 0 {
@@ -760,7 +906,7 @@ func (p *Pair) GetQuote(ctx *bc.Context, amountIn string, tokenIn string) {
 	if amtIn.Sign() > 0 {
 		execPriceBps.Div(new(big.Int).Mul(amtOut, big.NewInt(10000)), amtIn)
 	}
-	fee := new(big.Int).Div(new(big.Int).Mul(amtIn, big.NewInt(3)), big.NewInt(1000))
+	fee := new(big.Int).Div(new(big.Int).Mul(amtIn, big.NewInt(feeBPS)), big.NewInt(10000))
 	ctx.Set("output", strings.Join([]string{
 		amtOut.String(),
 		impact.String(),

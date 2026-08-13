@@ -7,7 +7,7 @@ import (
 
 func TestStrategyVaultDepositRebalanceWithdraw(t *testing.T) {
 	oldPersist := persistRuntimeState
-	persistRuntimeState = func(Blockchain_struct) error { return nil }
+	persistRuntimeState = func(*Blockchain_struct) error { return nil }
 	defer func() { persistRuntimeState = oldPersist }()
 
 	bc := &Blockchain_struct{}
@@ -52,7 +52,7 @@ func TestStrategyVaultDepositRebalanceWithdraw(t *testing.T) {
 
 func TestStrategyVaultSafetyRollbackKeepsCurrentPool(t *testing.T) {
 	oldPersist := persistRuntimeState
-	persistRuntimeState = func(Blockchain_struct) error { return nil }
+	persistRuntimeState = func(*Blockchain_struct) error { return nil }
 	defer func() { persistRuntimeState = oldPersist }()
 
 	bc := &Blockchain_struct{}

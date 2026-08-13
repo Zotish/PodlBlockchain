@@ -1,6 +1,6 @@
 [build]
   command = "npm run build"
-  publish = "build"
+	publish = "dist"
 
 [build.environment]
   REACT_APP_CHAIN_BASE = "https://chain.178-105-133-94.sslip.io"

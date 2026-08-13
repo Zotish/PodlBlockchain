@@ -1,0 +1,2086 @@
+/* global BigInt */
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import "./styles.css";
+import { DEX_CONTRACT_ADDRESS, DEX_ROUTER_ADDRESS, NODE_URL, WALLET_URL, WEB_WALLET_URL } from "./config";
+import {
+  callContract,
+  getBaseFee,
+  getContractAbi,
+  getCurrentDexFactory,
+  getContractStorage,
+  getDexRegistryConfig,
+  getDexRegistryTokens,
+  getDynamicLiquidityStatus,
+  getTokenAllowance,
+  getTokenBalance,
+  getTokenMeta,
+  registerDexValidator,
+  setDynamicLiquidityOracle,
+  setStrategyVaultSafety,
+  triggerDynamicLiquidity,
+  waitForTx,
+  sendContractTx,
+} from "./api";
+import { loadTokens, mergeTokens, saveTokens, upsertToken } from "./storage";
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const SECS_PER_DAY = 86400;
+const TABS = ["Swap", "Pool", "Strategy", "Validate", "Settings"];
+const SLIPPAGE_PRESETS = ["0.1", "0.5", "1.0"];
+const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+const DEX_GAS = {
+  approve: 120000,
+  createPair: 1200000,
+  liquidity: 900000,
+  swap: 700000,
+  validation: 600000
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function safeBig(v) {
+  try { return (!v || v === "") ? 0n : BigInt(v); }
+  catch { return 0n; }
+}
+
+// Uniswap v2 AMM quote (mirrors dex_swap.go): 0.3% fee
+function quoteOut(amtIn, resIn, resOut) {
+  if (amtIn <= 0n || resIn <= 0n || resOut <= 0n) return 0n;
+  const fee = amtIn * 997n;
+  return (fee * resOut) / (resIn * 1000n + fee);
+}
+
+// Price impact in basis-points
+function priceImpactBps(amtIn, resIn) {
+  if (resIn <= 0n || amtIn <= 0n) return 0;
+  return Number((amtIn * 10000n) / resIn);
+}
+
+function fmtBps(bps) {
+  return (bps / 100).toFixed(2);
+}
+
+// Format raw base-units → human string  e.g. "10000000000" (8 dec) → "100"
+function fmtAmount(raw, decimals = 8) {
+  if (!raw || raw === "0") return "0";
+  try {
+    const big = BigInt(raw);
+    const d = BigInt(10 ** decimals);
+    const whole = big / d;
+    const frac = big % d;
+    const fracStr = frac.toString().padStart(decimals, "0").replace(/0+$/, "");
+    return fracStr ? `${whole}.${fracStr}` : whole.toString();
+  } catch { return raw; }
+}
+
+// Parse human string → raw base-unit string  e.g. "100" (8 dec) → "10000000000"
+// Pure string arithmetic — no Number() precision loss, safe for any size.
+function parseHuman(humanStr, decimals = 8) {
+  if (!humanStr && humanStr !== 0) return "0";
+  const s = String(humanStr).trim();
+  if (!s || s === "0") return "0";
+  const dotIdx = s.indexOf(".");
+  let intS, fracS;
+  if (dotIdx === -1) { intS = s; fracS = ""; }
+  else { intS = s.slice(0, dotIdx); fracS = s.slice(dotIdx + 1); }
+  const frac = fracS.slice(0, decimals).padEnd(decimals, "0");
+  const full = (intS.replace(/^0+/, "") || "0") + frac;
+  return full.replace(/^0+/, "") || "0";
+}
+
+// Shorten address
+function shortAddr(a) {
+  if (!a || a.length < 10) return a || "";
+  return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
+
+function extractHash(res) {
+  return res?.tx_hash || res?.TxHash || res?.hash || "";
+}
+
+function txFailed(tx) {
+  return String(tx?.status || tx?.Status || "").toLowerCase() === "failed";
+}
+
+function parseSwapQuoteOutput(output = "") {
+  const parts = String(output || "").split("|");
+  if (parts.length < 3 || !parts[0] || parts[0] === "none") return null;
+  if (parts[0] === "direct") {
+    return {
+      type: "direct",
+      amountOut: parts[1] || "0",
+      impactBps: Number(safeBig(parts[2] || "0")),
+      route: parts[3] || "",
+      fee: parts[6] || "0",
+    };
+  }
+  return {
+    type: "2hop",
+    amountOut: parts[1] || "0",
+    impactBps: Number(safeBig(parts[2] || "0")),
+    route: parts[3] || "",
+    midToken: parts[4] || "",
+    hop1Out: parts[5] || "0",
+    hop1ImpactBps: Number(safeBig(parts[6] || "0")),
+    hop2ImpactBps: Number(safeBig(parts[7] || "0")),
+  };
+}
+
+// ─── Token icon letter ─────────────────────────────────────────────────────
+function TokenIcon({ symbol, logoUrl = "", size = 22 }) {
+  const letter = (symbol || "?")[0].toUpperCase();
+  const hue = ((symbol || "?").charCodeAt(0) * 47 + 120) % 360;
+  return (
+    <div
+      className="token-icon"
+      style={{
+        width: size, height: size, fontSize: size * 0.45,
+        background: `hsl(${hue},60%,45%)`,
+      }}
+    >
+      {logoUrl ? <img src={logoUrl} alt={symbol || "token"} /> : letter}
+    </div>
+  );
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [tab, setTab] = useState("Swap");
+
+  // Wallet
+  const [wallet, setWallet] = useState({ address: "", privateKey: "" });
+  const [usingExt, setUsingExt] = useState(false);
+
+  // Tokens
+  const [tokens, setTokens] = useState(loadTokens);
+  const [tokenA, setTokenA] = useState("");
+  const [tokenB, setTokenB] = useState("");
+
+  // DEX config
+  const [dexAddr, setDexAddr] = useState(() => localStorage.getItem("lqd_dex_address") || DEX_CONTRACT_ADDRESS);
+  const [routerAddr, setRouterAddr] = useState(() => localStorage.getItem("lqd_dex_router_address") || DEX_ROUTER_ADDRESS);
+  const [nodeUrl, setNodeUrl]   = useState(() => localStorage.getItem("lqd_node_url") || NODE_URL);
+  const [walletUrl, setWalletUrl] = useState(() => localStorage.getItem("lqd_wallet_url") || WALLET_URL);
+  const [pairAddr, setPairAddr] = useState("");
+  const [predictedPairAddr, setPredictedPairAddr] = useState("");
+  const [dexValid, setDexValid] = useState(true);
+  const [dexKind, setDexKind] = useState("unknown");
+  const [canonicalDexAddr, setCanonicalDexAddr] = useState("");
+
+  // Pool state
+  const [pool, setPool] = useState({ reserveA: "0", reserveB: "0", totalLP: "0", lpBalance: "0", tokenA: "", tokenB: "" });
+  const [balances, setBalances] = useState({ a: "", b: "" });
+  const [allowances, setAllowances] = useState({ a: "0", b: "0" });
+  const [baseFee, setBaseFee] = useState(0);
+
+  // Swap state
+  const [amtIn,   setAmtIn]   = useState("");
+  const [amtOut,  setAmtOut]  = useState("");
+  const [impact,  setImpact]  = useState(0); // basis-points
+  const [quoteAt, setQuoteAt] = useState(0);
+  const [routeInfo, setRouteInfo] = useState("");
+
+  // Settings (slippage)
+  const [slippage, setSlippage]       = useState("0.5");
+  const [customSlip, setCustomSlip]   = useState("");
+  const [deadlineMinutes, setDeadlineMinutes] = useState("20");
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Liquidity UI state (sub-screen: null | "add" | "remove")
+  const [liqScreen, setLiqScreen] = useState(null);
+  const [liqA, setLiqA] = useState("");
+  const [liqB, setLiqB] = useState("");
+  const [lpBurn, setLpBurn] = useState("");
+
+  // Validator
+  const [valDays,     setValDays]     = useState("30");
+  const [valLPAmt,    setValLPAmt]    = useState("");
+  const [valInfo,     setValInfo]     = useState(null);
+
+  // Strategy / keeper
+  const [strategyStatus, setStrategyStatus] = useState(null);
+  const [keeperKey, setKeeperKey] = useState(() => localStorage.getItem("lqd_keeper_api_key") || "");
+  const [oraclePair, setOraclePair] = useState("");
+  const [oracleDemand, setOracleDemand] = useState("7500");
+  const [vaultMinOutBps, setVaultMinOutBps] = useState("9900");
+  const [vaultMaxMoveBps, setVaultMaxMoveBps] = useState("2500");
+  const [vaultInterval, setVaultInterval] = useState("300");
+
+  // Wallet dropdown
+  const [showWalletMenu, setShowWalletMenu] = useState(false);
+  const walletMenuRef = useRef(null);
+
+  // Tracks optimistic allowance floor — interval polling never goes below this
+  const minAllowanceRef = useRef({ a: "0", b: "0" });
+
+  // Token selector modal
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalTarget, setModalTarget] = useState("A");
+  const [modalSearch, setModalSearch] = useState("");
+  const [importAddr, setImportAddr] = useState("");
+
+  // Loading / status
+  const [loading, setLoading] = useState(false);
+  const [toast, setToast] = useState({ msg: "", type: "" });
+  const toastTimer = useRef(null);
+
+  const popupRef = useRef(null);
+  const settingsRef = useRef(null);
+  const autoFactoryLoadedRef = useRef(false);
+
+  // Derived
+  const tokenAInfo = tokens.find(t => t.address === tokenA);
+  const tokenBInfo = tokens.find(t => t.address === tokenB);
+  const symA  = tokenAInfo?.symbol || "–";
+  const symB  = tokenBInfo?.symbol || "–";
+  const decA  = parseInt(tokenAInfo?.decimals || "8", 10) || 8;
+  const decB  = parseInt(tokenBInfo?.decimals || "8", 10) || 8;
+  const outDec = decB;
+  const activeSlip = customSlip || slippage;
+  // amtOut is already human-readable; convert → raw for slippage maths
+  const minReceived = amtOut && activeSlip
+    ? fmtAmount(
+        ((safeBig(parseHuman(amtOut, outDec)) * BigInt(Math.floor((1 - parseFloat(activeSlip) / 100) * 10000))) / 10000n).toString(),
+        decB
+      )
+    : "";
+
+  // Wallet is considered connected if address is set + can sign (pk or extension)
+  const walletConnected = !!(wallet.address && (wallet.privateKey || (typeof window !== "undefined" && window.lqd)));
+  const routeContractAddr = routerAddr || dexAddr;
+  const canSend = !!(walletConnected && routeContractAddr);
+  // pairExists = CreatePair has happened; poolHasLiquidity = actual reserves exist
+  const dexIsFactory = dexValid && dexKind === "factory";
+  const pairExists = !!pairAddr && dexIsFactory;
+  const poolHasLiquidity = !!(dexIsFactory && tokenA && tokenB && (safeBig(pool.reserveA) > 0n || safeBig(pool.reserveB) > 0n || pool.totalLP !== "0"));
+  const approvalTargetAddr = dexIsFactory ? (pairAddr || predictedPairAddr) : "";
+  const displayedPairAddr = dexIsFactory ? pairAddr : "";
+  const deployFreshDexDisabled = loading || !wallet.address || !!canonicalDexAddr;
+  const deployFreshDexLabel = canonicalDexAddr
+    ? `DEX factory already deployed: ${shortAddr(canonicalDexAddr)}`
+    : loading
+      ? "Deploying..."
+      : "Deploy Fresh DEX";
+
+  // ── Toast helper ─────────────────────────────────────────────────────────
+  function showToast(msg, type = "info") {
+    setToast({ msg, type });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast({ msg: "", type: "" }), 5000);
+  }
+
+  // ── Quote ─────────────────────────────────────────────────────────────────
+  // amtIn is always the visible "You Pay" amount (tokenA). The arrow swaps
+  // tokenA/tokenB, so quoting stays top-to-bottom instead of using a second
+  // hidden direction flag.
+  useEffect(() => {
+    let alive = true;
+    const inDec = decA;
+    const rawIn  = safeBig(parseHuman(amtIn, inDec));
+    const resA   = safeBig(pool.reserveA);
+    const resB   = safeBig(pool.reserveB);
+
+    async function quote() {
+      if (!amtIn || rawIn <= 0n || !tokenA || !tokenB || !routeContractAddr) {
+        setAmtOut("");
+        setImpact(0);
+        setQuoteAt(0);
+        return;
+      }
+      try {
+        const res = await callContract({
+          address: routeContractAddr,
+          caller: wallet.address || ZERO_ADDR,
+          fn: "GetSwapQuote",
+          args: [rawIn.toString(), tokenA, tokenB],
+          value: "0"
+        });
+        if (!alive) return;
+        const q = parseSwapQuoteOutput(res?.output || res?.Output || "");
+        if (q && safeBig(q.amountOut) > 0n) {
+          setAmtOut(fmtAmount(q.amountOut, decB));
+          setImpact(q.impactBps);
+          setQuoteAt(Date.now());
+          if (q.type === "2hop") {
+            setRouteInfo(`Multi-hop · ${q.route.split(",").map(shortAddr).join(" → ")} · ${fmtBps(q.impactBps)}% impact`);
+          } else {
+            setRouteInfo(`Direct · ${shortAddr(q.route)}`);
+          }
+          return;
+        }
+      } catch {}
+      if (!alive) return;
+      const rawOut = quoteOut(rawIn, resA, resB);
+      setAmtOut(rawOut > 0n ? fmtAmount(rawOut.toString(), decB) : "");
+      setImpact(priceImpactBps(rawIn, resA));
+      setQuoteAt(rawOut > 0n ? Date.now() : 0);
+    }
+
+    quote();
+    return () => { alive = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amtIn, tokenA, tokenB, routeContractAddr, wallet.address, pool.reserveA, pool.reserveB, decA, decB]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!routeContractAddr || !wallet.address || !tokenA || !tokenB) {
+      setRouteInfo("");
+      return () => { alive = false; };
+    }
+    callContract({ address: routeContractAddr, caller: wallet.address, fn: "GetBestRoute", args: [tokenA, tokenB], value: "0" })
+      .then((res) => {
+        if (!alive) return;
+        const output = String(res?.output || res?.Output || "").trim();
+        if (!output) setRouteInfo("No route");
+        else if (output.includes(",")) setRouteInfo(`Multi-hop · ${output.split(",").map(shortAddr).join(" → ")}`);
+        else setRouteInfo(`Direct · ${shortAddr(output)}`);
+      })
+      .catch(() => { if (alive) setRouteInfo(pairExists ? `Direct · ${shortAddr(displayedPairAddr)}` : "Route unavailable"); });
+    return () => { alive = false; };
+  }, [routeContractAddr, wallet.address, tokenA, tokenB, pairExists, displayedPairAddr]);
+
+  // ── Extension auto-connect + accountsChanged reactive listener ──────────
+  useEffect(() => {
+    // Apply an accounts array to React state
+    function applyAccounts(accs) {
+      const a = Array.isArray(accs) ? accs[0] : "";
+      if (a) {
+        setWallet(w => w.address === a ? w : { address: a, privateKey: "" });
+        setUsingExt(true);
+      } else {
+        setUsingExt(false);
+      }
+    }
+
+    // 1. Background pushes LQD_ACCOUNTS on connect (handled by accountsChanged)
+    // 2. Also poll lqd_accounts once as fallback for timing edge-cases
+    async function tryConnect() {
+      if (typeof window === "undefined" || !window.lqd) return;
+      try {
+        const accs = await window.lqd.request({ method: "lqd_accounts" });
+        applyAccounts(accs);
+      } catch {}
+    }
+
+    // Wait a tick so injected.js + content.js port are fully ready
+    const t = setTimeout(tryConnect, 150);
+
+    // React to all account changes (push from background, approval, lock/unlock)
+    function onAccountsChanged(accs) { applyAccounts(accs); }
+
+    function setup() {
+      if (!window.lqd) return;
+      window.lqd.on("accountsChanged", onAccountsChanged);
+    }
+
+    // lqd might not be ready synchronously — listen for the init event too
+    setup();
+    window.addEventListener("lqd#initialized", setup, { once: true });
+
+    return () => {
+      clearTimeout(t);
+      if (window.lqd) window.lqd.removeListener("accountsChanged", onAccountsChanged);
+      window.removeEventListener("lqd#initialized", setup);
+    };
+  }, []);
+
+  // ── Shared SQLite DEX registry — universal tokens/config for all users ────
+  useEffect(() => {
+    let alive = true;
+
+    async function syncDexRegistry() {
+      const [configResult, tokensResult] = await Promise.allSettled([
+        getDexRegistryConfig(),
+        getDexRegistryTokens()
+      ]);
+
+      if (!alive) return;
+
+      if (configResult.status === "fulfilled" && configResult.value) {
+        const cfg = configResult.value;
+        const factory = String(cfg.factory_address || cfg.factoryAddress || "").trim();
+        const router = String(cfg.router_address || cfg.routerAddress || "").trim();
+        const node = String(cfg.node_url || cfg.nodeUrl || "").trim().replace(/\/+$/, "");
+        const walletServer = String(cfg.wallet_url || cfg.walletUrl || "").trim().replace(/\/+$/, "");
+
+        if (factory) {
+          setCanonicalDexAddr(factory);
+          setDexAddr(factory);
+          localStorage.setItem("lqd_dex_address", factory);
+        }
+        if (router) {
+          setRouterAddr(router);
+          localStorage.setItem("lqd_dex_router_address", router);
+        }
+        if (node) {
+          setNodeUrl(node);
+          localStorage.setItem("lqd_node_url", node);
+        }
+        if (walletServer) {
+          setWalletUrl(walletServer);
+          localStorage.setItem("lqd_wallet_url", walletServer);
+        }
+      }
+
+      if (tokensResult.status === "fulfilled" && tokensResult.value?.length) {
+        const registryTokens = tokensResult.value.map((token) => ({
+          address: token.address,
+          name: token.name,
+          symbol: token.symbol,
+          decimals: token.decimals || "8",
+          logoUrl: token.logoUrl || token.logo_url || "",
+          native: !!token.native,
+          verified: token.verified !== false,
+          registry: true
+        }));
+        setTokens((current) => mergeTokens(current, registryTokens));
+      }
+    }
+
+    syncDexRegistry();
+    const id = setInterval(syncDexRegistry, 30000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  // ── Postmessage wallet connect ────────────────────────────────────────────
+  useEffect(() => {
+    function onMsg(e) {
+      if (!e.data || typeof e.data !== "object") return;
+      if (e.data.type === "LQD_WALLET_CONNECT") {
+        const { address, privateKey } = e.data;
+        if (address && privateKey) {
+          setWallet({ address, privateKey });
+          setUsingExt(false);
+          showToast("Web wallet connected", "success");
+        }
+      }
+    }
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+
+  // ── Pool polling — resolves pair address from factory, then reads pair storage ──
+  const refreshPool = useCallback(async () => {
+    if (!dexAddr || !dexIsFactory || !tokenA || !tokenB) return;
+    try {
+      const factoryData = await getContractStorage(dexAddr);
+      const factoryStorage = factoryData?.State?.storage ?? factoryData?.State ?? {};
+      const normA = tokenA.toLowerCase();
+      const normB = tokenB.toLowerCase();
+      const pk = normA < normB ? `${normA}:${normB}` : `${normB}:${normA}`;
+      let nextPairAddr = factoryStorage[`pairAddr:${pk}`] || "";
+      if (!nextPairAddr) {
+        try {
+          const pairInfo = await callContract({
+            address: dexAddr,
+            caller: wallet.address || ZERO_ADDR,
+            fn: "GetPair",
+            args: [tokenA, tokenB],
+            value: "0"
+          });
+          nextPairAddr = pairInfo?.output || pairInfo?.result || nextPairAddr || "";
+        } catch {}
+      }
+      setPairAddr(nextPairAddr);
+      if (!nextPairAddr) {
+        setPool({ reserveA: "0", reserveB: "0", totalLP: "0", lpBalance: "0", tokenA: "", tokenB: "" });
+        return;
+      }
+
+      const pairData = await getContractStorage(nextPairAddr);
+      const s = pairData?.State?.storage ?? pairData?.State ?? {};
+      const r0 = s.reserve0 || "0";
+      const r1 = s.reserve1 || "0";
+      const totalLP = s.totalLP || "0";
+      const t0 = s.token0 || (normA < normB ? normA : normB);
+      const t1 = s.token1 || (normA < normB ? normB : normA);
+
+      // Align reserves to tokenA/tokenB order
+      let reserveA, reserveB;
+      if (normA === t0) { reserveA = r0; reserveB = r1; }
+      else               { reserveA = r1; reserveB = r0; }
+
+      // LP balance
+      let lpBal = "0";
+      if (wallet.address) {
+        const lpKey = `lp:${wallet.address.toLowerCase()}`;
+        const key = Object.keys(s).find(k => k.toLowerCase() === lpKey.toLowerCase());
+        lpBal = (key && s[key]) ? s[key] : "0";
+      }
+
+      setPool({ reserveA, reserveB, totalLP, lpBalance: lpBal, tokenA: t0, tokenB: t1 });
+
+      // auto-fetch token meta for non-native tokens
+      const fetchMeta = async (addr) => {
+        if (!addr || addr === "lqd" || !wallet.address) return;
+        try {
+          const m = await getTokenMeta(addr, wallet.address);
+          upsertToken({ address: addr, name: m.name || "Token", symbol: m.symbol || addr.slice(2, 6).toUpperCase(), decimals: m.decimals || "8" });
+          setTokens(loadTokens());
+        } catch {}
+      };
+      fetchMeta(t0); fetchMeta(t1);
+    } catch {
+      setPairAddr("");
+    }
+  }, [dexAddr, dexIsFactory, tokenA, tokenB, wallet.address]);
+
+  useEffect(() => {
+    refreshPool();
+    const id = setInterval(refreshPool, 3000);
+    return () => clearInterval(id);
+  }, [refreshPool]);
+
+  // Inspect the configured DEX contract and distinguish factory vs pool.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!dexAddr) {
+        if (alive) setDexValid(false);
+        if (alive) setDexKind("unknown");
+        return;
+      }
+      try {
+        const abi = await getContractAbi(dexAddr);
+        if (alive) setDexValid(true);
+        const names = new Set((abi || []).map((entry) => entry?.name).filter(Boolean));
+        const hasFactoryFns = names.has("CreatePair") || names.has("GetPair") || names.has("AllPairs");
+        const hasSwapFns = names.has("SwapAtoB") || names.has("SwapBtoA") || names.has("Init");
+        if (alive) setDexKind(hasFactoryFns ? "factory" : hasSwapFns ? "swap" : "unknown");
+        if (!hasFactoryFns && alive) {
+          setPairAddr("");
+          setPredictedPairAddr("");
+          setPool({ reserveA: "0", reserveB: "0", totalLP: "0", lpBalance: "0", tokenA: "", tokenB: "" });
+        }
+      } catch {
+        if (!alive) return;
+        setDexValid(false);
+        setDexKind("unknown");
+        setPairAddr("");
+        setPredictedPairAddr("");
+        setPool({ reserveA: "0", reserveB: "0", totalLP: "0", lpBalance: "0", tokenA: "", tokenB: "" });
+        localStorage.removeItem("lqd_dex_address");
+        setDexAddr("");
+        showToast("Stored DEX address was stale after the reset. Please deploy or set a fresh DEX contract.", "error");
+      }
+    })();
+    return () => { alive = false; };
+  }, [dexAddr]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!dexAddr || !dexIsFactory || !tokenA || !tokenB) {
+        if (alive) setPredictedPairAddr("");
+        return;
+      }
+      try {
+        const next = await derivePairAddress(dexAddr, tokenA, tokenB);
+        if (alive) setPredictedPairAddr(next);
+      } catch {
+        if (alive) setPredictedPairAddr("");
+      }
+    })();
+    return () => { alive = false; };
+  }, [dexAddr, dexIsFactory, tokenA, tokenB]);
+
+  // Auto-load the canonical public factory so every user shares the same DEX.
+  useEffect(() => {
+    let alive = true;
+    const syncCurrentFactory = async () => {
+      try {
+        const current = await getCurrentDexFactory();
+        if (!alive) return;
+        if (!current) {
+          setCanonicalDexAddr("");
+          return;
+        }
+        setCanonicalDexAddr(current);
+        const shouldAdopt = !dexAddr || !dexValid || dexKind !== "factory";
+        if (shouldAdopt && current !== dexAddr) {
+          if (!autoFactoryLoadedRef.current) {
+            showToast(`Loaded public DEX factory: ${shortAddr(current)}`, "success");
+            autoFactoryLoadedRef.current = true;
+          }
+          setDexAddr(current);
+          setDexValid(true);
+          setDexKind("factory");
+          localStorage.setItem("lqd_dex_address", current);
+        }
+      } catch {}
+    };
+    syncCurrentFactory();
+    const id = setInterval(syncCurrentFactory, 10000);
+    return () => { alive = false; clearInterval(id); };
+  }, [dexAddr, dexValid, dexKind]);
+
+  // ── Refresh allowances (declared before useEffect that uses it) ───────────
+  const refreshAllowances = useCallback(async () => {
+    if (!wallet.address || !dexAddr) return;
+    const next = { a: "0", b: "0" };
+    try {
+      const spender = approvalTargetAddr || "";
+      // Native LQD needs no approval — treat allowance as max
+      if (tokenA === "lqd") next.a = "999999999999999999";
+      else if (spender && tokenA?.startsWith("0x") && tokenA.length === 42) next.a = await getTokenAllowance(tokenA, wallet.address, spender);
+      if (tokenB === "lqd") next.b = "999999999999999999";
+      else if (spender && tokenB?.startsWith("0x") && tokenB.length === 42) next.b = await getTokenAllowance(tokenB, wallet.address, spender);
+    } catch {}
+    // Always take the max of fetched and the optimistic floor (ref persists across renders)
+    const floorA = minAllowanceRef.current.a;
+    const floorB = minAllowanceRef.current.b;
+    const resolvedA = safeBig(next.a) >= safeBig(floorA) ? next.a : floorA;
+    const resolvedB = safeBig(next.b) >= safeBig(floorB) ? next.b : floorB;
+    // Once on-chain confirms (fetched >= floor), clear the floor
+    if (safeBig(next.a) >= safeBig(floorA)) minAllowanceRef.current.a = "0";
+    if (safeBig(next.b) >= safeBig(floorB)) minAllowanceRef.current.b = "0";
+    setAllowances({ a: resolvedA, b: resolvedB });
+  }, [wallet.address, tokenA, tokenB, dexAddr, approvalTargetAddr]);
+
+  // ── Balances ──────────────────────────────────────────────────────────────
+  const refreshBalances = useCallback(async () => {
+    if (!wallet.address) { setBalances({ a: "", b: "" }); return; }
+    const next = { a: "", b: "" };
+    try {
+      if (tokenA) next.a = await getTokenBalance(tokenA, wallet.address);
+      if (tokenB) next.b = await getTokenBalance(tokenB, wallet.address);
+    } catch {}
+    setBalances(next);
+  }, [wallet.address, tokenA, tokenB]);
+
+  useEffect(() => {
+    refreshBalances();
+    const id = setInterval(refreshBalances, 4000);
+    return () => clearInterval(id);
+  }, [refreshBalances]);
+
+  // Poll allowances every 3s so they stay fresh after Approve TXs
+  useEffect(() => {
+    refreshAllowances();
+    const id = setInterval(refreshAllowances, 3000);
+    return () => clearInterval(id);
+  }, [refreshAllowances]);
+
+  // ── Base fee ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const load = async () => { try { setBaseFee((await getBaseFee()) || 0); } catch {} };
+    load();
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Validator info ────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (tab !== "Validate" || !wallet.address || !routeContractAddr || !tokenA || !tokenB) return;
+    callContract({ address: routeContractAddr, caller: wallet.address, fn: "GetValidatorLP", args: [tokenA, tokenB, wallet.address], value: "0" })
+      .then(r => setValInfo(r))
+      .catch(() => setValInfo(null));
+  }, [tab, wallet.address, routeContractAddr, tokenA, tokenB]);
+
+  // ── Close menus on outside click ─────────────────────────────────────────
+  useEffect(() => {
+    function handler(e) {
+      if (settingsRef.current && !settingsRef.current.contains(e.target)) setShowSettings(false);
+      if (walletMenuRef.current && !walletMenuRef.current.contains(e.target)) setShowWalletMenu(false);
+    }
+    if (showSettings || showWalletMenu) document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showSettings, showWalletMenu]);
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+  async function sendTx(contractAddress, fn, args, successMsg, nativeValue = "0", gas = 500000) {
+    setLoading(true);
+    try {
+      const res = await sendContractTx({
+        address: wallet.address, privateKey: wallet.privateKey,
+        contractAddress, fn, args, value: nativeValue,
+        gas,
+        gasPrice: baseFee ? baseFee + 1 : 0,
+        onPending: () => showToast("🔔 Open the LQD Wallet extension popup to approve this transaction", "info")
+      });
+      const hash = extractHash(res);
+      if (hash) {
+        const confirmed = await waitForTx(hash, 30000).catch(() => null);
+        if (txFailed(confirmed)) {
+          throw new Error(confirmed?.error || confirmed?.Error || confirmed?.failure_reason || "Transaction failed on-chain");
+        }
+      }
+      showToast(`${successMsg}${hash ? " · " + shortAddr(hash) : ""}`, "success");
+      // Refresh balances + pool after TX mines
+      await refreshPool();
+      await refreshAllowances();
+      await refreshBalances();
+      setTimeout(() => { refreshPool(); refreshAllowances(); refreshBalances(); }, 1500);
+      return true;
+    } catch (err) {
+      const msg = err.message || "Transaction failed";
+      if (msg.includes("runtime fingerprint mismatch")) {
+        showToast("This DEX contract is from an older backend build. Deploy/set a fresh factory + router, then retry.", "error");
+      } else {
+        showToast(msg, "error");
+      }
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // dec = token decimals so we convert human → raw before approving
+  async function doApprove(tokenAddr, humanAmt, dec = 8) {
+    if (!canSend || !tokenAddr) return;
+    if (!approvalTargetAddr) { showToast("Select both tokens and set the DEX address first", "error"); return; }
+    const rawAmt = parseHuman(humanAmt, dec) || "0";
+    const ok = await sendTx(tokenAddr, "Approve", [approvalTargetAddr, rawAmt], "Approved", "0", DEX_GAS.approve);
+    if (ok) {
+      // Set optimistic floor in ref — survives re-renders until on-chain confirms
+      if (tokenAddr === tokenA) minAllowanceRef.current.a = rawAmt;
+      if (tokenAddr === tokenB) minAllowanceRef.current.b = rawAmt;
+      // Optimistic UI update
+      setAllowances(prev => ({
+        ...prev,
+        ...(tokenAddr === tokenA ? { a: rawAmt } : {}),
+        ...(tokenAddr === tokenB ? { b: rawAmt } : {})
+      }));
+    }
+  }
+
+  async function doInitPool() {
+    if (!dexAddr) { showToast("Set DEX contract address in Settings first", "error"); return false; }
+    if (!tokenA || !tokenB) { showToast("Select both tokens first", "error"); return false; }
+    if (!dexIsFactory) { showToast("The configured DEX is not a factory contract. Deploy a fresh DEX first.", "error"); return false; }
+    // Factory uses CreatePair(tokenA, tokenB)
+    const ok = await sendTx(dexAddr, "CreatePair", [tokenA, tokenB], "Pair created — waiting for confirmation…", "0", DEX_GAS.createPair);
+    if (ok) {
+      await refreshPool();
+      await refreshAllowances();
+      showToast("Pool pair created. You can now add liquidity.", "success");
+    }
+    return ok;
+  }
+
+  async function doSwap() {
+    if (!canSend) { showToast("Connect wallet first", "error"); return; }
+    if (!poolHasLiquidity) { showToast("Pool not initialized — add liquidity after creating the pair", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
+    if (!amtIn || parseFloat(amtIn) <= 0) { showToast("Enter an amount", "error"); return; }
+    const deadlineMs = Math.max(1, parseInt(deadlineMinutes, 10) || 20) * 60 * 1000;
+    if (!quoteAt || Date.now() - quoteAt > deadlineMs) {
+      showToast("Quote expired. Refresh the amount or pool quote before swapping.", "error");
+      return;
+    }
+
+    // Convert human-readable input → raw base units for contract
+    const inDec = decA;
+    const rawIn = parseHuman(amtIn, inDec);
+
+    const slipBps = parseFloat(activeSlip) * 100;
+    if (impact > slipBps) {
+      const ok = window.confirm(`Price impact (${fmtBps(impact)}%) exceeds your slippage tolerance (${activeSlip}%). Continue?`);
+      if (!ok) return;
+    }
+
+    const tokenIn  = tokenA;
+    const tokenOut = tokenB;
+    const isNativeIn = tokenIn === "lqd";
+
+    // Native LQD doesn't need approval
+    if (!isNativeIn) {
+      const needApprove = safeBig(allowances.a) < safeBig(rawIn);
+      if (needApprove) {
+        showToast(`Approve ${symA} first`, "error");
+        return;
+      }
+    }
+
+    // minAmountOut with slippage (raw units)
+    const outDecNow = decB;
+    const rawOutBig = safeBig(parseHuman(amtOut, outDecNow));
+    const slip = parseFloat(activeSlip) / 100;
+    const minOut = ((rawOutBig * BigInt(Math.floor((1 - slip) * 10000))) / 10000n).toString();
+
+    const nativeValue = isNativeIn ? rawIn : "0";
+    const deadlineUnix = (Math.floor(Date.now() / 1000) + Math.max(1, parseInt(deadlineMinutes, 10) || 20) * 60).toString();
+    const ok = await sendTx(
+      routeContractAddr, "SwapExactTokensForTokensWithDeadline",
+      [rawIn, minOut, tokenIn, tokenOut, deadlineUnix],
+      "Swap submitted",
+      nativeValue,
+      DEX_GAS.swap
+    );
+    if (ok) { setAmtIn(""); setAmtOut(""); }
+  }
+
+  async function doAddLiquidity() {
+    if (!canSend) { showToast("Connect wallet first", "error"); return; }
+    if (!tokenA || !tokenB) { showToast("Select both tokens first", "error"); return; }
+    if (!liqA || !liqB) { showToast("Enter both amounts", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
+    await refreshPool();
+    if (!pairExists) { showToast("Create the pair first", "error"); return; }
+    const rawA = parseHuman(liqA, decA);
+    const rawB = parseHuman(liqB, decB);
+
+    // Check allowances — skip for native LQD (no approval needed)
+    await refreshAllowances();
+    if (tokenA !== "lqd") {
+      const freshA = await getTokenAllowance(tokenA, wallet.address, approvalTargetAddr).catch(() => "0");
+      if (safeBig(freshA) < safeBig(rawA)) { showToast(`Approve ${symA} first`, "error"); return; }
+    }
+    if (tokenB !== "lqd") {
+      const freshB = await getTokenAllowance(tokenB, wallet.address, approvalTargetAddr).catch(() => "0");
+      if (safeBig(freshB) < safeBig(rawB)) { showToast(`Approve ${symB} first`, "error"); return; }
+    }
+
+    // If tokenA or tokenB is native LQD, pass its amount as tx value
+    let nativeValue = "0";
+    if (tokenA === "lqd") nativeValue = rawA;
+    else if (tokenB === "lqd") nativeValue = rawB;
+
+    // Router/Factory: AddLiquidity(tokenA, tokenB, amountA, amountB)
+    const ok = await sendTx(routeContractAddr, "AddLiquidity", [tokenA, tokenB, rawA, rawB], "Liquidity added", nativeValue, DEX_GAS.liquidity);
+    if (ok) { setLiqA(""); setLiqB(""); setLiqScreen(null); }
+  }
+
+  async function doRemoveLiquidity() {
+    if (!canSend) { showToast("Connect wallet first", "error"); return; }
+    if (!lpBurn) { showToast("Enter LP amount to burn", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
+    await refreshPool();
+    if (!pairExists) { showToast("Create the pair first", "error"); return; }
+    const rawLp = parseHuman(lpBurn, 8);  // LP tokens always 8 decimals
+    // Router/Factory: RemoveLiquidity(tokenA, tokenB, lpAmount)
+    const ok = await sendTx(routeContractAddr, "RemoveLiquidity", [tokenA, tokenB, rawLp], "Liquidity removed", "0", DEX_GAS.liquidity);
+    if (ok) { setLpBurn(""); setLiqScreen(null); }
+  }
+
+  async function doLockLP() {
+    if (!canSend) { showToast("Connect wallet first", "error"); return; }
+    if (!tokenA || !tokenB) { showToast("Select the pool tokens first", "error"); return; }
+    if (!valLPAmt) { showToast("Enter LP amount", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
+    await refreshPool();
+    if (!pairExists) { showToast("Create the pair first", "error"); return; }
+    const days = parseInt(valDays, 10);
+    if (!days || days <= 0) { showToast("Invalid lock duration", "error"); return; }
+    const rawLP = parseHuman(valLPAmt, 8);  // LP tokens always 8 decimals
+    const ok = await sendTx(routeContractAddr, "LockLPForValidation", [tokenA, tokenB, rawLP, (days * SECS_PER_DAY).toString()], "LP locked for validation", "0", DEX_GAS.validation);
+    if (ok && pairAddr) {
+      try {
+        const registration = await registerDexValidator({ address: wallet.address, pairAddress: pairAddr });
+        const value = registration?.assessment?.locked_liquidity_usd;
+        showToast(value ? `Validator registered: $${Number(value).toFixed(2)} locked` : "Validator registered", "success");
+      } catch (err) {
+        showToast(err.message || "LP locked, validator registration needs review", "error");
+      }
+    }
+  }
+
+  async function doUnlockLP() {
+    if (!canSend) return;
+    if (!tokenA || !tokenB) { showToast("Select the pool tokens first", "error"); return; }
+    if (!routeContractAddr) { showToast("Set DEX router or factory address in Settings first", "error"); return; }
+    await refreshPool();
+    if (!pairExists) { showToast("Create the pair first", "error"); return; }
+    await sendTx(routeContractAddr, "UnlockValidatorLP", [tokenA, tokenB], "LP unlocked", "0", DEX_GAS.validation);
+  }
+
+  async function doImportToken() {
+    const addr = (importAddr || "").trim();
+    if (!addr) { showToast("Enter token address", "error"); return; }
+    if (!addr.startsWith("0x") || addr.length !== 42) {
+      showToast("Enter a valid token address", "error");
+      return;
+    }
+    try {
+      // Importing a token is read-only, so we can resolve metadata even before a wallet is connected.
+      const caller = wallet.address || ZERO_ADDR;
+      const m = await getTokenMeta(addr, caller);
+      const list = upsertToken({ address: addr, name: m.name || "Token", symbol: m.symbol || addr.slice(2, 6).toUpperCase(), decimals: m.decimals || "8" });
+      setTokens((current) => mergeTokens(current.filter(t => t.registry), list));
+      setImportAddr("");
+      showToast("Token imported", "success");
+    } catch (err) { showToast(err.message || "Import failed", "error"); }
+  }
+
+  async function getSigningPrivateKey() {
+    if (wallet.privateKey) return wallet.privateKey;
+    if (typeof window !== "undefined" && window.lqd) {
+      const res = await window.lqd.request({ method: "lqd_getPrivateKey" });
+      const pk = res?.result || res?.privateKey || "";
+      if (pk) return pk;
+    }
+    throw new Error("Private key not available. Unlock the LQD Wallet or connect with a web wallet.");
+  }
+
+  async function deployFreshDex() {
+    if (!wallet.address) { showToast("Connect wallet first", "error"); return; }
+    if (canonicalDexAddr) {
+      showToast("A public DEX factory is already deployed. Use the shared factory instead.", "info");
+      return;
+    }
+    if (!dexValid && dexAddr) {
+      localStorage.removeItem("lqd_dex_address");
+      setDexAddr("");
+    }
+    try {
+      setLoading(true);
+      let data = null;
+      if (typeof window !== "undefined" && window.lqd) {
+        try {
+          const res = await window.lqd.request({
+            method: "lqd_deployBuiltin",
+            params: [{
+              template: "dex_factory",
+              owner: wallet.address,
+              gas: 500000,
+              init_args: []
+            }],
+            onPending: () => showToast("Open the LQD Wallet extension popup to approve DEX deployment", "info")
+          });
+          data = res?.result || res;
+        } catch (err) {
+          const msg = err?.message || String(err || "");
+          if (msg.toLowerCase().includes("method not supported") || msg.toLowerCase().includes("unsupported")) {
+            if (wallet.privateKey) {
+              const resp = await fetch(`${nodeUrl}/contract/deploy-builtin`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  template: "dex_factory",
+                  owner: wallet.address,
+                  private_key: wallet.privateKey,
+                  gas: 500000,
+                  init_args: []
+                })
+              });
+              const text = await resp.text();
+              try { data = JSON.parse(text); } catch { data = { raw: text }; }
+              if (!resp.ok) throw new Error(data?.error || text || "DEX deploy failed");
+            } else {
+              throw new Error("The LQD Wallet extension needs a reload to enable factory deployment. Open chrome://extensions, click Reload on LQD Wallet, then try again.");
+            }
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        const pk = await getSigningPrivateKey();
+        const resp = await fetch(`${nodeUrl}/contract/deploy-builtin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            template: "dex_factory",
+            owner: wallet.address,
+            private_key: pk,
+            gas: 500000,
+            init_args: []
+          })
+        });
+        const text = await resp.text();
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
+        if (!resp.ok) throw new Error(data?.error || text || "DEX deploy failed");
+      }
+      const addr = data.address || data.contract_address || data.result?.address || "";
+      if (!addr) throw new Error("DEX deploy returned no contract address");
+      setDexAddr(addr);
+      setDexValid(true);
+      setDexKind("factory");
+      setCanonicalDexAddr(addr);
+      localStorage.setItem("lqd_dex_address", addr);
+      showToast(`DEX deployed: ${shortAddr(addr)}`, "success");
+      await refreshPool();
+      await refreshAllowances();
+      const abi = await getContractAbi(addr).catch(() => []);
+      const names = new Set((abi || []).map((entry) => entry?.name).filter(Boolean));
+      setDexKind(names.has("CreatePair") || names.has("GetPair") || names.has("AllPairs") ? "factory" : "unknown");
+    } catch (err) {
+      showToast(err.message || "DEX deploy failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function connectExtension() {
+    if (!window.lqd) { showToast("LQD Wallet extension not found. Install it first.", "error"); return; }
+    try {
+      showToast("Waiting for approval in LQD Wallet…", "info");
+      const accs = await window.lqd.request({
+        method: "lqd_connect",
+        // onPending fires when background queues the approval request
+        onPending: () => showToast("Open the LQD Wallet extension popup to approve", "info"),
+      });
+      const a = Array.isArray(accs) ? accs[0] : "";
+      if (a) {
+        setWallet({ address: a, privateKey: "" });
+        setUsingExt(true);
+        showToast("Wallet connected: " + shortAddr(a), "success");
+      } else {
+        showToast("No account returned from extension", "error");
+      }
+    } catch (err) {
+      const msg = err?.message || "Connect failed";
+      if (msg.toLowerCase().includes("rejected")) {
+        showToast("Connection rejected by user", "error");
+      } else {
+        showToast(msg, "error");
+      }
+    }
+  }
+
+  function connectWebWallet() {
+    popupRef.current = window.open(WEB_WALLET_URL, "lqd_wallet", "width=420,height=720");
+  }
+
+  function disconnectWallet() {
+    setWallet({ address: "", privateKey: "" });
+    setUsingExt(false);
+    setBalances({ a: "", b: "" });
+    setAllowances({ a: "0", b: "0" });
+    setShowWalletMenu(false);
+    showToast("Wallet disconnected", "info");
+  }
+
+  function swapSides() {
+    setTokenA(tokenB);
+    setTokenB(tokenA);
+    setAmtIn(amtOut || "");
+    setAmtOut("");
+  }
+
+  function quoteAddLiquidityAmount(amountHuman, fromField = "A") {
+    if (!pairExists || !poolHasLiquidity || !amountHuman || parseFloat(amountHuman) <= 0) return "";
+    const reserveIn = fromField === "A" ? safeBig(pool.reserveA) : safeBig(pool.reserveB);
+    const reserveOut = fromField === "A" ? safeBig(pool.reserveB) : safeBig(pool.reserveA);
+    const inDec = fromField === "A" ? decA : decB;
+    const outDec = fromField === "A" ? decB : decA;
+    const rawIn = safeBig(parseHuman(amountHuman, inDec));
+    if (rawIn <= 0n || reserveIn <= 0n || reserveOut <= 0n) return "";
+    const rawOut = (rawIn * reserveOut) / reserveIn;
+    return fmtAmount(rawOut.toString(), outDec);
+  }
+
+  function handleLiqAChange(v) {
+    setLiqA(v);
+    if (!v) { setLiqB(""); return; }
+    const q = quoteAddLiquidityAmount(v, "A");
+    if (q) setLiqB(q);
+  }
+
+  function handleLiqBChange(v) {
+    setLiqB(v);
+    if (!v) { setLiqA(""); return; }
+    const q = quoteAddLiquidityAmount(v, "B");
+    if (q) setLiqA(q);
+  }
+
+  async function derivePairAddress(factoryAddr, tokenX, tokenY) {
+    const a = (tokenX || "").toLowerCase().trim();
+    const b = (tokenY || "").toLowerCase().trim();
+    if (!factoryAddr || !a || !b || a === b) return "";
+    const [t0, t1] = a < b ? [a, b] : [b, a];
+    const input = `${factoryAddr.toLowerCase()}:${t0}:${t1}`;
+    const bytes = new TextEncoder().encode(input);
+    const hash = await window.crypto.subtle.digest("SHA-256", bytes);
+    const hex = Array.from(new Uint8Array(hash).slice(0, 20))
+      .map((n) => n.toString(16).padStart(2, "0"))
+      .join("");
+    return `0x${hex}`;
+  }
+
+  function openTokenModal(target) { setModalTarget(target); setModalSearch(""); setModalOpen(true); }
+  function selectToken(addr) {
+    if (modalTarget === "A") setTokenA(addr);
+    else setTokenB(addr);
+    setModalOpen(false);
+  }
+
+  const refreshStrategyStatus = useCallback(async () => {
+    const data = await getDynamicLiquidityStatus();
+    setStrategyStatus(data);
+    const safety = data?.safety || data?.vault_safety;
+    if (safety) {
+      if (safety.min_out_bps) setVaultMinOutBps(String(safety.min_out_bps));
+      if (safety.max_move_bps) setVaultMaxMoveBps(String(safety.max_move_bps));
+      if (safety.min_rebalance_interval_s) setVaultInterval(String(safety.min_rebalance_interval_s));
+    }
+    return data;
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "Strategy") return;
+    refreshStrategyStatus().catch(e => showToast(e.message || "Strategy status unavailable", "error"));
+  }, [tab, refreshStrategyStatus]);
+
+  async function runKeeperTrigger() {
+    setLoading(true);
+    try {
+      localStorage.setItem("lqd_keeper_api_key", keeperKey);
+      const data = await triggerDynamicLiquidity({ apiKey: keeperKey, reason: "keeper-ui" });
+      setStrategyStatus(s => ({ ...(s || {}), metrics: data.metrics || [], timestamp: data.timestamp }));
+      showToast(`Keeper updated ${data.metrics?.length || 0} pools`, "success");
+    } catch (e) {
+      showToast(e.message || "Keeper trigger failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveOracleSignal() {
+    if (!oraclePair) {
+      showToast("Pair address required", "error");
+      return;
+    }
+    setLoading(true);
+    try {
+      localStorage.setItem("lqd_keeper_api_key", keeperKey);
+      await setDynamicLiquidityOracle({
+        pairAddress: oraclePair,
+        demandBps: oracleDemand,
+        source: "keeper-ui",
+        apiKey: keeperKey
+      });
+      const data = await refreshStrategyStatus();
+      showToast(`Oracle signal saved (${data.oracle_signals?.length || 0} active)`, "success");
+    } catch (e) {
+      showToast(e.message || "Oracle update failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveVaultSafety() {
+    setLoading(true);
+    try {
+      localStorage.setItem("lqd_keeper_api_key", keeperKey);
+      const data = await setStrategyVaultSafety({
+        minOutBps: vaultMinOutBps,
+        maxMoveBps: vaultMaxMoveBps,
+        minRebalanceIntervalS: vaultInterval,
+        apiKey: keeperKey
+      });
+      setStrategyStatus(s => ({ ...(s || {}), safety: data.safety }));
+      showToast("Vault safety saved", "success");
+    } catch (e) {
+      showToast(e.message || "Vault safety update failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── Filtered token list ───────────────────────────────────────────────────
+  const filteredTokens = tokens.filter(t => {
+    const q = modalSearch.toLowerCase();
+    return t.address.toLowerCase().includes(q) || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q);
+  });
+
+  // ── Pool share pct ─────────────────────────────────────────────────────────
+  const totalLPBig = safeBig(pool.totalLP);
+  const lpBalBig   = safeBig(pool.lpBalance);
+  const sharePct   = totalLPBig > 0n && lpBalBig > 0n
+    ? Number((lpBalBig * 10000n) / totalLPBig) / 100
+    : 0;
+
+  // ── Impact colour ─────────────────────────────────────────────────────────
+  const impactClass = impact < 100 ? "impact-low" : impact < 500 ? "impact-mid" : "impact-high";
+
+  // ── Spot price display ────────────────────────────────────────────────────
+  const resA = safeBig(pool.reserveA);
+  const resB = safeBig(pool.reserveB);
+  const spotPrice = resA > 0n
+    ? (Number(resB * 10000n / resA) / 10000).toFixed(4)
+    : null;
+  const strategyRows = Array.isArray(strategyStatus?.metrics) ? strategyStatus.metrics : [];
+  const oracleSignals = Array.isArray(strategyStatus?.oracle_signals) ? strategyStatus.oracle_signals : [];
+
+  // ════════════════════════════════════════════════════════════════════════════
+  return (
+    <div className="app">
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <header className="header">
+        <div className="brand">
+          <div className="brand-logo">L</div>
+          <div>
+            <span className="brand-name">LQD Swap</span>
+            <span className="brand-sub">Proof of Dynamic Liquidity</span>
+          </div>
+        </div>
+
+        <nav className="nav-tabs">
+          {TABS.map(t => (
+            <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>
+          ))}
+        </nav>
+
+        <div className="header-right">
+          {wallet.address ? (
+            <div style={{ position: "relative" }} ref={walletMenuRef}>
+              <button
+                className="wallet-btn"
+                onClick={() => setShowWalletMenu(m => !m)}
+                title="Wallet options"
+              >
+                <span className="dot" style={{ background: walletConnected ? "var(--green)" : "var(--yellow)" }} />
+                {shortAddr(wallet.address)}
+                <span style={{ fontSize: 10, marginLeft: 2, color: "var(--muted)" }}>▾</span>
+              </button>
+
+              {showWalletMenu && (
+                <div className="wallet-dropdown">
+                  <div className="wallet-dropdown-addr">
+                    <span className="dot" style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--green)", display: "inline-block", marginRight: 6 }} />
+                    {wallet.address}
+                  </div>
+                  <button className="wallet-dropdown-item" onClick={() => { navigator.clipboard.writeText(wallet.address); showToast("Address copied!", "success"); setShowWalletMenu(false); }}>
+                    📋 Copy Address
+                  </button>
+                  <button className="wallet-dropdown-item" onClick={() => { setTab("Settings"); setShowWalletMenu(false); }}>
+                    ⚙ Settings
+                  </button>
+                  <div className="wallet-dropdown-divider" />
+                  <button className="wallet-dropdown-item disconnect" onClick={disconnectWallet}>
+                    🔌 Disconnect
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button className="wallet-btn" onClick={connectExtension}>
+              <span className="dot red" />
+              Connect Wallet
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* ── Mobile bottom tabs ───────────────────────────────────────────── */}
+      <nav className="mobile-tabs">
+        {TABS.map(t => (
+          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>
+        ))}
+      </nav>
+
+      {/* ══════════════════ SWAP TAB ══════════════════════════════════════ */}
+      {tab === "Swap" && (
+        <main className="page">
+          <div style={{ width: "100%", maxWidth: 480 }}>
+            <div className="card">
+              {/* Card header */}
+              <div className="card-header">
+                <span className="card-title">Swap</span>
+                <div style={{ position: "relative" }} ref={settingsRef}>
+                  <button className="icon-btn" onClick={() => setShowSettings(s => !s)} title="Settings">⚙</button>
+                  {showSettings && (
+                    <div className="settings-popover">
+                      <h3>Slippage Tolerance</h3>
+                      <div className="slippage-btns">
+                        {SLIPPAGE_PRESETS.map(p => (
+                          <button key={p} className={slippage === p && !customSlip ? "active" : ""}
+                            onClick={() => { setSlippage(p); setCustomSlip(""); }}
+                          >{p}%</button>
+                        ))}
+                      </div>
+                      <input className="settings-input" placeholder="Custom %" type="number" step="0.1"
+                        value={customSlip} onChange={e => setCustomSlip(e.target.value)} />
+                      <div className="settings-row">
+                        <span>Active: {activeSlip}%</span>
+                        {parseFloat(activeSlip) > 5 && <span style={{ color: "var(--yellow)" }}>⚠ High</span>}
+                      </div>
+                      <div className="settings-row" style={{ marginTop: 10 }}>
+                        <span>Quote deadline</span>
+                        <input
+                          className="settings-input"
+                          style={{ width: 86 }}
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={deadlineMinutes}
+                          onChange={(e) => setDeadlineMinutes(e.target.value.replace(/[^\d]/g, "") || "1")}
+                        />
+                        <span>min</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* You Pay */}
+              <div className="token-box">
+                <div className="token-box-label">You Pay</div>
+                <div className="token-box-row">
+                  <input
+                    className="token-amount-input"
+                    type="number"
+                    placeholder="0"
+                    value={amtIn}
+                    onChange={e => setAmtIn(e.target.value)}
+                  />
+                  <button
+                    className={`token-select-btn${!tokenA ? " unset" : ""}`}
+                    onClick={() => openTokenModal("A")}
+                  >
+                    {tokenA ? <><TokenIcon symbol={symA} logoUrl={tokenAInfo?.logoUrl} />{symA}</> : "Select token"}
+                    <span className="arrow">▾</span>
+                  </button>
+                </div>
+                <div className="token-balance">
+                  <span>Balance: {balances.a ? fmtAmount(balances.a, decA) : "–"}</span>
+                  {balances.a && balances.a !== "0" && (
+                    <span className="balance-max" onClick={() => setAmtIn(fmtAmount(balances.a, decA))}>MAX</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Swap direction arrow */}
+              <div className="swap-arrow-wrap">
+                <button className="swap-arrow-btn" onClick={swapSides}>↕</button>
+              </div>
+
+              {/* You Receive */}
+              <div className="token-box">
+                <div className="token-box-label">You Receive</div>
+                <div className="token-box-row">
+                  <input
+                    className="token-amount-input"
+                    type="number"
+                    placeholder="0"
+                    value={amtOut}
+                    readOnly
+                  />
+                  <button
+                    className={`token-select-btn${!tokenB ? " unset" : ""}`}
+                    onClick={() => openTokenModal("B")}
+                  >
+                    {tokenB ? <><TokenIcon symbol={symB} logoUrl={tokenBInfo?.logoUrl} />{symB}</> : "Select token"}
+                    <span className="arrow">▾</span>
+                  </button>
+                </div>
+                <div className="token-balance">
+                  <span>Balance: {balances.b ? fmtAmount(balances.b, decB) : "–"}</span>
+                </div>
+              </div>
+
+              {/* Price info strip */}
+              {spotPrice && amtIn && amtOut && (
+                <div className="price-strip">
+                  <div className="price-row">
+                    <span className="price-label">Rate</span>
+                    <span>1 {symA} = {spotPrice} {symB}</span>
+                  </div>
+                  <div className="price-row">
+                    <span className="price-label">Price Impact</span>
+                    <span className={impactClass}>{fmtBps(impact)}%</span>
+                  </div>
+                  <div className="price-row">
+                    <span className="price-label">Fee (0.3%)</span>
+                    <span>{fmtAmount((safeBig(parseHuman(amtIn, decA)) * 3n / 1000n).toString(), decA)} {symA}</span>
+                  </div>
+                  <div className="price-row">
+                    <span className="price-label">Min Received ({activeSlip}% slippage)</span>
+                    <span>{fmtAmount(minReceived)} {symB}</span>
+                  </div>
+                  <div className="price-row">
+                    <span className="price-label">Route</span>
+                    <span>{symA} → {symB}{routeInfo ? ` · ${routeInfo}` : (routerAddr ? " · Router" : " · Factory fallback")}</span>
+                  </div>
+                  <div className="price-row">
+                    <span className="price-label">Quote Deadline</span>
+                    <span>{deadlineMinutes || "1"} min</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Approve buttons (only shown if needed) */}
+              {tokenA && tokenA !== "lqd" && safeBig(allowances.a) < safeBig(parseHuman(amtIn, decA)) && amtIn && (
+                <button className="action-btn secondary" onClick={() => doApprove(tokenA, amtIn, decA)} disabled={loading}>
+                  Approve {symA}
+                </button>
+              )}
+
+              {/* Main swap button — label matches the actual blocking reason */}
+              <button
+                className={`action-btn${impact > 1500 ? " warn" : ""}`}
+                onClick={!walletConnected ? connectExtension : doSwap}
+                disabled={loading || (walletConnected && (!dexAddr || !amtIn))}
+              >
+                {loading
+                  ? <span className="spinner" />
+                  : !walletConnected
+                    ? "Connect Wallet"
+                    : !dexAddr
+                      ? "Set DEX Address in Settings ⚙"
+                      : !tokenA || !tokenB
+                        ? "Select Tokens"
+                        : !amtIn
+                          ? "Enter Amount"
+                          : "Swap"}
+              </button>
+            </div>
+
+            {/* Pool info below swap */}
+              {poolHasLiquidity && (
+                <div className="notice" style={{ marginTop: 12, fontSize: 12 }}>
+                  <strong>Pool:</strong> Reserve {symA}: {fmtAmount(pool.reserveA)} · Reserve {symB}: {fmtAmount(pool.reserveB)} · Total LP: {fmtAmount(pool.totalLP)}
+                </div>
+              )}
+          </div>
+        </main>
+      )}
+
+      {/* ══════════════════ POOL TAB ══════════════════════════════════════ */}
+      {tab === "Pool" && (
+        <main className="page">
+          <div className="page-wide">
+
+            {/* ── Add liquidity sub-screen ─────────────────────────────────── */}
+            {liqScreen === "add" && (
+                <div className="liq-panel">
+                  <div className="liq-panel-header">
+                    <button className="back-btn" onClick={() => setLiqScreen(null)}>←</button>
+                    <span className="card-title">Add Liquidity</span>
+                  </div>
+
+                  <div className="liq-section">
+                    {!dexIsFactory && (
+                      <div className="notice error" style={{ marginBottom: 12, fontSize: 12 }}>
+                      <div style={{ marginBottom: 8 }}>
+                        The configured DEX address is not a factory contract, so pool creation and liquidity adds cannot run here.
+                      </div>
+                      <button className="action-btn secondary" style={{ margin: 0 }} onClick={deployFreshDex} disabled={deployFreshDexDisabled}>
+                        {loading ? <span className="spinner" /> : deployFreshDexLabel}
+                      </button>
+                    </div>
+                  )}
+                    {displayedPairAddr && (
+                      <div className="notice" style={{ marginBottom: 12, fontSize: 12 }}>
+                        <div style={{ marginBottom: 6 }}>
+                          <strong>Pair:</strong> {shortAddr(displayedPairAddr)}
+                        </div>
+                      <div>
+                        <strong>Reserves:</strong> {fmtAmount(pool.reserveA)} {symA} · {fmtAmount(pool.reserveB)} {symB}
+                      </div>
+                    </div>
+                  )}
+                  {!pairExists && approvalTargetAddr && (
+                      <div className="notice" style={{ marginBottom: 12, fontSize: 12 }}>
+                        Pair has not been created yet. Approvals will target the future pair contract, and the real pair address will appear after you click Create Pool.
+                      </div>
+                    )}
+                    {pairExists && poolHasLiquidity && (
+                      <div className="notice" style={{ marginBottom: 12, fontSize: 12 }}>
+                        Enter either amount and the other side will auto-calculate from the current pool ratio.
+                      </div>
+                    )}
+                    <div className="liq-label">Token {symA !== "–" ? symA : "A"}</div>
+                    <div className="token-box" style={{ marginBottom: 10 }}>
+                      <div className="token-box-row">
+                        <input className="token-amount-input" type="number" placeholder="0"
+                        value={liqA} onChange={e => handleLiqAChange(e.target.value)} />
+                      <button className="token-select-btn" onClick={() => openTokenModal("A")}>
+                        {tokenA ? <><TokenIcon symbol={symA} logoUrl={tokenAInfo?.logoUrl} />{symA}</> : "Select"}
+                        <span className="arrow">▾</span>
+                      </button>
+                    </div>
+                    <div className="token-balance">Balance: {balances.a ? fmtAmount(balances.a, decA) : "–"}</div>
+                  </div>
+
+                  <div style={{ textAlign: "center", marginBottom: 10, color: "var(--muted)" }}>+</div>
+
+                  <div className="liq-label">Token {symB !== "–" ? symB : "B"}</div>
+                  <div className="token-box" style={{ marginBottom: 16 }}>
+                    <div className="token-box-row">
+                      <input className="token-amount-input" type="number" placeholder="0"
+                        value={liqB} onChange={e => handleLiqBChange(e.target.value)} />
+                      <button className="token-select-btn" onClick={() => openTokenModal("B")}>
+                        {tokenB ? <><TokenIcon symbol={symB} logoUrl={tokenBInfo?.logoUrl} />{symB}</> : "Select"}
+                        <span className="arrow">▾</span>
+                      </button>
+                    </div>
+                    <div className="token-balance">Balance: {balances.b ? fmtAmount(balances.b, decB) : "–"}</div>
+                  </div>
+
+                    {approvalTargetAddr ? (
+                      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                      {safeBig(allowances.a) < safeBig(parseHuman(liqA, decA)) && liqA && (
+                        <button className="action-btn secondary" style={{ margin: 0 }} onClick={() => doApprove(tokenA, liqA, decA)} disabled={loading}>
+                          Approve {symA}
+                        </button>
+                      )}
+                      {safeBig(allowances.b) < safeBig(parseHuman(liqB, decB)) && liqB && (
+                        <button className="action-btn secondary" style={{ margin: 0 }} onClick={() => doApprove(tokenB, liqB, decB)} disabled={loading}>
+                          Approve {symB}
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="notice" style={{ marginBottom: 10, fontSize: 12 }}>
+                      Select both tokens and the DEX address to approve the future pair contract.
+                    </div>
+                  )}
+
+                  {!pairExists && (
+                    <button className="action-btn secondary" style={{ margin: "0 0 10px" }} onClick={doInitPool} disabled={loading}>
+                      Create Pool
+                    </button>
+                  )}
+
+                  <button className="action-btn" style={{ margin: 0 }} onClick={doAddLiquidity} disabled={loading || !canSend || !pairExists}>
+                    {loading ? <span className="spinner" /> : pairExists ? "Add Liquidity" : "Create Pool First"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Remove liquidity sub-screen ──────────────────────────────── */}
+            {liqScreen === "remove" && (
+              <div className="liq-panel">
+                <div className="liq-panel-header">
+                  <button className="back-btn" onClick={() => setLiqScreen(null)}>←</button>
+                  <span className="card-title">Remove Liquidity</span>
+                </div>
+                <div className="liq-section">
+                  <div className="pool-stat" style={{ marginBottom: 16 }}>
+                    <div className="pool-stat-label">Your LP Balance</div>
+                    <div className="pool-stat-value">{fmtAmount(pool.lpBalance)}</div>
+                  </div>
+                  {sharePct > 0 && (
+                    <>
+                      <div className="liq-label">Your Pool Share: {sharePct.toFixed(2)}%</div>
+                      <div className="liq-share-bar">
+                        <div className="liq-share-fill" style={{ width: Math.min(sharePct, 100) + "%" }} />
+                      </div>
+                    </>
+                  )}
+                  <div className="field" style={{ marginTop: 16 }}>
+                    <label>LP Amount to Burn</label>
+                    <input type="number" placeholder="0" value={lpBurn} onChange={e => setLpBurn(e.target.value)} />
+                  </div>
+                  {lpBurn && pool.totalLP !== "0" && (
+                    <div className="notice" style={{ marginBottom: 12 }}>
+                      You will receive approx{" "}
+                      {fmtAmount((safeBig(parseHuman(lpBurn, 8)) * safeBig(pool.reserveA) / safeBig(pool.totalLP)).toString(), decA)} {symA}
+                      {" + "}
+                      {fmtAmount((safeBig(parseHuman(lpBurn, 8)) * safeBig(pool.reserveB) / safeBig(pool.totalLP)).toString(), decB)} {symB}
+                    </div>
+                  )}
+                  <button className="action-btn" style={{ margin: 0 }} onClick={doRemoveLiquidity} disabled={loading || !canSend}>
+                    {loading ? <span className="spinner" /> : "Remove Liquidity"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Default pool view ────────────────────────────────────────── */}
+            {!liqScreen && (
+              <>
+                <div className="pool-header">
+                  <h2>Liquidity</h2>
+                  <button className="pool-btn primary" style={{ width: "auto", padding: "10px 20px" }}
+                    onClick={() => setLiqScreen("add")}>
+                    + New Position
+                  </button>
+                </div>
+
+                {poolHasLiquidity ? (
+                  <div className="pool-card">
+                    <div className="pool-pair">
+                      <div className="pool-icons">
+                        <TokenIcon symbol={symA} logoUrl={tokenAInfo?.logoUrl} size={28} />
+                        <TokenIcon symbol={symB} logoUrl={tokenBInfo?.logoUrl} size={28} />
+                      </div>
+                      <div>
+                        <div className="pool-pair-name">{symA} / {symB}</div>
+                        <div className="pool-pair-sub">0.3% fee · Uniswap v2 AMM</div>
+                      </div>
+                    </div>
+
+                    <div className="pool-stats">
+                      <div className="pool-stat">
+                        <div className="pool-stat-label">Pair Address</div>
+                        <div className="pool-stat-value" style={{ fontSize: 14, wordBreak: "break-all" }}>
+                          {shortAddr(pairAddr || displayedPairAddr || "—")}
+                        </div>
+                      </div>
+                      <div className="pool-stat">
+                        <div className="pool-stat-label">Reserve {symA}</div>
+                        <div className="pool-stat-value">{fmtAmount(pool.reserveA)}</div>
+                      </div>
+                      <div className="pool-stat">
+                        <div className="pool-stat-label">Reserve {symB}</div>
+                        <div className="pool-stat-value">{fmtAmount(pool.reserveB)}</div>
+                      </div>
+                      <div className="pool-stat">
+                        <div className="pool-stat-label">Total LP</div>
+                        <div className="pool-stat-value">{fmtAmount(pool.totalLP)}</div>
+                      </div>
+                      <div className="pool-stat">
+                        <div className="pool-stat-label">Your LP</div>
+                        <div className="pool-stat-value">{fmtAmount(pool.lpBalance)}</div>
+                      </div>
+                    </div>
+
+                    {sharePct > 0 && (
+                      <div className="notice" style={{ marginBottom: 12 }}>
+                        Your share: <strong>{sharePct.toFixed(2)}%</strong>
+                        {" · "}{fmtAmount((lpBalBig * resA / totalLPBig).toString())} {symA}
+                        {" + "}{fmtAmount((lpBalBig * resB / totalLPBig).toString())} {symB}
+                      </div>
+                    )}
+
+                    <div className="pool-actions">
+                      <button className="pool-btn primary" onClick={() => setLiqScreen("add")}>Add</button>
+                      <button className="pool-btn secondary" onClick={() => setLiqScreen("remove")}>Remove</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="pool-card" style={{ textAlign: "center", padding: "40px 20px" }}>
+                    <div style={{ fontSize: 48, marginBottom: 12 }}>💧</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{pairExists ? "Pool ready for first liquidity" : "No pool yet"}</div>
+                    <div style={{ color: "var(--text2)", marginBottom: 20 }}>
+                      {pairExists
+                        ? "Pair exists. Add the first liquidity position to initialize reserves."
+                      : "Create a new liquidity pool by adding your first position."}
+                    </div>
+                    {!dexIsFactory && (
+                      <div className="notice error" style={{ marginBottom: 16, textAlign: "left" }}>
+                        <div style={{ marginBottom: 8 }}>The configured DEX is a pool contract, not a factory. Create Pair cannot work here.</div>
+                        <button className="pool-btn secondary" style={{ maxWidth: 200, margin: 0 }} onClick={deployFreshDex} disabled={deployFreshDexDisabled}>
+                          {loading ? <span className="spinner" /> : deployFreshDexLabel}
+                        </button>
+                      </div>
+                    )}
+                    {pairExists && (
+                      <div className="notice" style={{ marginBottom: 16, textAlign: "left" }}>
+                        <div><strong>Pair Address:</strong> {shortAddr(displayedPairAddr || pairAddr)}</div>
+                        <div><strong>Reserve {symA}:</strong> {fmtAmount(pool.reserveA)}</div>
+                        <div><strong>Reserve {symB}:</strong> {fmtAmount(pool.reserveB)}</div>
+                        <div><strong>Total LP:</strong> {fmtAmount(pool.totalLP)}</div>
+                      </div>
+                    )}
+                    {!pairExists && approvalTargetAddr && (
+                      <div className="notice" style={{ marginBottom: 16, textAlign: "left" }}>
+                        <div><strong>Pair:</strong> not created yet</div>
+                        <div><strong>Status:</strong> approvals can already target the future pair contract</div>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+                      {!pairExists && dexIsFactory && (
+                        <button className="pool-btn secondary" style={{ maxWidth: 200, margin: "0 auto" }}
+                          onClick={doInitPool}>
+                          Create Pool
+                        </button>
+                      )}
+                      <button className="pool-btn primary" style={{ maxWidth: 200, margin: "0 auto" }}
+                        onClick={() => setLiqScreen("add")}>
+                        Add Liquidity
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </main>
+      )}
+
+      {/* ══════════════════ STRATEGY TAB ════════════════════════════════ */}
+      {tab === "Strategy" && (
+        <main className="page">
+          <div className="page-wide">
+            <div className="pool-header">
+              <h2>Dynamic Liquidity</h2>
+              <button className="pool-btn secondary" style={{ width: "auto", padding: "10px 20px" }}
+                onClick={() => refreshStrategyStatus().then(() => showToast("Strategy refreshed", "success")).catch(e => showToast(e.message || "Refresh failed", "error"))}>
+                Refresh
+              </button>
+            </div>
+
+			<div className="notice error" role="alert" style={{ marginBottom: 14, lineHeight: 1.55 }}>
+			  <strong>Vault capital is at risk.</strong> Dynamic rebalancing can realize impermanent loss, slippage,
+			  depeg loss, oracle error and smart-contract loss. Withdrawal returns the current proportional asset
+			  value—not the original deposit or fiat value. Review NAV versus the HODL benchmark, withdrawal delay,
+			  current oracle health and minimum-output protection before depositing or approving a keeper action.
+			</div>
+
+            <div className="pool-card" style={{ marginBottom: 14 }}>
+              <div className="pool-stats">
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Tracked Pools</div>
+                  <div className="pool-stat-value">{strategyRows.length}</div>
+                </div>
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Oracle Signals</div>
+                  <div className="pool-stat-value">{oracleSignals.length}</div>
+                </div>
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Max Weight Step</div>
+                  <div className="pool-stat-value">{strategyStatus?.max_weight_step || "—"}</div>
+                </div>
+                <div className="pool-stat">
+                  <div className="pool-stat-label">Oracle TTL</div>
+                  <div className="pool-stat-value">{strategyStatus?.max_oracle_age_seconds || "—"}s</div>
+                </div>
+              </div>
+
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ color: "var(--text2)", textAlign: "left" }}>
+                      <th style={{ padding: "8px 6px" }}>Pair</th>
+                      <th style={{ padding: "8px 6px" }}>Demand</th>
+                      <th style={{ padding: "8px 6px" }}>Oracle</th>
+                      <th style={{ padding: "8px 6px" }}>Price</th>
+                      <th style={{ padding: "8px 6px" }}>Weight</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {strategyRows.length === 0 ? (
+                      <tr><td colSpan="5" style={{ padding: 12, color: "var(--text2)" }}>No DEX pairs found yet.</td></tr>
+                    ) : strategyRows.map(row => (
+                      <tr key={row.pair_address} style={{ borderTop: "1px solid var(--border)" }}>
+                        <td style={{ padding: "10px 6px" }}>
+                          <div style={{ fontWeight: 700 }}>{row.token0 || "?"} / {row.token1 || "?"}</div>
+                          <div style={{ color: "var(--text2)" }}>{shortAddr(row.pair_address)}</div>
+                        </td>
+                        <td style={{ padding: "10px 6px" }}>{row.demand_weight || 0}</td>
+                        <td style={{ padding: "10px 6px" }}>{row.oracle_demand_bps || 0} bps</td>
+                        <td style={{ padding: "10px 6px" }}>+{row.price_bonus || 0}</td>
+                        <td style={{ padding: "10px 6px", fontWeight: 800 }}>
+                          {row.routing_weight || 0}{row.safety_capped ? " capped" : ""}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="settings-grid">
+              <div className="settings-section">
+                <h3>Keeper Trigger</h3>
+                <div className="field">
+                  <label>Admin API Key</label>
+                  <input type="password" value={keeperKey}
+                    onChange={e => setKeeperKey(e.target.value)}
+                    placeholder="X-API-Key when LQD_API_KEY is set" />
+                </div>
+                <button className="action-btn secondary" style={{ margin: "8px 0 0" }} onClick={runKeeperTrigger} disabled={loading}>
+                  {loading ? <span className="spinner" /> : "Run Keeper Epoch"}
+                </button>
+              </div>
+
+              <div className="settings-section">
+                <h3>Oracle Demand</h3>
+                <div className="field">
+                  <label>Pair Address</label>
+                  <input value={oraclePair} onChange={e => setOraclePair(e.target.value)} placeholder="0x..." />
+                </div>
+                <div className="field">
+                  <label>Demand Bps</label>
+                  <input type="number" min="0" max="10000" value={oracleDemand}
+                    onChange={e => setOracleDemand(e.target.value)} />
+                </div>
+                <button className="action-btn secondary" style={{ margin: "8px 0 0" }} onClick={saveOracleSignal} disabled={loading}>
+                  Save Oracle Signal
+                </button>
+              </div>
+
+              <div className="settings-section">
+                <h3>Vault Safety</h3>
+                <div className="field">
+                  <label>Min Out Bps</label>
+                  <input type="number" min="9000" max="10000" value={vaultMinOutBps}
+                    onChange={e => setVaultMinOutBps(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>Max Move Bps</label>
+                  <input type="number" min="1" max="10000" value={vaultMaxMoveBps}
+                    onChange={e => setVaultMaxMoveBps(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>Cooldown Seconds</label>
+                  <input type="number" min="0" value={vaultInterval}
+                    onChange={e => setVaultInterval(e.target.value)} />
+                </div>
+                <button className="action-btn secondary" style={{ margin: "8px 0 0" }} onClick={saveVaultSafety} disabled={loading}>
+                  Save Safety
+                </button>
+              </div>
+            </div>
+          </div>
+        </main>
+      )}
+
+      {/* ══════════════════ VALIDATE TAB ══════════════════════════════════ */}
+      {tab === "Validate" && (
+        <main className="page">
+          <div className="validate-panel">
+
+            <div className="validate-card">
+              <h3>⚡ Become a PoDL Validator</h3>
+              <p>
+                Lock your DEX LP tokens as validator stake. Your consensus power is derived
+                from <strong>real market liquidity</strong>, not single-asset staking.
+                The longer you lock, the more LiquidityPower you earn.
+              </p>
+
+              {valInfo?.output && (
+                <div className="validator-info-box">
+                  <div className="info-row"><span>Locked LP</span><span className="info-val">{fmtAmount(valInfo.output.lockedLP || "0")}</span></div>
+                  <div className="info-row"><span>Pool Backing</span><span className="info-val">{fmtAmount(valInfo.output.poolBacking || "0")}</span></div>
+                  <div className="info-row">
+                    <span>Lock Until</span>
+                    <span className="info-val">
+                      {valInfo.output.lockUntil ? new Date(valInfo.output.lockUntil * 1000).toLocaleString() : "—"}
+                    </span>
+                  </div>
+                  <div className="info-row"><span>Active</span><span className="info-val">{valInfo.output.isActive ? "✓ Yes" : "✗ No"}</span></div>
+                </div>
+              )}
+
+              <div className="field">
+                <label>LP Amount to Lock</label>
+                <input type="number" placeholder="e.g. 1000000000"
+                  value={valLPAmt} onChange={e => setValLPAmt(e.target.value)} />
+                <div className="notice" style={{ marginTop: 6, fontSize: 12 }}>Your LP: {fmtAmount(pool.lpBalance)}</div>
+              </div>
+
+              <div className="field">
+                <label>Lock Duration (days)</label>
+                <input type="number" placeholder="30" value={valDays} onChange={e => setValDays(e.target.value)} />
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="action-btn" style={{ margin: 0 }} onClick={doLockLP} disabled={loading || !canSend}>
+                  {loading ? <span className="spinner" /> : "Lock LP"}
+                </button>
+                <button className="action-btn secondary" style={{ margin: 0 }} onClick={doUnlockLP} disabled={loading || !canSend}>
+                  Unlock LP
+                </button>
+              </div>
+            </div>
+
+            <div className="validate-card">
+              <h3>📖 How PoDL Works</h3>
+              <div className="notice">
+                <strong>1. Add Liquidity</strong> in the Pool tab<br />
+                <strong>2. Lock LP tokens</strong> here for your chosen duration<br />
+                <strong>3. Start your node</strong> with:<br />
+                <code style={{ display: "block", marginTop: 8, wordBreak: "break-all" }}>
+                  go run main.go chain -validator {wallet.address || "0x..."} -dex_address {dexAddr} -lp_token_amount {valLPAmt || "AMOUNT"}
+                </code><br />
+                <strong>Power Formula:</strong><br />
+                <code>Power = (lockedLP / totalLP) × (resA + resB) × (1 + lockYears)</code>
+              </div>
+            </div>
+          </div>
+        </main>
+      )}
+
+      {/* ══════════════════ SETTINGS TAB ══════════════════════════════════ */}
+      {tab === "Settings" && (
+        <main className="page">
+          <div style={{ width: "100%", maxWidth: 480 }}>
+
+            {/* Wallet */}
+            <div className="settings-section">
+              <h3>Wallet</h3>
+              <div className="field">
+                <label>Address</label>
+                <input value={wallet.address} onChange={e => setWallet(w => ({ ...w, address: e.target.value }))} placeholder="0x..." />
+              </div>
+              {!usingExt && (
+                <div className="field">
+                  <label>Private Key</label>
+                  <input type="password" value={wallet.privateKey}
+                    onChange={e => setWallet(w => ({ ...w, privateKey: e.target.value }))}
+                    placeholder="0x... (never share)" />
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="action-btn secondary" style={{ margin: 0 }} onClick={connectWebWallet}>Web Wallet</button>
+                <button className="action-btn secondary" style={{ margin: 0 }} onClick={connectExtension}>LQD Extension</button>
+                {wallet.address && (
+                  <button
+                    className="action-btn secondary"
+                    style={{ margin: 0, borderColor: "var(--red)", color: "var(--red)" }}
+                    onClick={disconnectWallet}
+                  >
+                    🔌 Disconnect
+                  </button>
+                )}
+              </div>
+              {usingExt && <div className="notice success" style={{ marginTop: 10 }}>✓ Using LQD Wallet extension</div>}
+              {wallet.address && (
+                <div className="notice" style={{ marginTop: 10, fontSize: 12, wordBreak: "break-all" }}>
+                  Connected: {wallet.address}
+                  <span
+                    style={{ marginLeft: 8, color: "var(--accent2)", cursor: "pointer" }}
+                    onClick={() => { navigator.clipboard.writeText(wallet.address); showToast("Copied!", "success"); }}
+                  >📋 copy</span>
+                </div>
+              )}
+            </div>
+
+            {/* Endpoints */}
+            <div className="settings-section">
+              <h3>API Endpoints</h3>
+              <div className="field">
+                <label>Node URL (aggregator / chain)</label>
+                <input value={nodeUrl} onChange={e => setNodeUrl(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>Wallet Server URL</label>
+                <input value={walletUrl} onChange={e => setWalletUrl(e.target.value)} />
+              </div>
+              <div className="settings-row-item">
+                <span className="settings-row-label">Base Fee</span>
+                <span>{baseFee}</span>
+              </div>
+              <button className="action-btn secondary" style={{ margin: "12px 0 0" }} onClick={() => {
+                localStorage.setItem("lqd_node_url", nodeUrl);
+                localStorage.setItem("lqd_wallet_url", walletUrl);
+                showToast("Endpoints saved", "success");
+              }}>
+                Save Endpoints
+              </button>
+            </div>
+
+            {/* DEX contract */}
+            <div className="settings-section">
+              <h3>DEX Contract</h3>
+              <div className="field">
+                <label>Factory Address</label>
+                <input
+                  value={dexAddr}
+                  onChange={e => { setDexAddr(e.target.value); localStorage.setItem("lqd_dex_address", e.target.value); }}
+                  placeholder="0x... (deploy DEX contract first)"
+                  style={{ borderColor: !dexAddr ? "var(--red)" : undefined }}
+                />
+              </div>
+              <div className="field">
+                <label>Router Address</label>
+                <input
+                  value={routerAddr}
+                  onChange={e => { setRouterAddr(e.target.value); localStorage.setItem("lqd_dex_router_address", e.target.value); }}
+                  placeholder="0x... (optional router initialized with factory)"
+                />
+              </div>
+              {!dexAddr ? (
+                <div className="notice error">⚠ No DEX address set. Deploy a fresh DEX factory to enable swapping and pool creation.</div>
+              ) : !dexValid ? (
+                <div className="notice error">⚠ Stored DEX address is stale. Deploy a fresh DEX factory.</div>
+              ) : dexKind === "factory" ? (
+                <div className="notice">✓ DEX factory contract configured.{routerAddr ? ` Router: ${shortAddr(routerAddr)}` : " Router not set; factory fallback active."}</div>
+              ) : dexKind === "swap" ? (
+                <div className="notice error">⚠ This address is a pool contract, not a DEX factory. Create Pair cannot run here. Deploy a fresh DEX factory.</div>
+              ) : (
+                <div className="notice error">⚠ DEX contract type is unknown. Deploy a fresh DEX factory.</div>
+              )}
+              <button className="action-btn secondary" style={{ margin: "12px 0 0" }} onClick={deployFreshDex} disabled={deployFreshDexDisabled}>
+                {loading ? <span className="spinner" /> : deployFreshDexLabel}
+              </button>
+            </div>
+
+            {/* Token import */}
+            <div className="settings-section">
+              <h3>Token Import</h3>
+              <div className="modal-import-row" style={{ margin: "0 0 12px" }}>
+                <input value={importAddr} onChange={e => setImportAddr(e.target.value)} placeholder="Token contract address 0x..." />
+                <button onClick={doImportToken}>Import</button>
+              </div>
+              <div className="token-list" style={{ maxHeight: 200 }}>
+                {tokens.map(t => (
+                  <div key={t.address} className="token-row">
+                    <TokenIcon symbol={t.symbol} logoUrl={t.logoUrl} />
+                    <div className="token-row-info">
+                      <div className="token-row-sym">{t.symbol}</div>
+                      <div className="token-row-name">{t.name} · {t.address}</div>
+                    </div>
+                    {t.native
+                      ? <div className="token-row-bal" style={{ color: "var(--accent2)", fontSize: 11 }}>native</div>
+                      : t.registry
+                        ? <div className="token-row-bal" style={{ color: "var(--accent2)", fontSize: 11 }}>verified</div>
+                      : <button
+                          style={{ background: "none", border: "none", color: "var(--red)", cursor: "pointer", fontSize: 14, padding: "0 4px" }}
+                          onClick={() => {
+                            const list = tokens.filter(x => x.address !== t.address);
+                            saveTokens(list.filter(x => !x.native && !x.registry));
+                            setTokens(list);
+                            if (tokenA === t.address) setTokenA("");
+                            if (tokenB === t.address) setTokenB("");
+                          }}
+                          title="Remove token"
+                        >✕</button>
+                    }
+                  </div>
+                ))}
+              </div>
+              {tokens.filter(t => !t.native && !t.registry).length > 0 && (
+                <button
+                  className="action-btn secondary"
+                  style={{ margin: "10px 0 0", borderColor: "var(--red)", color: "var(--red)" }}
+                  onClick={() => {
+                    saveTokens([]);
+                    setTokens(tokens.filter(t => t.native || t.registry));
+                    setTokenA(""); setTokenB("");
+                    showToast("Local session tokens cleared", "success");
+                  }}
+                >
+                  Clear Local Tokens
+                </button>
+              )}
+            </div>
+          </div>
+        </main>
+      )}
+
+      {/* ── Token selector modal ──────────────────────────────────────────── */}
+      {modalOpen && (
+        <div className="modal-overlay" onClick={() => setModalOpen(false)}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <div className="modal-top">
+              <h2>Select a Token</h2>
+              <button className="icon-btn" onClick={() => setModalOpen(false)}>✕</button>
+            </div>
+            <input className="modal-search" placeholder="Search name or address"
+              value={modalSearch} onChange={e => setModalSearch(e.target.value)} autoFocus />
+            <div className="modal-import-row">
+              <input value={importAddr} onChange={e => setImportAddr(e.target.value)} placeholder="Import by address 0x..." />
+              <button onClick={doImportToken}>Import</button>
+            </div>
+            <div className="token-list">
+              {filteredTokens.length === 0 && (
+                <div style={{ padding: "20px", textAlign: "center", color: "var(--muted)" }}>No tokens found</div>
+              )}
+              {filteredTokens.map(t => (
+                <div key={t.address} className={`token-row${(modalTarget === "A" ? tokenA : tokenB) === t.address ? " selected" : ""}`}
+                  onClick={() => selectToken(t.address)}>
+                  <TokenIcon symbol={t.symbol} logoUrl={t.logoUrl} />
+                  <div className="token-row-info">
+                    <div className="token-row-sym">{t.symbol}</div>
+                    <div className="token-row-name">{t.name}</div>
+                  </div>
+                  <div className="token-row-bal" style={{ fontSize: 11, color: "var(--muted)" }}>
+                    {t.address.slice(0, 8)}…
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Toast ────────────────────────────────────────────────────────── */}
+      {toast.msg && (
+        <div className={`toast-bar ${toast.type}`} onClick={() => setToast({ msg: "", type: "" })}>
+          {toast.type === "success" && "✓ "}
+          {toast.type === "error" && "✗ "}
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}

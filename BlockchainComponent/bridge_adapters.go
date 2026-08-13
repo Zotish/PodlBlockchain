@@ -1,7 +1,9 @@
 package blockchaincomponent
 
-import "strings"
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type BridgeFamilySpec struct {
 	ID                     string `json:"id"`
@@ -53,22 +55,59 @@ func (a *bridgeFamilyAdapter) ValidateConfig(cfg *BridgeChainConfig) error {
 	if family == "" {
 		family = "evm"
 	}
-	// Bridge-side validation only. We keep this permissive so operators can
-	// register supported chains before wiring the final signer/transport.
-	if strings.TrimSpace(cfg.ID) == "" || strings.TrimSpace(cfg.Name) == "" || strings.TrimSpace(cfg.ChainID) == "" {
+	if strings.TrimSpace(cfg.ID) == "" {
+		return fmt.Errorf("bridge chain id is required")
+	}
+	if strings.TrimSpace(cfg.Name) == "" {
+		return fmt.Errorf("%s bridge chain name is required", cfg.ID)
+	}
+	if strings.TrimSpace(cfg.ChainID) == "" {
+		return fmt.Errorf("%s bridge chain_id is required", cfg.ID)
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.RPC) == "" && len(cfg.RPCs) == 0 {
+		return fmt.Errorf("%s bridge requires rpc or rpcs before enabling", cfg.ID)
+	}
+	if bridgeChainIsEVMFamily(family) {
+		if strings.TrimSpace(cfg.BridgeAddress) == "" {
+			return fmt.Errorf("%s EVM bridge requires bridge_address before enabling", cfg.ID)
+		}
+		if strings.TrimSpace(cfg.LockAddress) == "" {
+			return fmt.Errorf("%s EVM bridge requires lock_address before enabling", cfg.ID)
+		}
 		return nil
 	}
 	switch family {
-	case "evm":
-		return nil
+	case "utxo", "bitcoin", "btc", "litecoin", "dogecoin", "cardano":
+		if strings.TrimSpace(cfg.DepositAddress) == "" {
+			return fmt.Errorf("%s bridge requires deposit_address before enabling", cfg.ID)
+		}
+		if strings.TrimSpace(cfg.VerifierURL) == "" {
+			return fmt.Errorf("%s bridge requires verifier_url before enabling", cfg.ID)
+		}
+	case "solana", "aptos", "sui":
+		if strings.TrimSpace(cfg.ProgramID) == "" && strings.TrimSpace(cfg.VaultAddress) == "" {
+			return fmt.Errorf("%s bridge requires program_id or vault_address before enabling", cfg.ID)
+		}
+		if strings.TrimSpace(cfg.VerifierURL) == "" {
+			return fmt.Errorf("%s bridge requires verifier_url before enabling", cfg.ID)
+		}
 	default:
-		return nil
+		if strings.TrimSpace(cfg.VerifierURL) == "" {
+			return fmt.Errorf("%s bridge requires verifier_url before enabling", cfg.ID)
+		}
+		if strings.TrimSpace(cfg.DepositAddress) == "" && strings.TrimSpace(cfg.VaultAddress) == "" && strings.TrimSpace(cfg.ProgramID) == "" {
+			return fmt.Errorf("%s bridge requires deposit_address, vault_address, or program_id before enabling", cfg.ID)
+		}
 	}
+	return nil
 }
 
 func familyNeedsExternalSourceData(family string) bool {
 	switch NormalizeBridgeFamilyID(family) {
-	case "utxo", "cardano", "cosmos", "solana", "substrate", "xrpl", "ton", "near", "aptos":
+	case "utxo", "bitcoin", "btc", "litecoin", "dogecoin", "cardano", "cosmos", "cosmos-testnet", "sei", "injective", "solana", "substrate", "xrpl", "ton", "near", "aptos", "sui", "starknet", "tron":
 		return true
 	default:
 		return false
@@ -93,11 +132,11 @@ func ValidateBridgeRequestMetadata(family string, req *BridgeRequest) error {
 		return fmt.Errorf("%s bridge requires source address", strings.ToUpper(family))
 	}
 	switch family {
-	case "cosmos":
+	case "cosmos", "cosmos-testnet", "sei", "injective":
 		if strings.TrimSpace(req.SourceMemo) == "" {
-			return fmt.Errorf("COSMOS bridge requires memo")
+			return fmt.Errorf("%s bridge requires memo", strings.ToUpper(family))
 		}
-	case "utxo", "cardano":
+	case "utxo", "bitcoin", "btc", "litecoin", "dogecoin", "cardano":
 		if strings.TrimSpace(req.SourceOutput) == "" {
 			return fmt.Errorf("%s bridge requires source output index", strings.ToUpper(family))
 		}
@@ -125,6 +164,18 @@ func ValidateBridgeRequestMetadata(family string, req *BridgeRequest) error {
 		if strings.TrimSpace(req.SourceSequence) == "" {
 			return fmt.Errorf("APTOS bridge requires sequence number or ledger sequence")
 		}
+	case "sui":
+		if strings.TrimSpace(req.SourceSequence) == "" {
+			return fmt.Errorf("SUI bridge requires checkpoint or object version")
+		}
+	case "starknet":
+		if strings.TrimSpace(req.SourceSequence) == "" {
+			return fmt.Errorf("STARKNET bridge requires block number or transaction index")
+		}
+	case "tron":
+		if strings.TrimSpace(req.SourceSequence) == "" {
+			return fmt.Errorf("TRON bridge requires block number or transaction index")
+		}
 	}
 	return nil
 }
@@ -133,7 +184,7 @@ func bridgeFamilyDefaults(family string) (supportsPublic bool, supportsPrivate b
 	switch NormalizeBridgeFamilyID(family) {
 	case "utxo", "cardano", "cosmos":
 		return true, true, true
-	case "substrate", "solana", "xrpl", "ton", "aptos", "sui", "near", "icp":
+	case "substrate", "solana", "xrpl", "ton", "aptos", "sui", "near", "icp", "starknet", "tron":
 		return true, true, true
 	default:
 		return true, true, false
@@ -208,6 +259,17 @@ var bridgeFamilySpecs = []*BridgeFamilySpec{
 		Notes:                  "Requires ledger sequence, trust lines, and XRPL signing rules.",
 	},
 	{
+		ID:                     "tron",
+		Name:                   "Tron",
+		Description:            "Tron/TRC-20 chain using TronGrid-style RPC and TRC-20 token contracts.",
+		SupportsPublic:         true,
+		SupportsPrivate:        true,
+		RequiresBridgeContract: false,
+		RequiresLockContract:   false,
+		RequiresExternalSigner: true,
+		Notes:                  "Requires Tron-native transaction construction, bandwidth/energy handling, and finality polling.",
+	},
+	{
 		ID:                     "ton",
 		Name:                   "TON",
 		Description:            "The Open Network with TON-native message and account model.",
@@ -243,6 +305,16 @@ var bridgeFamilySpecs = []*BridgeFamilySpec{
 		ID:                     "sui",
 		Name:                   "Sui",
 		Description:            "Sui object-based chain with chain-specific signing and execution model.",
+		SupportsPublic:         true,
+		SupportsPrivate:        true,
+		RequiresBridgeContract: false,
+		RequiresLockContract:   false,
+		RequiresExternalSigner: true,
+	},
+	{
+		ID:                     "starknet",
+		Name:                   "Starknet",
+		Description:            "Starknet account abstraction and Cairo contract-based bridge routes.",
 		SupportsPublic:         true,
 		SupportsPrivate:        true,
 		RequiresBridgeContract: false,

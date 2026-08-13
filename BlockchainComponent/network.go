@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	protocolVersion       = 1
+	protocolVersion       = int(CurrentProtocolVersion)
 	defaultPort           = "5000"
 	PingInterval          = 30 * time.Second
 	defaultNetworkID      = "mainnet"
@@ -166,6 +166,15 @@ func (ns *NetworkService) SetValidatorIdentity(address, privateKey string) {
 	defer ns.Mutex.Unlock()
 	ns.ValidatorAddress = strings.TrimSpace(address)
 	ns.ValidatorPrivateKey = strings.TrimSpace(privateKey)
+}
+
+func (ns *NetworkService) ValidatorIdentitySnapshot() (string, string) {
+	if ns == nil {
+		return "", ""
+	}
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+	return strings.TrimSpace(ns.ValidatorAddress), strings.TrimSpace(ns.ValidatorPrivateKey)
 }
 
 func (ns *NetworkService) syncWithPeer(peer *Peer, ourHeight int) error {
@@ -327,6 +336,9 @@ func (ns *NetworkService) sendVersionHandshake(conn net.Conn, decoder *json.Deco
 	if !ok || int(peerProtocol) != protocolVersion {
 		return nil, fmt.Errorf("handshake protocol mismatch")
 	}
+	if err := ns.validatePeerChainSpec(peerVersion); err != nil {
+		return nil, err
+	}
 
 	return peerVersion, nil
 }
@@ -334,11 +346,15 @@ func (ns *NetworkService) sendVersionHandshake(conn net.Conn, decoder *json.Deco
 func (ns *NetworkService) buildVersionPayload() map[string]interface{} {
 	now := time.Now().Unix()
 	payload := map[string]interface{}{
-		"protocol":    protocolVersion,
-		"best_height": ns.bestHeight(),
-		"timestamp":   now,
-		"listen_port": toIntPort(ns.ListenPort),
-		"http_port":   ns.HTTPPort,
+		"protocol":        protocolVersion,
+		"best_height":     ns.bestHeight(),
+		"timestamp":       now,
+		"listen_port":     toIntPort(ns.ListenPort),
+		"http_port":       ns.HTTPPort,
+		"network_id":      ns.Blockchain.ChainSpec.NetworkID,
+		"chain_id":        ns.Blockchain.ChainSpec.ChainID,
+		"genesis_hash":    ns.Blockchain.ChainSpec.GenesisHash,
+		"chain_spec_hash": ns.Blockchain.ChainSpec.Hash(),
 	}
 
 	ns.Mutex.Lock()
@@ -360,6 +376,21 @@ func (ns *NetworkService) buildVersionPayload() map[string]interface{} {
 		}
 	}
 	return payload
+}
+
+func (ns *NetworkService) validatePeerChainSpec(payload map[string]interface{}) error {
+	if ns == nil || ns.Blockchain == nil {
+		return fmt.Errorf("local chain spec unavailable")
+	}
+	spec := ns.Blockchain.ChainSpec
+	networkID, _ := payload["network_id"].(string)
+	genesisHash, _ := payload["genesis_hash"].(string)
+	specHash, _ := payload["chain_spec_hash"].(string)
+	chainID, chainIDOK := payload["chain_id"].(float64)
+	if !chainIDOK || uint(chainID) != spec.ChainID || networkID != spec.NetworkID || !strings.EqualFold(genesisHash, spec.GenesisHash) || !strings.EqualFold(specHash, spec.Hash()) {
+		return fmt.Errorf("handshake chain specification mismatch")
+	}
+	return nil
 }
 
 func validatorHandshakeMessage(address string, listenPort, httpPort int, timestamp int64) string {
@@ -796,6 +827,10 @@ func (ns *NetworkService) handleConnection(conn net.Conn) {
 			log.Printf("Incompatible protocol: %v (we use %v)", proto, protocolVersion)
 			return
 		}
+		if err := ns.validatePeerChainSpec(firstMsg); err != nil {
+			log.Printf("Rejected incompatible peer chain: %v", err)
+			return
+		}
 
 		ns.applyPeerVersion(peer, firstMsg)
 
@@ -1069,6 +1104,7 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 				LockedLiquidityUSD:  validator.LockedLiquidityUSD,
 				ValidatorPairWeight: validator.ValidatorPairWeight,
 				LPStakeAmount:       validator.LPStakeAmount,
+				NativeBond:          validator.NativeBond,
 				LockTime:            validator.LockTime,
 				LiquidityPower:      validator.LiquidityPower,
 				PenaltyScore:        validator.PenaltyScore,
@@ -1137,6 +1173,35 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 		}
 		if finalized {
 			log.Printf("✅ Block finalized via vote from %s", validator)
+		}
+
+	case "consensus_vote":
+		voteData, ok := msg["data"].(map[string]interface{})
+		if !ok {
+			recordPeerFailure(peer, "invalid consensus vote payload")
+			return
+		}
+		raw, err := json.Marshal(voteData)
+		if err != nil {
+			return
+		}
+		var vote ConsensusVote
+		if err := json.Unmarshal(raw, &vote); err != nil {
+			recordPeerFailure(peer, "invalid consensus vote encoding")
+			return
+		}
+		if peer != nil && peer.ValidatorVerified && !strings.EqualFold(peer.ValidatorAddress, vote.Validator) {
+			recordPeerFailure(peer, "consensus vote identity mismatch")
+			return
+		}
+		finalized, err := ns.Blockchain.ProcessConsensusVote(vote)
+		if err != nil {
+			recordPeerFailure(peer, "rejected consensus vote")
+			log.Printf("Rejected signed consensus vote: %v", err)
+			return
+		}
+		if finalized {
+			log.Printf("✅ Block #%d finalized with signed precommit QC", vote.Height)
 		}
 
 	case "peers":
@@ -1339,6 +1404,24 @@ func (ns *NetworkService) BroadcastVote(blockHash string, validator string) {
 		"hash":      blockHash,
 		"validator": validator,
 	})
+	if err != nil {
+		return
+	}
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+	for _, peer := range ns.Peers {
+		if peer == nil || ns.isSelfPeer(peer) {
+			continue
+		}
+		go ns.sendData(peer, data)
+	}
+}
+
+func (ns *NetworkService) BroadcastConsensusVote(vote ConsensusVote) {
+	if ns == nil || !VerifyConsensusVote(vote) {
+		return
+	}
+	data, err := json.Marshal(map[string]interface{}{"type": "consensus_vote", "data": vote})
 	if err != nil {
 		return
 	}

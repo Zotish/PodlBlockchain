@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
@@ -41,6 +40,7 @@ type Validator struct {
 
 	// ── Legacy PoS (used when DEXAddress == "") ───────────────────────────────
 	LPStakeAmount float64 `json:"lp_stake_amount"`
+	NativeBond    float64 `json:"native_bond,omitempty"`
 
 	// ── Common ───────────────────────────────────────────────────────────────
 	LockTime       time.Time `json:"lock_time"`
@@ -81,6 +81,8 @@ type DEXValidatorAssessment struct {
 	PairWeight         float64 `json:"pair_weight"`
 	LockMultiplier     float64 `json:"lock_multiplier"`
 	LiquidityPower     float64 `json:"liquidity_power"`
+	LiquidityQuality   float64 `json:"liquidity_quality"`
+	QualityBPS         int64   `json:"quality_bps"`
 	Eligible           bool    `json:"eligible"`
 	Reason             string  `json:"reason,omitempty"`
 }
@@ -137,9 +139,7 @@ func (bc *Blockchain_struct) AddNewValidators(address string, amount float64, lo
 	}
 
 	// Save to database
-	dbCopy := *bc
-	dbCopy.Mutex = sync.Mutex{}
-	if err := PutIntoDB(dbCopy); err != nil {
+	if err := PutIntoDB(bc); err != nil {
 		return fmt.Errorf("error while adding new validator: %v", err)
 	}
 
@@ -178,9 +178,7 @@ func (bc *Blockchain_struct) AddDEXValidator(address, dexAddress, lpTokenAmount 
 	for _, v := range bc.Validators {
 		if strings.EqualFold(v.Address, address) {
 			applyAssessment(v)
-			dbCopy := *bc
-			dbCopy.Mutex = sync.Mutex{}
-			if err := PutIntoDB(dbCopy); err != nil {
+			if err := PutIntoDB(bc); err != nil {
 				return fmt.Errorf("error saving PosDL validator: %v", err)
 			}
 			log.Printf("PosDL validator updated: %s DEX=%s lpAmount=%s", address, dexAddress, assessment.LockedLP)
@@ -198,9 +196,7 @@ func (bc *Blockchain_struct) AddDEXValidator(address, dexAddress, lpTokenAmount 
 		go bc.Network.BroadcastValidator(newVal)
 	}
 
-	dbCopy := *bc
-	dbCopy.Mutex = sync.Mutex{}
-	if err := PutIntoDB(dbCopy); err != nil {
+	if err := PutIntoDB(bc); err != nil {
 		return fmt.Errorf("error saving PosDL validator: %v", err)
 	}
 	log.Printf("PosDL validator registered: %s DEX=%s lpAmount=%s", address, dexAddress, lpTokenAmount)
@@ -381,7 +377,14 @@ func (bc *Blockchain_struct) assessDEXValidatorNoLock(address, pairAddress, fall
 	}
 	assessment.LockedLiquidityUSD = lockedValueUSD
 	assessment.LockMultiplier = lockMultiplier
-	assessment.LiquidityPower = math.Sqrt(lockedValueUSD) * pairWeight * lockMultiplier
+	quality := bc.AssessLiquidityQuality(pairAddress)
+	qualityMultiplier := 1.0
+	if quality.Valid {
+		qualityMultiplier = quality.QualityScore
+		assessment.LiquidityQuality = quality.QualityScore
+		assessment.QualityBPS = quality.QualityBPS
+	}
+	assessment.LiquidityPower = math.Sqrt(lockedValueUSD) * pairWeight * lockMultiplier * qualityMultiplier
 
 	if lockedValueUSD < minUSD {
 		assessment.Reason = fmt.Sprintf("locked liquidity %.2f USD is below minimum %.2f USD", lockedValueUSD, minUSD)
@@ -712,19 +715,26 @@ func (bc *Blockchain_struct) MonitorValidators() {
 	}
 
 	if changed {
-		dbCopy := *bc
-		dbCopy.Mutex = sync.Mutex{}
-		if err := PutIntoDB(dbCopy); err != nil {
+		if err := PutIntoDB(bc); err != nil {
 			log.Printf("Failed to persist validator monitor state: %v", err)
 		}
 	}
 }
 
 func (bc *Blockchain_struct) SlashValidator(add string, penalty float64, reason string) {
+	bc.slashValidatorAt(add, penalty, reason, time.Now())
+}
+
+// slashValidatorAt is the deterministic consensus path. Callers applying a
+// signed block transaction pass its committed timestamp instead of consulting
+// each node's wall clock.
+func (bc *Blockchain_struct) slashValidatorAt(add string, penalty float64, reason string, now time.Time) {
 	if penalty <= 0 {
 		penalty = 0.01
 	}
-	now := time.Now()
+	if now.IsZero() {
+		now = time.Unix(0, 0)
+	}
 	maxPenalty := validatorMaxPenaltyScore()
 
 	for i := 0; i < len(bc.Validators); i++ {

@@ -199,6 +199,76 @@ func (f *Factory) Init(ctx *bc.Context, pairPluginPath string) {
 	ctx.Emit("FactoryInitialized", map[string]interface{}{"pairPlugin": pairPluginPath})
 }
 
+// ConfigureAdvancedPools registers the audited-build artifact used for stable
+// and concentrated pool clones. It is separate from Init to preserve existing
+// factory deployments and may only be set by the factory owner.
+func (f *Factory) ConfigureAdvancedPools(ctx *bc.Context, advancedPluginPath string) {
+	if !strings.EqualFold(ctx.CallerAddr, ctx.OwnerAddr) && !strings.EqualFold(ctx.OriginAddr, ctx.OwnerAddr) {
+		ctx.Revert("factory owner only")
+	}
+	if strings.TrimSpace(advancedPluginPath) == "" {
+		ctx.Revert("advanced pool plugin path required")
+	}
+	ctx.Set("__advancedPoolPlugin", strings.TrimSpace(advancedPluginPath))
+	ctx.Emit("AdvancedPoolPluginConfigured", map[string]interface{}{"plugin": advancedPluginPath})
+}
+
+func advancedPoolKey(tokenA, tokenB, poolType string) (string, string, string) {
+	_, t0, t1 := pairKey(tokenA, tokenB)
+	return strings.ToLower(strings.TrimSpace(poolType)) + ":" + t0 + ":" + t1, t0, t1
+}
+
+// CreateAdvancedPool deploys a route-compatible amplified stable or
+// concentrated-liquidity pool. Multiple curves may coexist for a token pair;
+// the first pool remains the backward-compatible canonical GetPair result.
+func (f *Factory) CreateAdvancedPool(ctx *bc.Context, tokenA, tokenB, poolType, parameter string) {
+	key, t0, t1 := advancedPoolKey(tokenA, tokenB, poolType)
+	kind := strings.ToLower(strings.TrimSpace(poolType))
+	if t0 == "" || t1 == "" || t0 == t1 || (kind != "stable" && kind != "concentrated") {
+		ctx.Revert("invalid advanced pool configuration")
+	}
+	if ctx.Get("advancedPoolAddr:"+key) != "" {
+		ctx.Revert("advanced pool already exists")
+	}
+	pluginPath := ctx.Get("__advancedPoolPlugin")
+	if pluginPath == "" {
+		ctx.Revert("advanced pool plugin is not configured")
+	}
+	h := sha256.Sum256([]byte(strings.ToLower(ctx.ContractAddr) + ":" + key))
+	poolAddr := "0x" + hex.EncodeToString(h[:20])
+	ctx.DeployContract(poolAddr, pluginPath)
+	if _, err := ctx.Call(poolAddr, "Init", []string{ctx.ContractAddr, t0, t1, kind, parameter}); err != nil {
+		ctx.Revert("advanced pool Init failed: " + err.Error())
+	}
+	ctx.Set("advancedPoolAddr:"+key, poolAddr)
+	ctx.Set("advancedPoolType:"+poolAddr, kind)
+	pk, _, _ := pairKey(t0, t1)
+	if ctx.Get("pairAddr:"+pk) == "" {
+		ctx.Set("pairAddr:"+pk, poolAddr)
+		ctx.Set("pairExists:"+pk, "1")
+	}
+	n := parseBig(ctx.Get("pairCount"))
+	ctx.Set("pairAt:"+n.String(), key)
+	ctx.Set("pairAddr:"+n.String(), poolAddr)
+	ctx.Set("pairCount", new(big.Int).Add(n, big.NewInt(1)).String())
+	ctx.Set("output", poolAddr)
+	ctx.Commit()
+	ctx.Emit("AdvancedPoolCreated", map[string]interface{}{"token0": t0, "token1": t1, "type": kind, "parameter": parameter, "pool": poolAddr, "index": n.String()})
+}
+
+func (f *Factory) GetAdvancedPool(ctx *bc.Context, tokenA, tokenB, poolType string) {
+	key, _, _ := advancedPoolKey(tokenA, tokenB, poolType)
+	ctx.Set("output", ctx.Get("advancedPoolAddr:"+key))
+}
+
+func (f *Factory) GetPoolType(ctx *bc.Context, poolAddress string) {
+	kind := ctx.Get("advancedPoolType:" + strings.ToLower(strings.TrimSpace(poolAddress)))
+	if kind == "" {
+		kind = "constant_product"
+	}
+	ctx.Set("output", kind)
+}
+
 // CreatePair deploys a new AMM pair contract and registers it.
 // Use "lqd" as tokenA or tokenB for a native-LQD pair.
 func (f *Factory) CreatePair(ctx *bc.Context, tokenA string, tokenB string) {
@@ -315,6 +385,10 @@ type swapRoute struct {
 	weight     int64
 	depth      *big.Int
 	hops       int
+	amountOut  *big.Int
+	impactBps  *big.Int
+	gasUnits   uint64
+	riskScore  *big.Int
 }
 
 type pairQuote struct {
@@ -362,6 +436,54 @@ func (r swapRoute) betterThan(other swapRoute) bool {
 		return cmp > 0
 	}
 	return r.hops < other.hops
+}
+
+// betterExecutionThan compares routes for the actual trade size. Output is
+// risk-adjusted by at most 5% using the protocol routing weight, so a marginal
+// quote improvement cannot force users through a circuit-broken/shallow pool.
+// Gas and hop count are deterministic tie-breakers.
+func (r swapRoute) betterExecutionThan(other swapRoute) bool {
+	if !r.valid() || r.amountOut == nil || r.amountOut.Sign() <= 0 {
+		return false
+	}
+	if !other.valid() || other.amountOut == nil || other.amountOut.Sign() <= 0 {
+		return true
+	}
+	if cmp := r.riskScore.Cmp(other.riskScore); cmp != 0 {
+		return cmp > 0
+	}
+	if cmp := r.amountOut.Cmp(other.amountOut); cmp != 0 {
+		return cmp > 0
+	}
+	if r.impactBps != nil && other.impactBps != nil {
+		if cmp := r.impactBps.Cmp(other.impactBps); cmp != 0 {
+			return cmp < 0
+		}
+	}
+	if r.gasUnits != other.gasUnits {
+		return r.gasUnits < other.gasUnits
+	}
+	return r.hops < other.hops
+}
+
+func finalizeExecutionRoute(r swapRoute) swapRoute {
+	if r.amountOut == nil {
+		r.amountOut = big.NewInt(0)
+	}
+	if r.impactBps == nil {
+		r.impactBps = big.NewInt(0)
+	}
+	weight := r.weight
+	if weight < 0 {
+		weight = 0
+	}
+	if weight > 100 {
+		weight = 100
+	}
+	// 95.00%-100.00% multiplier according to verified pool quality/weight.
+	multiplier := big.NewInt(9500 + weight*5)
+	r.riskScore = new(big.Int).Div(new(big.Int).Mul(r.amountOut, multiplier), big.NewInt(10000))
+	return r
 }
 
 func (f *Factory) pairWeight(ctx *bc.Context, pairAddr string) int64 {
@@ -490,6 +612,90 @@ func (f *Factory) selectBestSwapRoute(ctx *bc.Context, tokenIn, tokenOut string)
 	return best
 }
 
+// selectBestSwapRouteForAmount evaluates the direct path and every valid
+// two-hop path with constant-product quotes for the caller's actual amount.
+// This fixes the old weight-only route choice, which could select a shallow
+// pool and give materially worse execution on a large order.
+func (f *Factory) selectBestSwapRouteForAmount(ctx *bc.Context, amountIn, tokenIn, tokenOut string) swapRoute {
+	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
+	input := parseBig(amountIn)
+	if input.Sign() <= 0 || tokenIn == "" || tokenOut == "" || tokenIn == tokenOut {
+		return swapRoute{}
+	}
+	best := swapRoute{}
+	pk, _, _ := pairKey(tokenIn, tokenOut)
+	if direct := ctx.Get("pairAddr:" + pk); direct != "" {
+		q := f.quotePair(ctx, direct, input.String(), tokenIn)
+		candidate := finalizeExecutionRoute(swapRoute{
+			kind: "direct", directPair: direct, weight: f.pairWeight(ctx, direct),
+			depth: f.pairDepth(ctx, direct), hops: 1, amountOut: q.amountOut,
+			impactBps: q.priceImpactBps, gasUnits: 90000,
+		})
+		if candidate.betterExecutionThan(best) {
+			best = candidate
+		}
+	}
+
+	count := parseBig(ctx.Get("pairCount")).Int64()
+	seen := map[string]bool{}
+	for i := int64(0); i < count; i++ {
+		pairKey1 := ctx.Get("pairAt:" + strconv.FormatInt(i, 10))
+		parts := strings.SplitN(pairKey1, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		mid := ""
+		switch {
+		case strings.EqualFold(parts[0], tokenIn):
+			mid = parts[1]
+		case strings.EqualFold(parts[1], tokenIn):
+			mid = parts[0]
+		default:
+			continue
+		}
+		if mid == tokenOut || mid == tokenIn {
+			continue
+		}
+		pk2, _, _ := pairKey(mid, tokenOut)
+		hop1 := ctx.Get("pairAddr:" + pairKey1)
+		hop2 := ctx.Get("pairAddr:" + pk2)
+		key := hop1 + ":" + hop2
+		if hop1 == "" || hop2 == "" || hop1 == hop2 || seen[key] {
+			continue
+		}
+		seen[key] = true
+		q1 := f.quotePair(ctx, hop1, input.String(), tokenIn)
+		if q1.amountOut.Sign() <= 0 {
+			continue
+		}
+		q2 := f.quotePair(ctx, hop2, q1.amountOut.String(), mid)
+		if q2.amountOut.Sign() <= 0 {
+			continue
+		}
+		weight := f.pairWeight(ctx, hop1)
+		if w2 := f.pairWeight(ctx, hop2); w2 < weight {
+			weight = w2
+		}
+		depth := f.pairDepth(ctx, hop1)
+		if d2 := f.pairDepth(ctx, hop2); d2.Cmp(depth) < 0 {
+			depth = d2
+		}
+		impact := new(big.Int).Add(q1.priceImpactBps, q2.priceImpactBps)
+		if impact.Cmp(big.NewInt(10000)) > 0 {
+			impact.SetInt64(10000)
+		}
+		candidate := finalizeExecutionRoute(swapRoute{
+			kind: "2hop", hop1Addr: hop1, hop2Addr: hop2, midToken: mid,
+			weight: weight, depth: depth, hops: 2, amountOut: q2.amountOut,
+			impactBps: impact, gasUnits: 165000,
+		})
+		if candidate.betterExecutionThan(best) {
+			best = candidate
+		}
+	}
+	return best
+}
+
 // ─── LIQUIDITY ROUTER ─────────────────────────────────────────────────────────
 
 // AddLiquidity deposits tokenA + tokenB and mints LP tokens via the pair contract.
@@ -526,7 +732,7 @@ func (f *Factory) RemoveLiquidity(ctx *bc.Context, tokenA string, tokenB string,
 // For native LQD output: tokenOut = "lqd", native LQD sent back automatically
 func (f *Factory) SwapExactTokensForTokens(ctx *bc.Context, amountIn string, minAmountOut string, tokenIn string, tokenOut string) {
 	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
-	route := f.selectBestSwapRoute(ctx, tokenIn, tokenOut)
+	route := f.selectBestSwapRouteForAmount(ctx, amountIn, tokenIn, tokenOut)
 	if !route.valid() {
 		ctx.Revert("no route found for " + tokenIn + " → " + tokenOut)
 	}
@@ -694,6 +900,22 @@ func (f *Factory) GetBestRoute(ctx *bc.Context, tokenIn string, tokenOut string)
 	})
 }
 
+// GetBestRouteForAmount exposes the amount-aware route to vaults, wallets and
+// aggregators. Output is pair address for direct, or "hop1,hop2" for two-hop.
+func (f *Factory) GetBestRouteForAmount(ctx *bc.Context, amountIn string, tokenIn string, tokenOut string) {
+	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
+	route := f.selectBestSwapRouteForAmount(ctx, amountIn, tokenIn, tokenOut)
+	if !route.valid() {
+		ctx.Set("output", "")
+		return
+	}
+	if route.kind == "direct" {
+		ctx.Set("output", route.directPair)
+		return
+	}
+	ctx.Set("output", route.hop1Addr+","+route.hop2Addr)
+}
+
 // GetPairWeight returns the current routing weight for a pair (set by DLEngine).
 func (f *Factory) GetPairWeight(ctx *bc.Context, tokenA string, tokenB string) {
 	pairAddr, _ := f.requirePair(ctx, tokenA, tokenB)
@@ -710,7 +932,7 @@ func (f *Factory) GetPairWeight(ctx *bc.Context, tokenA string, tokenB string) {
 // GetAmountOut returns expected output for a given input (read-only, via pair contract).
 func (f *Factory) GetAmountOut(ctx *bc.Context, amountIn string, tokenIn string, tokenOut string) {
 	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
-	route := f.selectBestSwapRoute(ctx, tokenIn, tokenOut)
+	route := f.selectBestSwapRouteForAmount(ctx, amountIn, tokenIn, tokenOut)
 	if !route.valid() {
 		ctx.Set("output", "0")
 		return
@@ -747,7 +969,7 @@ func (f *Factory) GetAmountIn(ctx *bc.Context, amountOut string, tokenIn string,
 
 func (f *Factory) GetSwapQuote(ctx *bc.Context, amountIn string, tokenIn string, tokenOut string) {
 	tokenIn, tokenOut = normAddr(tokenIn), normAddr(tokenOut)
-	route := f.selectBestSwapRoute(ctx, tokenIn, tokenOut)
+	route := f.selectBestSwapRouteForAmount(ctx, amountIn, tokenIn, tokenOut)
 	if !route.valid() {
 		ctx.Set("output", "none|0|0")
 		ctx.Emit("SwapQuote", map[string]interface{}{"type": "none", "amountOut": "0"})
