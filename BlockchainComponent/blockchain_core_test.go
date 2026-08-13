@@ -43,6 +43,27 @@ func newTestBlockchain() *Blockchain_struct {
 	return bc
 }
 
+func TestGetWalletBalanceUsesAuthoritativeChainState(t *testing.T) {
+	bc := newTestBlockchain()
+	unknown := "0x9999999999999999999999999999999999999999"
+	balance, err := bc.GetWalletBalance(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance.Sign() != 0 {
+		t.Fatalf("unknown account balance = %s, want 0", balance.String())
+	}
+
+	bc.setAccountBalance(unknown, big.NewInt(12345))
+	balance, err = bc.GetWalletBalance(strings.ToUpper(unknown))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance.Cmp(big.NewInt(12345)) != 0 {
+		t.Fatalf("known account balance = %s, want 12345", balance.String())
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Block creation
 // ─────────────────────────────────────────────────────────────────────────────
