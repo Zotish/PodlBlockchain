@@ -122,3 +122,45 @@ func TestBlockReplayReusesProcessGlobalPluginVM(t *testing.T) {
 		t.Fatal("replay could not reuse the already-loaded plugin contract")
 	}
 }
+
+func TestFinalizedLocalReplayEvictsRejectedTransactions(t *testing.T) {
+	bc := newTestBlockchain()
+	rejected := &Transaction{
+		From:          "0x1111111111111111111111111111111111111111",
+		To:            "0x2222222222222222222222222222222222222222",
+		TxHash:        "0xrejected",
+		Status:        constantset.StatusPending,
+		FailureReason: "",
+	}
+	remaining := &Transaction{
+		From:   rejected.From,
+		To:     rejected.To,
+		TxHash: "0xremaining",
+		Status: constantset.StatusPending,
+	}
+	bc.Transaction_pool = []*Transaction{rejected, remaining}
+
+	shadow, overlay, err := bc.cloneForBlockReplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedCopy := *rejected
+	failedCopy.Status = constantset.StatusFailed
+	failedCopy.FailureReason = "slippage protection"
+	shadow.RecentTxs = []*Transaction{&failedCopy}
+
+	const blockHash = "0xlocal-finalized"
+	postRoot := shadow.ComputeDeterministicStateRootAt(1)
+	transition := captureReplayTransition(blockHash, postRoot, shadow, overlay)
+	if len(transition.RejectedTransactions) != 1 || transition.RejectedTransactions[0].TxHash != rejected.TxHash {
+		t.Fatalf("failed proposal transaction was not captured: %#v", transition.RejectedTransactions)
+	}
+	bc.evictRejectedTransactions(transition.RejectedTransactions)
+
+	if len(bc.Transaction_pool) != 1 || bc.Transaction_pool[0].TxHash != remaining.TxHash {
+		t.Fatalf("rejected transaction remained in canonical mempool: %#v", bc.Transaction_pool)
+	}
+	if len(bc.RecentTxs) != 1 || bc.RecentTxs[0].TxHash != rejected.TxHash || bc.RecentTxs[0].Status != constantset.StatusFailed {
+		t.Fatalf("rejected transaction was not retained as failed history: %#v", bc.RecentTxs)
+	}
+}

@@ -61,6 +61,47 @@ type BlockReplayTransition struct {
 	CumulativeEmission   *big.Int
 	SlashingCases        map[string]*SlashingCase
 	ContractOverlay      *ContractDB
+	// RejectedTransactions are local proposal transactions that failed during
+	// deterministic execution and therefore were intentionally excluded from
+	// the finalized block. They are not consensus state, but the proposer must
+	// evict them from its canonical mempool once the proposal finalizes.
+	RejectedTransactions []*Transaction
+}
+
+func rejectedReplayTransactions(recent []*Transaction) []*Transaction {
+	rejected := make([]*Transaction, 0)
+	for _, tx := range recent {
+		if tx == nil || !strings.EqualFold(tx.Status, constantset.StatusFailed) {
+			continue
+		}
+		rejected = append(rejected, cloneTransactionPool([]*Transaction{tx})...)
+	}
+	return rejected
+}
+
+func (bc *Blockchain_struct) evictRejectedTransactions(transactions []*Transaction) {
+	if bc == nil || len(transactions) == 0 {
+		return
+	}
+	rejected := make(map[string]*Transaction, len(transactions))
+	for _, tx := range transactions {
+		if tx == nil || strings.TrimSpace(tx.TxHash) == "" {
+			continue
+		}
+		rejected[strings.ToLower(tx.TxHash)] = tx
+		bc.RecordRecentTx(tx)
+	}
+	remaining := make([]*Transaction, 0, len(bc.Transaction_pool))
+	for _, tx := range bc.Transaction_pool {
+		if tx == nil {
+			continue
+		}
+		if _, failed := rejected[strings.ToLower(tx.TxHash)]; failed {
+			continue
+		}
+		remaining = append(remaining, tx)
+	}
+	bc.Transaction_pool = remaining
 }
 
 func captureReplayTransition(blockHash, postStateRoot string, shadow *Blockchain_struct, overlay *ContractDB) *BlockReplayTransition {
@@ -87,6 +128,7 @@ func captureReplayTransition(blockHash, postStateRoot string, shadow *Blockchain
 		ConsensusPolicy: policy, ProtocolRevenue: shadow.ProtocolRevenue, RevenueCheckpoints: shadow.RevenueCheckpoints,
 		RevenueAssets: shadow.CapturedRevenueAssets, CumulativeEmission: shadow.CumulativeEmission,
 		SlashingCases: shadow.SlashingCases, ContractOverlay: overlay,
+		RejectedTransactions: rejectedReplayTransactions(shadow.RecentTxs),
 	}
 }
 
@@ -327,6 +369,7 @@ func (bc *Blockchain_struct) applyReplayTransition(block *Block) error {
 	if bc.ComputeDeterministicStateRootAt(block.BlockNumber) != block.StateRoot {
 		return fmt.Errorf("committed replay root mismatch")
 	}
+	bc.evictRejectedTransactions(transition.RejectedTransactions)
 	return nil
 }
 
