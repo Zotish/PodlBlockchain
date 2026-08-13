@@ -142,6 +142,7 @@ type Blockchain_struct struct {
 	Accounts         map[string]*big.Int `json:"accounts"`
 	AccountsMu       sync.RWMutex        `json:"-"`
 	MinStake         float64             `json:"min_stake"`
+	BaseMinStake     float64             `json:"base_min_stake,omitempty"`
 	SlashingPool     float64             `json:"slashing_pool"`
 	Network          *NetworkService     `json:"-"`
 	Mutex            sync.Mutex          `json:"-"`
@@ -328,6 +329,7 @@ func (bc *Blockchain_struct) TryFinalizePending(blockHash string, quorumPercent 
 
 	bc.Blocks = append(bc.Blocks, block)
 	bc.LastFinalizedAt = time.Now().Unix()
+	bc.recordValidatorBlockIncluded(block.RewardBreakdown.Validator, block.TimeStamp)
 	bc.RecordBlockRewardLedger(block)
 	delete(bc.PendingBlocks, blockHash)
 	delete(bc.BlockVotes, blockHash)
@@ -461,6 +463,9 @@ func (bc *Blockchain_struct) EnsureRuntimeState() {
 	}
 	if bc.Transaction_pool == nil {
 		bc.Transaction_pool = []*Transaction{}
+	}
+	if bc.BaseMinStake <= 0 {
+		bc.BaseMinStake = bc.MinStake
 	}
 	if bc.Validators == nil {
 		bc.Validators = []*Validator{}
@@ -968,6 +973,7 @@ func NewBlockchain(genesisBlock Block) *Blockchain_struct {
 		newBlockchain.Accounts = make(map[string]*big.Int)
 		newBlockchain.LiquidityProviders = make(map[string]*LiquidityProvider)
 		newBlockchain.MinStake = 1000000 * 1e8
+		newBlockchain.BaseMinStake = newBlockchain.MinStake
 		newBlockchain.SlashingPool = 0
 		newBlockchain.FixedBlockReward = 20 // genesis base reward (halved by emission schedule)
 		newBlockchain.setAccountBalance(constantset.LiquidityPoolAddress, NewAmountFromUint64(0))
