@@ -215,7 +215,13 @@ func (bcs *BlockchainServer) GetAccountNonce(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
 
-	address := mux.Vars(r)["address"]
+	// Start() registers this route on the standard library ServeMux, which
+	// exposes wildcard values through Request.PathValue. Keep the gorilla/mux
+	// fallback for direct handler users and older integrations.
+	address := r.PathValue("address")
+	if address == "" {
+		address = mux.Vars(r)["address"]
+	}
 
 	bcs.BlockchainPtr.Mutex.Lock()
 	defer bcs.BlockchainPtr.Mutex.Unlock()
