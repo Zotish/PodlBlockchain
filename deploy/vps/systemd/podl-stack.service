@@ -7,9 +7,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/podl
-Environment=COMPOSE_PROFILES=proxy
-ExecStart=/usr/bin/docker compose --profile proxy up -d --remove-orphans
-ExecStop=/usr/bin/docker compose --profile proxy stop
+Environment=PODL_ROOT=/opt/podl
+ExecStart=/bin/sh /opt/podl/app/scripts/ops/podl_stack.sh start
+ExecStop=/bin/sh /opt/podl/app/scripts/ops/podl_stack.sh stop
 RemainAfterExit=yes
 TimeoutStartSec=300
 TimeoutStopSec=120

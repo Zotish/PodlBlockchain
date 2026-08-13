@@ -35,6 +35,7 @@ check_file scripts/ops/podl_restore.sh
 check_file scripts/ops/podl_monitor.sh
 check_file scripts/ops/podl_firewall.sh
 check_file scripts/ops/podl_safe_deploy.sh
+check_file scripts/ops/podl_stack.sh
 
 check_grep "compose healthchecks" "healthcheck:" deploy/vps/docker-compose.yml
 check_grep "dex api service" "dex-api:" deploy/vps/docker-compose.yml
@@ -45,5 +46,6 @@ check_grep "restore checksum" "sha256sum -c|checksum mismatch" scripts/ops/podl_
 check_grep "monitor restart" "MONITOR_RESTART_UNHEALTHY" scripts/ops/podl_monitor.sh
 check_grep "firewall denies public APIs" "deny 6500/tcp" scripts/ops/podl_firewall.sh
 check_grep "safe deploy height guard" "height regressed" scripts/ops/podl_safe_deploy.sh
+check_grep "stack honors Caddy toggle" "ENABLE_CADDY" scripts/ops/podl_stack.sh
 
 exit "$fail"
