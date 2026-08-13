@@ -89,14 +89,16 @@ services:
       - .env
     environment:
       PORT: "9100"
-      DEX_REGISTRY_DB: /srv/data/dex-registry.sqlite
+      DEX_REGISTRY_DB: /data/dex-registry.sqlite
       LQD_NODE_URL: http://chain:6500
       LQD_WALLET_URL: http://wallet:8080
       ALLOWED_ORIGINS: "${LQD_ALLOWED_ORIGINS:-*}"
     volumes:
-      - ./app/swap-dex/server:/srv:ro
+      - ./app/swap-dex/server/package.json:/srv/package.json:ro
+      - ./app/swap-dex/server/package-lock.json:/srv/package-lock.json:ro
+      - ./app/swap-dex/server/index.js:/srv/index.js:ro
       - dex_api_node_modules:/srv/node_modules
-      - ./data/dex-api:/srv/data
+      - ./data/dex-api:/data
     depends_on:
       chain:
         condition: service_healthy
