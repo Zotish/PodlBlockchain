@@ -3,6 +3,7 @@ package blockchaincomponent
 import (
 	"fmt"
 	"math/big"
+	"reflect"
 	"testing"
 	"time"
 
@@ -92,5 +93,32 @@ func TestLocalProposalDoesNotCommitSpeculativeStateBeforeQC(t *testing.T) {
 	}
 	if len(bc.PendingBlocks) != 1 || len(bc.PendingReplayTransitions) != 1 {
 		t.Fatal("isolated proposal or staged state was not retained for later QC")
+	}
+}
+
+func TestBlockReplayReusesProcessGlobalPluginVM(t *testing.T) {
+	bc := newTestBlockchain()
+	parentDB := NewOverlayContractDB(nil)
+	registry := NewContractRegistry(parentDB, nil)
+	address := "0x1111111111111111111111111111111111111111"
+	contract := &PluginContract{Instance: struct{}{}, Methods: map[string]reflect.Method{}}
+	registry.PluginVM.mu.Lock()
+	registry.PluginVM.plugins[address] = contract
+	registry.PluginVM.mu.Unlock()
+	bc.ContractEngine = &LQDContractEngine{
+		DB:       parentDB,
+		Registry: registry,
+		Pipeline: NewExecutionPipeline(registry),
+	}
+
+	shadow, _, err := bc.cloneForBlockReplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shadow.ContractEngine.Registry.PluginVM != registry.PluginVM {
+		t.Fatal("replay created a fresh process-global plugin cache")
+	}
+	if got := shadow.ContractEngine.Registry.PluginVM.GetPlugin(address); got != contract {
+		t.Fatal("replay could not reuse the already-loaded plugin contract")
 	}
 }

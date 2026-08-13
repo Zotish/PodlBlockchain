@@ -877,6 +877,7 @@ type PluginContract struct {
 }
 
 type PluginVM struct {
+	mu       sync.RWMutex
 	plugins  map[string]*PluginContract
 	byPath   map[string]*PluginContract
 	byDigest map[string]*PluginContract
@@ -891,6 +892,8 @@ func NewPluginVM() *PluginVM {
 }
 
 func (p *PluginVM) LoadPlugin(addr, path string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	if path == "" {
 		return fmt.Errorf("plugin path required")
@@ -957,7 +960,9 @@ func (p *PluginVM) LoadPlugin(addr, path string) error {
 }
 
 func (p *PluginVM) CallPlugin(addr, fn string, ctx *Context, args []string) (*ContractExecutionResult, error) {
+	p.mu.RLock()
 	pc := p.plugins[addr]
+	p.mu.RUnlock()
 	if pc == nil {
 		return nil, fmt.Errorf("plugin not loaded")
 	}
@@ -1013,6 +1018,8 @@ func (p *PluginVM) CallPlugin(addr, fn string, ctx *Context, args []string) (*Co
 }
 
 func (p *PluginVM) GetPlugin(addr string) *PluginContract {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.plugins[addr]
 }
 
@@ -1492,7 +1499,7 @@ func (r *ContractRegistry) EnsurePluginLoaded(addr string, meta *ContractMetadat
 	if meta.Type != "plugin" {
 		return nil
 	}
-	if _, ok := r.PluginVM.plugins[addr]; ok {
+	if r.PluginVM.GetPlugin(addr) != nil {
 		return nil
 	}
 	currentFingerprint, err := CurrentPluginRuntimeFingerprint()
