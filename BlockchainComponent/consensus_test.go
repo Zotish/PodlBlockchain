@@ -299,6 +299,60 @@ func TestMonitorValidators_PenalizesOfflineDEXValidatorAfterGrace(t *testing.T) 
 	}
 }
 
+func TestFinalizedBlockTrackingPreventsFalseLegacyMisses(t *testing.T) {
+	v := makeValidator("0x1111111111111111111111111111111111111111", 3_000_000, 30)
+	v.BlocksProposed = 1
+	v.LastActive = time.Now().Add(-10 * time.Minute)
+	bc := newBCWithValidators([]*Validator{v})
+	finalizedAt := uint64(time.Now().Unix())
+
+	bc.recordValidatorBlockIncluded(v.Address, finalizedAt)
+
+	if v.BlocksIncluded != 1 {
+		t.Fatalf("expected one included block, got %d", v.BlocksIncluded)
+	}
+	if v.LastActive.Unix() != int64(finalizedAt) {
+		t.Fatalf("expected activity timestamp %d, got %d", finalizedAt, v.LastActive.Unix())
+	}
+	bc.MonitorValidators()
+	if v.PenaltyScore != 0 || len(bc.Validators) != 1 {
+		t.Fatalf("successful validator was falsely penalized or removed: penalty=%f validators=%d", v.PenaltyScore, len(bc.Validators))
+	}
+}
+
+func TestMonitorValidatorsRespectsLegacyPenaltyCooldown(t *testing.T) {
+	t.Setenv("LQD_VALIDATOR_PENALTY_COOLDOWN_SEC", "600")
+	v := makeValidator("0x1111111111111111111111111111111111111111", 3_000_000, 30)
+	v.BlocksProposed = 20
+	v.LastActive = time.Now().Add(-10 * time.Minute)
+	bc := newBCWithValidators([]*Validator{v})
+	bc.MinStake = 1
+
+	bc.MonitorValidators()
+	firstPenalty := v.PenaltyScore
+	firstStake := v.LPStakeAmount
+	if firstPenalty <= 0 {
+		t.Fatal("expected initial poor-performance penalty")
+	}
+
+	bc.MonitorValidators()
+	if v.PenaltyScore != firstPenalty || v.LPStakeAmount != firstStake {
+		t.Fatalf("penalty cooldown was ignored: score %f -> %f stake %f -> %f", firstPenalty, v.PenaltyScore, firstStake, v.LPStakeAmount)
+	}
+}
+
+func TestUpdateMinStakeUsesConfiguredUnits(t *testing.T) {
+	bc := &Blockchain_struct{MinStake: 100_000, BaseMinStake: 100_000}
+	bc.UpdateMinStake(3)
+	if bc.MinStake != 130_000 {
+		t.Fatalf("expected configured-unit min stake 130000, got %f", bc.MinStake)
+	}
+	bc.UpdateMinStake(0)
+	if bc.MinStake != 100_000 {
+		t.Fatalf("expected baseline min stake 100000, got %f", bc.MinStake)
+	}
+}
+
 func TestSlashValidator_UnknownAddress_Noop(t *testing.T) {
 	v := makeValidator("0x1111111111111111111111111111111111111111", 1e12, 365)
 	bc := newBCWithValidators([]*Validator{v})

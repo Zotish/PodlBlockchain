@@ -82,6 +82,7 @@ func main() {
 			bc.ChainSpec.AllowLegacyFinality = !*requireSignedBFT
 			bc.InitLiquiditySystem()
 			bc.MinStake = *minStake
+			bc.BaseMinStake = *minStake
 
 			if *p2pPort == 0 {
 				*p2pPort = *chainPort + 1000
@@ -166,8 +167,6 @@ func main() {
 					bc.CleanTransactionPool()
 				}
 
-				bc.UpdateMinStake(float64(len(bc.Transaction_pool)))
-
 				if err := bc.Network.SyncChain(); err != nil {
 					// Solo node: sync error is normal — don't block mining
 					log.Printf("Sync error (solo node): %v", err)
@@ -193,7 +192,7 @@ func main() {
 					validator, err := bc.SelectBlockProposer(nextHeight, round)
 					if err != nil {
 						log.Printf("Validator selection error: %v", err)
-						time.Sleep(0 * time.Second)
+						time.Sleep(2 * time.Second)
 						continue
 					}
 

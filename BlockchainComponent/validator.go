@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
 )
 
 const (
@@ -680,33 +678,42 @@ func (bc *Blockchain_struct) MonitorValidators() {
 		if currentTime.Sub(v.LastActive) < minActiveTime {
 			continue
 		}
+		canPenalize := func() bool {
+			return v.LastPenaltyAt.IsZero() || currentTime.Sub(v.LastPenaltyAt) >= validatorPenaltyCooldown()
+		}
 
 		if currentTime.Sub(v.LastActive) > InactivityThreshold {
-			bc.SlashValidator(v.Address, 0.05, "inactivity")
-			changed = true
-			log.Printf("Validator %s slashed for inactivity", v.Address)
+			if canPenalize() {
+				bc.SlashValidator(v.Address, 0.05, "inactivity")
+				changed = true
+				log.Printf("Validator %s slashed for inactivity", v.Address)
+			}
 			continue
 		}
 
 		if v.BlocksProposed > 0 {
 			successRate := float64(v.BlocksIncluded) / float64(v.BlocksProposed)
-			if successRate < MinPerformanceThreshold {
+			if successRate < MinPerformanceThreshold && canPenalize() {
 				penalty := PerformancePenaltyScale * (1 - successRate)
 				bc.SlashValidator(v.Address, penalty, fmt.Sprintf("poor performance (%.2f%%)", successRate*100))
 				changed = true
 				log.Printf("Validator %s slashed for poor performance (%.2f%%)", v.Address, successRate*100)
+				continue
 			}
 		}
 
 		if currentTime.After(v.LockTime) {
-			bc.SlashValidator(v.Address, 0.1, "stake lock expired")
-			changed = true
-			log.Printf("Validator %s slashed for expired stake lock", v.Address)
+			if canPenalize() {
+				bc.SlashValidator(v.Address, 0.1, "stake lock expired")
+				changed = true
+				log.Printf("Validator %s slashed for expired stake lock", v.Address)
+			}
+			continue
 		}
 
 		if v.BlocksProposed > 10 {
 			recentMissRate := float64(v.BlocksProposed-v.BlocksIncluded) / float64(v.BlocksProposed)
-			if recentMissRate > 0.5 {
+			if recentMissRate > 0.5 && canPenalize() {
 				bc.SlashValidator(v.Address, 0.15, "high miss rate")
 				changed = true
 				log.Printf("Validator %s slashed for high miss rate (%.2f%%)", v.Address, recentMissRate*100)
@@ -780,7 +787,28 @@ func (bc *Blockchain_struct) slashValidatorAt(add string, penalty float64, reaso
 }
 
 func (bc *Blockchain_struct) UpdateMinStake(networkLoad float64) {
-	bc.MinStake = 1000000 * float64(constantset.Decimals) * (1 + networkLoad/10)
+	if bc.BaseMinStake <= 0 {
+		bc.BaseMinStake = bc.MinStake
+	}
+	if networkLoad < 0 {
+		networkLoad = 0
+	}
+	bc.MinStake = bc.BaseMinStake * (1 + networkLoad/10)
+}
+
+func (bc *Blockchain_struct) recordValidatorBlockIncluded(address string, timestamp uint64) {
+	for _, validator := range bc.Validators {
+		if validator == nil || !strings.EqualFold(validator.Address, address) {
+			continue
+		}
+		validator.BlocksIncluded++
+		validator.LastActive = time.Unix(int64(timestamp), 0)
+		validator.MissedRounds = 0
+		if validator.SlashReason == "validator node offline or not synced" {
+			validator.SlashReason = ""
+		}
+		return
+	}
 }
 
 func (bc *Blockchain_struct) validatorSelectableOnThisNode(v *Validator, localValidator string) bool {
