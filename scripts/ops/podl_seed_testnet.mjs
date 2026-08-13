@@ -76,7 +76,7 @@ let adminKey = env.DEX_REGISTRY_ADMIN_KEY || "";
 if (!adminKey) {
   adminKey = crypto.randomBytes(32).toString("hex");
   upsertEnv("DEX_REGISTRY_ADMIN_KEY", adminKey);
-  execFileSync("docker", ["compose", "up", "-d", "--force-recreate", "dex-api"], {
+  execFileSync("docker", ["compose", "up", "-d", "--no-deps", "--force-recreate", "dex-api"], {
     cwd: root,
     stdio: "inherit",
   });
