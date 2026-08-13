@@ -1,7 +1,14 @@
+x-podl-logging: &podl-logging
+  driver: json-file
+  options:
+    max-size: "25m"
+    max-file: "4"
+
 services:
   chain:
     image: ${LQD_IMAGE:-podl-blockchain:local}
     restart: unless-stopped
+    logging: *podl-logging
     working_dir: /app
     command: sh scripts/railway/start-chain.sh
     env_file:
@@ -28,6 +35,7 @@ services:
   wallet:
     image: ${LQD_IMAGE:-podl-blockchain:local}
     restart: unless-stopped
+    logging: *podl-logging
     working_dir: /app
     command: sh scripts/railway/start-wallet.sh
     env_file:
@@ -49,6 +57,7 @@ services:
   aggregator:
     image: ${LQD_IMAGE:-podl-blockchain:local}
     restart: unless-stopped
+    logging: *podl-logging
     working_dir: /app
     command: sh scripts/railway/start-aggregator.sh
     env_file:
@@ -73,6 +82,7 @@ services:
   dex-api:
     image: node:20-bookworm-slim
     restart: unless-stopped
+    logging: *podl-logging
     working_dir: /srv
     command: sh -c "npm ci --omit=dev && npm start"
     env_file:
@@ -104,6 +114,7 @@ services:
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
+    logging: *podl-logging
     profiles:
       - proxy
     env_file:

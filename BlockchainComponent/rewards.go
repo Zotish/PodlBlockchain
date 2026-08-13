@@ -5,7 +5,6 @@ import (
 	"math"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
@@ -186,9 +185,7 @@ func (bc *Blockchain_struct) UnlockAvailable(address string) (*big.Int, error) {
 	}
 	bc.LiquidityLocks[address] = kept
 
-	snap := *bc
-	snap.Mutex = sync.Mutex{}
-	if err := PutIntoDB(snap); err != nil {
+	if err := PutIntoDB(bc); err != nil {
 		return big.NewInt(0), err
 	}
 	return released, nil
@@ -306,6 +303,45 @@ func EmissionReward(blockNumber uint64) *big.Int {
 	return new(big.Int).SetUint64(reward)
 }
 
+// ScheduledEmissionThrough returns schedule issuance for blocks 0..height in
+// logarithmic epochs, allowing safe migration of pre-cap chain state.
+func ScheduledEmissionThrough(height uint64) *big.Int {
+	total := big.NewInt(0)
+	start := uint64(0)
+	for start <= height {
+		epochEnd := ((start / BlocksPerHalving) + 1) * BlocksPerHalving
+		end := epochEnd
+		if height != ^uint64(0) && end > height+1 {
+			end = height + 1
+		}
+		count := end - start
+		total.Add(total, new(big.Int).Mul(EmissionReward(start), new(big.Int).SetUint64(count)))
+		if end <= start || end > height {
+			break
+		}
+		start = end
+	}
+	return total
+}
+
+// takeCappedEmission applies the governance supply cap to actual block
+// issuance. EmissionReward remains the public schedule function; consensus
+// rewards use this stateful cap and become zero once the cap is exhausted.
+func (bc *Blockchain_struct) takeCappedEmission(blockNumber uint64) *big.Int {
+	bc.EnsureRuntimeState()
+	cap := NewAmountFromStringOrZero(bc.EconomicPolicy.IssuanceCap)
+	remaining := new(big.Int).Sub(cap, bc.CumulativeEmission)
+	if remaining.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	reward := EmissionReward(blockNumber)
+	if reward.Cmp(remaining) > 0 {
+		reward = remaining
+	}
+	bc.CumulativeEmission.Add(bc.CumulativeEmission, reward)
+	return new(big.Int).Set(reward)
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // BLOCK REWARD DISTRIBUTION
 // ══════════════════════════════════════════════════════════════════════════════
@@ -342,7 +378,7 @@ func (bc *Blockchain_struct) CalculateBlockRewards(
 	}
 
 	// ── 1. Total pool = emission + gas ────────────────────────────────────────
-	emission := EmissionReward(blockNumber)
+	emission := bc.takeCappedEmission(blockNumber)
 	gasReward := new(big.Int).SetUint64(gasFees)
 	total := new(big.Int).Add(emission, gasReward)
 
@@ -617,9 +653,7 @@ func (bc *Blockchain_struct) RecordBlockRewardLedger(block *Block) {
 		})
 	}
 
-	snap := *bc
-	snap.Mutex = sync.Mutex{}
-	if err := PutIntoDB(snap); err != nil {
+	if err := PutIntoDB(bc); err != nil {
 		fmt.Printf("warning: failed to persist reward ledger for block %d: %v\n", block.BlockNumber, err)
 	}
 }

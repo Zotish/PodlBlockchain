@@ -13,6 +13,7 @@ import (
 // Custom source compilation still uses /contract/compile-plugin at runtime,
 // and direct .so upload deploy remains unchanged.
 var builtinTemplates = []string{
+	"advanced_pool",
 	"bridge_token",
 	"dao_treasury",
 	"dex_factory",
@@ -21,8 +22,11 @@ var builtinTemplates = []string{
 	"dex_swap",
 	"lending_pool",
 	"lqd20",
+	"insurance_vault",
 	"nft_collection",
 	"strategy_vault",
+	"test_liquidity_token",
+	"validator_bond",
 }
 
 func main() {

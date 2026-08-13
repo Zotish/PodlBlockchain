@@ -358,7 +358,7 @@ func RunChainDBMigrations() (ChainDBMigrationState, error) {
 			chain.PrunePendingBlocksAtOrBelowTip()
 			chain.Network = nil
 			chain.DLEngine = nil
-			data, marshalErr := json.Marshal(chain)
+			data, marshalErr := json.Marshal(&chain)
 			if marshalErr != nil {
 				return ChainDBMigrationState{}, marshalErr
 			}
@@ -881,16 +881,17 @@ func GetPaginatedBlocksFromDB(page, size int) ([]*Block, uint64, int, error) {
 	return blocks, latest, totalPages, nil
 }
 
-func PutIntoDB(bs Blockchain_struct) error {
+func PutIntoDB(bs *Blockchain_struct) error {
+	if bs == nil {
+		return fmt.Errorf("nil blockchain state")
+	}
 	db, err := getDB()
 	if err != nil {
 		return err
 	}
 
 	batch := new(leveldb.Batch)
-	dbCopy := bs
-	dbCopy.Mutex = sync.Mutex{}
-	data, err := json.Marshal(dbCopy)
+	data, err := json.Marshal(bs)
 	if err != nil {
 		return err
 	}

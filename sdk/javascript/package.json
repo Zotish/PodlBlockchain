@@ -1,0 +1,12 @@
+{
+  "name": "@podl/sdk",
+  "version": "0.2.0-testnet.1",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": { ".": { "types": "./src/index.d.ts", "import": "./src/index.js" } },
+  "files": ["src", "README.md"],
+  "scripts": { "test": "node --test test/*.test.js", "check": "node --check src/index.js" },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}

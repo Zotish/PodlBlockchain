@@ -38,6 +38,7 @@ func main() {
 	minStake := chainCmdSet.Float64("min_stake", 100000, "Minimum stake amount to become a validator")
 	stakeAmount := chainCmdSet.Float64("stake_amount", 2000000, "Amount being staked by the validator (legacy PoS)")
 	miningEnabled := chainCmdSet.Bool("mining", true, "Enable mining on this node")
+	requireSignedBFT := chainCmdSet.Bool("require_signed_bft", strings.EqualFold(strings.TrimSpace(os.Getenv("LQD_REQUIRE_SIGNED_BFT")), "true"), "Reject legacy unsigned finality")
 	dbPath := chainCmdSet.String("db_path", "", "Path to LevelDB for this node")
 	// True PosDL: register via DEX LP position instead of single-asset stake.
 	// When -dex_address is provided the node uses AddDEXValidator; otherwise
@@ -78,6 +79,7 @@ func main() {
 				log.Fatal("Failed to initialize blockchain")
 			}
 			bc.EnsureRuntimeState()
+			bc.ChainSpec.AllowLegacyFinality = !*requireSignedBFT
 			bc.InitLiquiditySystem()
 			bc.MinStake = *minStake
 
@@ -182,7 +184,13 @@ func main() {
 						continue
 					}
 
-					validator, err := bc.SelectValidator()
+					nextHeight := bc.LatestBlockNumber() + 1
+					round := bc.CurrentConsensusRound(nextHeight)
+					if advancedRound, advanced := bc.AdvanceConsensusRound(nextHeight, time.Now().Unix()); advanced {
+						round = advancedRound
+						log.Printf("Consensus view change: height=%d round=%d", nextHeight, round)
+					}
+					validator, err := bc.SelectBlockProposer(nextHeight, round)
 					if err != nil {
 						log.Printf("Validator selection error: %v", err)
 						time.Sleep(0 * time.Second)

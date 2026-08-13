@@ -236,6 +236,7 @@ Site config:
 
 - Base directory: `blockchain-explorer`
 - Build command: `npm run build`
+- Publish directory: `dist`
 - Publish directory: `build`
 
 Environment variables:

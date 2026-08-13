@@ -55,7 +55,11 @@ func NewLQDContractEngine() (*LQDContractEngine, error) {
 // DB LAYER
 
 type ContractDB struct {
-	db *leveldb.DB
+	db             *leveldb.DB
+	parent         *ContractDB
+	overlay        map[string][]byte
+	overlayDeletes map[string]bool
+	overlayMu      sync.RWMutex
 }
 type Contract struct {
 	Address    string
@@ -112,13 +116,86 @@ func InitContractDB() (*ContractDB, error) {
 }
 
 func (c *ContractDB) Write(key string, val []byte) error {
+	if c == nil {
+		return fmt.Errorf("nil contract db")
+	}
+	if c.overlay != nil {
+		c.overlayMu.Lock()
+		defer c.overlayMu.Unlock()
+		c.overlay[key] = append([]byte(nil), val...)
+		delete(c.overlayDeletes, key)
+		return nil
+	}
 	return c.db.Put([]byte(key), val, nil)
 }
 func (c *ContractDB) Read(key string) ([]byte, error) {
+	if c == nil {
+		return nil, leveldb.ErrNotFound
+	}
+	if c.overlay != nil {
+		c.overlayMu.RLock()
+		if c.overlayDeletes[key] {
+			c.overlayMu.RUnlock()
+			return nil, leveldb.ErrNotFound
+		}
+		if value, ok := c.overlay[key]; ok {
+			out := append([]byte(nil), value...)
+			c.overlayMu.RUnlock()
+			return out, nil
+		}
+		c.overlayMu.RUnlock()
+		return c.parent.Read(key)
+	}
 	return c.db.Get([]byte(key), nil)
 }
 func (c *ContractDB) Delete(key string) error {
+	if c == nil {
+		return fmt.Errorf("nil contract db")
+	}
+	if c.overlay != nil {
+		c.overlayMu.Lock()
+		defer c.overlayMu.Unlock()
+		delete(c.overlay, key)
+		c.overlayDeletes[key] = true
+		return nil
+	}
 	return c.db.Delete([]byte(key), nil)
+}
+
+// NewOverlayContractDB creates a copy-on-write contract-state view. It is used
+// by incoming block replay so unfinalized or invalid blocks never mutate the
+// durable LevelDB.
+func NewOverlayContractDB(parent *ContractDB) *ContractDB {
+	return &ContractDB{parent: parent, overlay: make(map[string][]byte), overlayDeletes: make(map[string]bool)}
+}
+
+func (c *ContractDB) FlushOverlay() error {
+	if c == nil || c.overlay == nil || c.parent == nil {
+		return fmt.Errorf("contract db is not an overlay")
+	}
+	c.overlayMu.RLock()
+	defer c.overlayMu.RUnlock()
+	if c.parent.overlay != nil {
+		for key := range c.overlayDeletes {
+			if err := c.parent.Delete(key); err != nil {
+				return err
+			}
+		}
+		for key, value := range c.overlay {
+			if err := c.parent.Write(key, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	batch := new(leveldb.Batch)
+	for key := range c.overlayDeletes {
+		batch.Delete([]byte(key))
+	}
+	for key, value := range c.overlay {
+		batch.Put([]byte(key), value)
+	}
+	return c.parent.db.Write(batch, nil)
 }
 
 func (c *ContractDB) SaveContractMetadata(addr string, meta *ContractMetadata) error {
@@ -140,6 +217,37 @@ func (c *ContractDB) SaveStorage(addr, key, val string) error {
 	return c.Write("contract:"+addr+":storage:"+key, []byte(val))
 }
 
+// SaveStorageBatch atomically applies storage changes across one or more
+// contracts. Durable databases use one LevelDB batch; replay overlays publish
+// the complete write set while holding one lock.
+func (c *ContractDB) SaveStorageBatch(writes map[string]map[string]string) error {
+	if c == nil {
+		return fmt.Errorf("nil contract db")
+	}
+	if c.overlay != nil {
+		c.overlayMu.Lock()
+		defer c.overlayMu.Unlock()
+		for addr, values := range writes {
+			for key, value := range values {
+				storageKey := "contract:" + addr + ":storage:" + key
+				c.overlay[storageKey] = []byte(value)
+				delete(c.overlayDeletes, storageKey)
+			}
+		}
+		return nil
+	}
+	if c.db == nil {
+		return fmt.Errorf("contract database unavailable")
+	}
+	batch := new(leveldb.Batch)
+	for addr, values := range writes {
+		for key, value := range values {
+			batch.Put([]byte("contract:"+addr+":storage:"+key), []byte(value))
+		}
+	}
+	return c.db.Write(batch, nil)
+}
+
 func (c *ContractDB) LoadStorage(addr, key string) (string, error) {
 	b, err := c.Read("contract:" + addr + ":storage:" + key)
 	if err != nil {
@@ -151,6 +259,29 @@ func (c *ContractDB) LoadStorage(addr, key string) (string, error) {
 // ListContractAddresses returns all deployed contract addresses by scanning
 // metadata keys in the format "contract:{addr}:meta".
 func (c *ContractDB) ListContractAddresses() []string {
+	if c.overlay != nil {
+		seen := map[string]bool{}
+		out := []string{}
+		if c.parent != nil {
+			for _, addr := range c.parent.ListContractAddresses() {
+				seen[addr] = true
+				out = append(out, addr)
+			}
+		}
+		c.overlayMu.RLock()
+		for key := range c.overlay {
+			if strings.HasPrefix(key, "contract:") && strings.HasSuffix(key, ":meta") {
+				addr := key[len("contract:") : len(key)-len(":meta")]
+				if addr != "" && !seen[addr] && !c.overlayDeletes[key] {
+					seen[addr] = true
+					out = append(out, addr)
+				}
+			}
+		}
+		c.overlayMu.RUnlock()
+		sort.Strings(out)
+		return out
+	}
 	iter := c.db.NewIterator(nil, nil)
 	defer iter.Release()
 
@@ -173,6 +304,32 @@ func (c *ContractDB) ListContractAddresses() []string {
 }
 
 func (c *ContractDB) LoadAllStorage(addr string) (map[string]string, error) {
+	if c.overlay != nil {
+		out := map[string]string{}
+		if c.parent != nil {
+			parentValues, err := c.parent.LoadAllStorage(addr)
+			if err != nil {
+				return nil, err
+			}
+			for key, value := range parentValues {
+				out[key] = value
+			}
+		}
+		prefix := "contract:" + addr + ":storage:"
+		c.overlayMu.RLock()
+		for key := range c.overlayDeletes {
+			if strings.HasPrefix(key, prefix) {
+				delete(out, key[len(prefix):])
+			}
+		}
+		for key, value := range c.overlay {
+			if strings.HasPrefix(key, prefix) {
+				out[key[len(prefix):]] = string(value)
+			}
+		}
+		c.overlayMu.RUnlock()
+		return out, nil
+	}
 	iter := c.db.NewIterator(nil, nil)
 	defer iter.Release()
 
@@ -878,8 +1035,14 @@ const (
 )
 
 type Bytecode struct {
-	Ops  []OpCode
-	Args []string
+	Ops          []OpCode        `json:"ops"`
+	Args         []string        `json:"args,omitempty"`
+	Instructions []VMInstruction `json:"instructions"`
+}
+
+type VMInstruction struct {
+	Op   OpCode   `json:"op"`
+	Args []string `json:"args,omitempty"`
 }
 
 type InterpreterVM struct{}
@@ -888,139 +1051,133 @@ func NewInterpreterVM() *InterpreterVM { return &InterpreterVM{} }
 
 func (ivm *InterpreterVM) CompileGoSubset(src string) (*Bytecode, error) {
 	out := &Bytecode{}
-	lines := strings.Split(src, " ")
-
-	for _, ln := range lines {
-		if ln == "" {
+	lines := strings.FieldsFunc(src, func(r rune) bool { return r == '\n' || r == ';' })
+	if len(lines) == 0 || len(lines) > 1024 {
+		return nil, fmt.Errorf("hardened VM requires 1..1024 instructions")
+	}
+	definitions := map[string]struct {
+		op       OpCode
+		min, max int
+	}{
+		"SET": {OP_SET, 2, 2}, "GET": {OP_GET, 1, 1}, "ADD": {OP_ADD, 2, 2}, "SUB": {OP_SUB, 2, 2},
+		"EQ": {OP_EQ, 2, 2}, "NEQ": {OP_NEQ, 2, 2}, "JMP": {OP_JMP, 1, 1}, "JMPIF": {OP_JMPIF, 1, 1},
+		"CALL": {OP_CALL, 2, 2}, "REVERT": {OP_REVERT, 1, 32},
+	}
+	for lineNumber, line := range lines {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 0 {
 			continue
 		}
-
-		parts := strings.Split(ln, " ")
-
-		switch parts[0] {
-
-		case "SET":
-			out.Ops = append(out.Ops, OP_SET)
-			out.Args = append(out.Args, parts[1], parts[2])
-
-		case "GET":
-			out.Ops = append(out.Ops, OP_GET)
-			out.Args = append(out.Args, parts[1])
-
-		case "ADD":
-			out.Ops = append(out.Ops, OP_ADD)
-			out.Args = append(out.Args, parts[1], parts[2])
-
-		case "SUB":
-			out.Ops = append(out.Ops, OP_SUB)
-			out.Args = append(out.Args, parts[1], parts[2])
-
-		case "EQ":
-			out.Ops = append(out.Ops, OP_EQ)
-			out.Args = append(out.Args, parts[1], parts[2])
-
-		case "NEQ":
-			out.Ops = append(out.Ops, OP_NEQ)
-			out.Args = append(out.Args, parts[1], parts[2])
-
-		case "JMP":
-			out.Ops = append(out.Ops, OP_JMP)
-			out.Args = append(out.Args, parts[1])
-
-		case "JMPIF":
-			out.Ops = append(out.Ops, OP_JMPIF)
-			out.Args = append(out.Args, parts[1])
-
-		case "CALL":
-			out.Ops = append(out.Ops, OP_CALL)
-			out.Args = append(out.Args, parts[1], parts[2])
-
-		case "REVERT":
-			out.Ops = append(out.Ops, OP_REVERT)
-			out.Args = append(out.Args, parts[1])
-
-		default:
-			out.Ops = append(out.Ops, OP_NOOP)
+		definition, ok := definitions[strings.ToUpper(fields[0])]
+		if !ok {
+			return nil, fmt.Errorf("hardened VM line %d: unknown opcode %q", lineNumber+1, fields[0])
+		}
+		args := append([]string(nil), fields[1:]...)
+		if len(args) < definition.min || len(args) > definition.max {
+			return nil, fmt.Errorf("hardened VM line %d: invalid operand count", lineNumber+1)
+		}
+		if definition.op == OP_REVERT {
+			args = []string{strings.Join(args, " ")}
+		}
+		for _, arg := range args {
+			if len(arg) == 0 || len(arg) > 512 {
+				return nil, fmt.Errorf("hardened VM line %d: operand length invalid", lineNumber+1)
+			}
+		}
+		out.Instructions = append(out.Instructions, VMInstruction{Op: definition.op, Args: args})
+		out.Ops = append(out.Ops, definition.op)
+		out.Args = append(out.Args, args...)
+	}
+	if len(out.Instructions) == 0 {
+		return nil, fmt.Errorf("hardened VM requires at least one non-empty instruction")
+	}
+	for pc, instruction := range out.Instructions {
+		if instruction.Op != OP_JMP && instruction.Op != OP_JMPIF {
+			continue
+		}
+		target, err := strconv.Atoi(instruction.Args[0])
+		if err != nil || target < 0 || target >= len(out.Instructions) {
+			return nil, fmt.Errorf("hardened VM instruction %d: jump target out of range", pc)
 		}
 	}
-
 	return out, nil
 }
 
 func (ivm *InterpreterVM) ExecuteBytecode(addr string, bc *Bytecode, ctx *Context) (*ContractExecutionResult, error) {
-
+	if bc == nil || ctx == nil || len(bc.Instructions) == 0 || len(bc.Instructions) > 1024 {
+		return nil, fmt.Errorf("invalid hardened VM bytecode")
+	}
 	pc := 0
-
-	for pc < len(bc.Ops) {
-
-		op := bc.Ops[pc]
-
-		switch op {
-
+	steps := 0
+	valueOf := func(operand string) *big.Int {
+		if literal, ok := new(big.Int).SetString(operand, 10); ok {
+			return literal
+		}
+		return parseBig(ctx.Get(operand))
+	}
+	for pc < len(bc.Instructions) {
+		steps++
+		if steps > 100000 {
+			return nil, fmt.Errorf("hardened VM step limit exceeded")
+		}
+		ctx.consumeGas(50)
+		instruction := bc.Instructions[pc]
+		switch instruction.Op {
 		case OP_SET:
-			k := bc.Args[pc*2]
-			v := bc.Args[pc*2+1]
-			ctx.Set(k, v)
-
+			ctx.Set(instruction.Args[0], instruction.Args[1])
 		case OP_GET:
-			_ = ctx.Get(bc.Args[pc])
-
+			ctx.Set("output", ctx.Get(instruction.Args[0]))
 		case OP_ADD:
-			a := parseBig(ctx.Get(bc.Args[pc*2]))
-			b := parseBig(ctx.Get(bc.Args[pc*2+1]))
-			ctx.Set(bc.Args[pc*2], new(big.Int).Add(a, b).String())
-
+			a, b := parseBig(ctx.Get(instruction.Args[0])), valueOf(instruction.Args[1])
+			ctx.Set(instruction.Args[0], new(big.Int).Add(a, b).String())
 		case OP_SUB:
-			a := parseBig(ctx.Get(bc.Args[pc*2]))
-			b := parseBig(ctx.Get(bc.Args[pc*2+1]))
-			ctx.Set(bc.Args[pc*2], new(big.Int).Sub(a, b).String())
-
+			a, b := parseBig(ctx.Get(instruction.Args[0])), valueOf(instruction.Args[1])
+			if a.Cmp(b) < 0 {
+				return nil, fmt.Errorf("hardened VM unsigned subtraction underflow")
+			}
+			ctx.Set(instruction.Args[0], new(big.Int).Sub(a, b).String())
 		case OP_EQ:
-			if ctx.Get(bc.Args[pc*2]) == ctx.Get(bc.Args[pc*2+1]) {
+			if ctx.Get(instruction.Args[0]) == ctx.Get(instruction.Args[1]) {
 				ctx.Set("__cmp", "1")
 			} else {
 				ctx.Set("__cmp", "0")
 			}
-
 		case OP_NEQ:
-			if ctx.Get(bc.Args[pc*2]) != ctx.Get(bc.Args[pc*2+1]) {
+			if ctx.Get(instruction.Args[0]) != ctx.Get(instruction.Args[1]) {
 				ctx.Set("__cmp", "1")
 			} else {
 				ctx.Set("__cmp", "0")
 			}
-
 		case OP_JMP:
-			idx, _ := strconv.Atoi(bc.Args[pc])
-			pc = idx
+			pc, _ = strconv.Atoi(instruction.Args[0])
 			continue
-
 		case OP_JMPIF:
-			idx, _ := strconv.Atoi(bc.Args[pc])
 			if ctx.Get("__cmp") == "1" {
-				pc = idx
+				pc, _ = strconv.Atoi(instruction.Args[0])
 				continue
 			}
-
 		case OP_CALL:
-			target := bc.Args[pc*2]
-			fn := bc.Args[pc*2+1]
-			_, err := ctx.Call(target, fn, []string{})
-			if err != nil {
+			target, fn := strings.ToLower(instruction.Args[0]), instruction.Args[1]
+			if !ValidateAddress(target) || strings.TrimSpace(fn) == "" {
+				return nil, fmt.Errorf("hardened VM invalid call target")
+			}
+			if _, err := ctx.Call(target, fn, []string{}); err != nil {
 				return nil, err
 			}
-
 		case OP_REVERT:
-			ctx.Revert(bc.Args[pc])
+			ctx.Revert(instruction.Args[0])
+		default:
+			return nil, fmt.Errorf("hardened VM invalid opcode")
 		}
-
 		pc++
 	}
-
-	ctx.Commit()
-
+	if err := ctx.Commit(); err != nil {
+		return nil, err
+	}
 	return &ContractExecutionResult{
 		Success: true,
 		GasUsed: ctx.GasUsed,
+		Output:  ctx.Get("output"),
 		Storage: ctx.tempStorage,
 		Events:  ctx.events,
 	}, nil
@@ -1045,13 +1202,33 @@ type DSLVM struct{}
 func NewDSLVM() *DSLVM { return &DSLVM{} }
 
 func (d *DSLVM) CompileDSL(src string) ([]string, error) {
-	out := []string{}
-	parts := strings.Split(src, " ")
-
-	for _, s := range parts {
-		if strings.TrimSpace(s) != "" {
-			out = append(out, s)
+	parts := strings.FieldsFunc(src, func(r rune) bool { return r == '\n' || r == ';' })
+	if len(parts) == 0 || len(parts) > 1024 {
+		return nil, fmt.Errorf("DSL requires 1..1024 statements")
+	}
+	out := make([]string, 0, len(parts))
+	for i, raw := range parts {
+		line := strings.TrimSpace(raw)
+		valid := false
+		switch {
+		case strings.HasPrefix(line, "emit "):
+			valid = len(strings.Fields(line)) == 2
+		case strings.HasPrefix(line, "call "):
+			body := strings.TrimSpace(strings.TrimPrefix(line, "call "))
+			pieces := strings.Split(body, ".")
+			valid = len(pieces) == 2 && ValidateAddress(strings.ToLower(pieces[0])) && strings.TrimSpace(pieces[1]) != ""
+		case strings.Contains(line, "+="):
+			kv := strings.SplitN(line, "+=", 2)
+			_, numberOK := new(big.Int).SetString(strings.TrimSpace(kv[1]), 10)
+			valid = strings.TrimSpace(kv[0]) != "" && numberOK
+		case strings.Contains(line, "="):
+			kv := strings.SplitN(line, "=", 2)
+			valid = strings.TrimSpace(kv[0]) != "" && strings.TrimSpace(kv[1]) != ""
 		}
+		if !valid || len(line) > 1024 {
+			return nil, fmt.Errorf("invalid DSL statement %d", i+1)
+		}
+		out = append(out, line)
 	}
 	return out, nil
 }
@@ -1059,36 +1236,41 @@ func (d *DSLVM) CompileDSL(src string) ([]string, error) {
 func (d *DSLVM) ExecuteDSL(addr string, lines []string, ctx *Context) (*ContractExecutionResult, error) {
 
 	for _, ln := range lines {
+		ctx.consumeGas(50)
 
 		// key=value
 		if strings.Contains(ln, "=") && !strings.Contains(ln, "+=") {
 			kv := strings.SplitN(ln, "=", 2)
-			ctx.Set(kv[0], kv[1])
+			ctx.Set(strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1]))
 			continue
 		}
 
 		// key+=N
 		if strings.Contains(ln, "+=") {
 			kv := strings.SplitN(ln, "+=", 2)
-			cur := parseBig(ctx.Get(kv[0]))
-			add := parseBig(kv[1])
-			ctx.Set(kv[0], new(big.Int).Add(cur, add).String())
+			key := strings.TrimSpace(kv[0])
+			cur := parseBig(ctx.Get(key))
+			add := parseBig(strings.TrimSpace(kv[1]))
+			ctx.Set(key, new(big.Int).Add(cur, add).String())
 			continue
 		}
 
 		// emit X
-		if strings.HasPrefix(ln, "emit") {
-			ev := strings.TrimPrefix(ln, "emit")
+		if strings.HasPrefix(ln, "emit ") {
+			ev := strings.TrimSpace(strings.TrimPrefix(ln, "emit "))
 			ctx.Emit(ev, map[string]interface{}{"msg": ev})
 			continue
 		}
 
 		// call A.fn
-		if strings.Contains(ln, "call") {
-			body := strings.TrimPrefix(ln, "call")
+		if strings.HasPrefix(ln, "call ") {
+			body := strings.TrimSpace(strings.TrimPrefix(ln, "call "))
 			parts := strings.Split(body, ".")
-			tgt := parts[0]
-			fn := parts[1]
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid DSL call")
+			}
+			tgt := strings.ToLower(strings.TrimSpace(parts[0]))
+			fn := strings.TrimSpace(parts[1])
 			_, err := ctx.Call(tgt, fn, []string{})
 			if err != nil {
 				return nil, err
@@ -1097,7 +1279,9 @@ func (d *DSLVM) ExecuteDSL(addr string, lines []string, ctx *Context) (*Contract
 		}
 	}
 
-	ctx.Commit()
+	if err := ctx.Commit(); err != nil {
+		return nil, err
+	}
 
 	return &ContractExecutionResult{
 		Success: true,
@@ -1398,13 +1582,21 @@ func inferBuiltinName(meta *ContractMetadata) string {
 		return ""
 	}
 	known := map[string]bool{
-		"dex_factory":    true,
-		"dex_pair":       true,
-		"dex_router":     true,
-		"dex_swap":       true,
-		"lqd20":          true,
-		"wlqd":           true,
-		"strategy_vault": true,
+		"advanced_pool":        true,
+		"bridge_token":         true,
+		"dao_treasury":         true,
+		"dex_factory":          true,
+		"dex_pair":             true,
+		"dex_router":           true,
+		"dex_swap":             true,
+		"insurance_vault":      true,
+		"lending_pool":         true,
+		"lqd20":                true,
+		"nft_collection":       true,
+		"strategy_vault":       true,
+		"test_liquidity_token": true,
+		"validator_bond":       true,
+		"wlqd":                 true,
 	}
 	if name := strings.ToLower(strings.TrimSpace(meta.BuiltinName)); known[name] {
 		return name
@@ -1526,8 +1718,15 @@ func (ep *ExecutionPipeline) Execute(addr, caller, fn string, args []string, gas
 // only when the entire call tree succeeds. On any revert the buffer is discarded.
 // value is the native LQD attached to this TX (msg.value); pass nil for 0.
 func (ep *ExecutionPipeline) ExecuteAtomic(addr, caller, fn string, args []string, gas uint64, value *big.Int) (res *ContractExecutionResult, err error) {
+	return ep.ExecuteAtomicAt(addr, caller, fn, args, gas, value, time.Now().Unix())
+}
+
+// ExecuteAtomicAt is the deterministic execution entry used by block replay.
+// Contract time is derived from the proposed block, never the receiver's wall
+// clock.
+func (ep *ExecutionPipeline) ExecuteAtomicAt(addr, caller, fn string, args []string, gas uint64, value *big.Int, blockTime int64) (res *ContractExecutionResult, err error) {
 	txBuf := NewTxBuffer(value, caller, addr)
-	res, err = ep.executeInner(addr, caller, fn, args, gas, txBuf)
+	res, err = ep.executeInner(addr, caller, fn, args, gas, txBuf, blockTime)
 	if err != nil {
 		return nil, err // buffer discarded — full rollback
 	}
@@ -1555,9 +1754,33 @@ func (ep *ExecutionPipeline) ExecuteAtomic(addr, caller, fn string, args []strin
 	return res, nil
 }
 
+// ExecuteContractTxAt re-executes a contract transaction without producing
+// relayer side effects or synthetic mempool event transactions. With an
+// overlay ContractDB, its commit remains isolated until block finalization.
+func (ep *ExecutionPipeline) ExecuteContractTxAt(tx *Transaction, blockTime int64) (*ContractExecutionResult, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("nil transaction")
+	}
+	if tx.Type == "contract_create" {
+		return &ContractExecutionResult{Success: true, Output: "contract created"}, nil
+	}
+	fn, args := tx.Function, tx.Args
+	if fn == "" {
+		parsedFn, parsedArgs, err := parseContractCallData(tx.Data)
+		if err != nil {
+			return nil, err
+		}
+		fn, args = parsedFn, parsedArgs
+	}
+	if fn == "" {
+		return nil, fmt.Errorf("tx missing function selector")
+	}
+	return ep.ExecuteAtomicAt(tx.To, tx.From, fn, args, 5_000_000, tx.Value, blockTime)
+}
+
 // executeInner is the recursive implementation shared by ExecuteAtomic and
 // cross-contract calls within the same TX.
-func (ep *ExecutionPipeline) executeInner(addr, caller, fn string, args []string, gas uint64, txBuf *TxBuffer) (res *ContractExecutionResult, err error) {
+func (ep *ExecutionPipeline) executeInner(addr, caller, fn string, args []string, gas uint64, txBuf *TxBuffer, blockTime int64) (res *ContractExecutionResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			msg := fmt.Sprintf("%v", r)
@@ -1587,11 +1810,12 @@ func (ep *ExecutionPipeline) executeInner(addr, caller, fn string, args []string
 		origin = txBuf.originAddr
 	}
 	ctx := NewContext(addr, caller, origin, rec.Metadata.Owner, ep.Registry.DB, gas)
+	ctx.BlockTime = blockTime
 	ctx.txBuffer = txBuf // atomic mode
 
 	// Cross-contract calls within this TX share the same buffer
 	ctx.callFunc = func(tgt, method string, a []string) (*ContractExecutionResult, error) {
-		return ep.executeInner(tgt, addr, method, a, gas/2, txBuf)
+		return ep.executeInner(tgt, addr, method, a, gas/2, txBuf, blockTime)
 	}
 
 	// Contracts can deploy new contracts (e.g., factory creating pair contracts)

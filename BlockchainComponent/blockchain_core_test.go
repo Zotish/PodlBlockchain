@@ -188,10 +188,10 @@ func TestValidateAddress_Invalid(t *testing.T) {
 	// ValidateAddress checks: HasPrefix("0x") && len==42
 	invalid := []string{
 		"",
-		"0x123",                                        // too short
-		"1234567890abcdef1234567890abcdef12345678",     // no prefix
-		"0x1234567890abcdef1234567890abcdef123456789",  // too long (43 chars)
-		"0X1234567890abcdef1234567890abcdef12345678",   // uppercase X prefix
+		"0x123", // too short
+		"1234567890abcdef1234567890abcdef12345678",    // no prefix
+		"0x1234567890abcdef1234567890abcdef123456789", // too long (43 chars)
+		"0X1234567890abcdef1234567890abcdef12345678",  // uppercase X prefix
 	}
 	for _, addr := range invalid {
 		if ValidateAddress(addr) {
@@ -232,7 +232,7 @@ func TestCalculateNextGasLimit_EmptyBlock_Decreases(t *testing.T) {
 	parent := &Block{
 		BlockNumber: 1,
 		GasLimit:    100_000_000, // well above MinGasLimit (21000000) so decrease keeps us in bounds
-		GasUsed:     5_000_000,  // < 50% of 100M → decrease
+		GasUsed:     5_000_000,   // < 50% of 100M → decrease
 	}
 	bc.Blocks = []*Block{parent}
 	limit := bc.CalculateNextGasLimit()
@@ -553,6 +553,27 @@ func TestVerifyTransaction_InvalidChainID_Fails(t *testing.T) {
 	}
 	if bc.VerifyTransaction(tx) {
 		t.Error("transaction with wrong ChainID should fail verification")
+	}
+}
+
+func TestTransactionTimestampClockSkewBoundaries(t *testing.T) {
+	now := uint64(1_700_000_000)
+	for _, tc := range []struct {
+		name      string
+		timestamp uint64
+		want      bool
+	}{
+		{"current", now, true},
+		{"future boundary", now + transactionMaxFutureSeconds, true},
+		{"future outside", now + transactionMaxFutureSeconds + 1, false},
+		{"past boundary", now - transactionMaxPastSeconds, true},
+		{"past outside", now - transactionMaxPastSeconds - 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := transactionTimestampWithinBounds(tc.timestamp, now); got != tc.want {
+				t.Fatalf("timestamp=%d now=%d got=%v want=%v", tc.timestamp, now, got, tc.want)
+			}
+		})
 	}
 }
 

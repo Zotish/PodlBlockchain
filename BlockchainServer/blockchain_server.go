@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,9 +29,20 @@ import (
 )
 
 type BlockchainServer struct {
-	Port          uint                                   `json:"port"`
-	BlockchainPtr *blockchaincomponent.Blockchain_struct `json:"blockchain_ptr"`
-	limiter       *rateLimiter
+	Port            uint                                   `json:"port"`
+	BlockchainPtr   *blockchaincomponent.Blockchain_struct `json:"blockchain_ptr"`
+	limiter         *rateLimiter
+	faucetMu        sync.Mutex
+	faucetAddress   map[string]time.Time
+	faucetIP        map[string]time.Time
+	faucetClaims    uint64
+	faucetDenied    uint64
+	faucetIssued    *big.Int
+	faucetStatePath string
+	faucetStateErr  error
+	indexerMu       sync.Mutex
+	indexer         *ExplorerIndexer
+	indexerErr      error
 }
 type TxEnvelope struct {
 	Transaction *blockchaincomponent.Transaction `json:"transaction"`
@@ -114,11 +126,17 @@ func lookupLiquidityProviderLocked(bc *blockchaincomponent.Blockchain_struct, ad
 }
 
 func NewBlockchainServer(port uint, blockchainPtr *blockchaincomponent.Blockchain_struct) *BlockchainServer {
-	return &BlockchainServer{
+	server := &BlockchainServer{
 		Port:          port,
 		BlockchainPtr: blockchainPtr,
 		limiter:       newRateLimiter(100, 200),
+		faucetAddress: make(map[string]time.Time),
+		faucetIP:      make(map[string]time.Time),
+		faucetIssued:  big.NewInt(0),
 	}
+	server.faucetStatePath = defaultFaucetStatePath()
+	server.faucetStateErr = server.loadFaucetState()
+	return server
 }
 
 func (b *BlockchainServer) currentChainTip() (uint64, string) {
@@ -474,10 +492,8 @@ func (bcs *BlockchainServer) GetBridgeTokens(w http.ResponseWriter, r *http.Requ
 
 func (bcs *BlockchainServer) persistBridgeTokenState() error {
 	bcs.BlockchainPtr.Mutex.Lock()
-	dbCopy := *bcs.BlockchainPtr
-	dbCopy.Mutex = sync.Mutex{}
-	bcs.BlockchainPtr.Mutex.Unlock()
-	return blockchaincomponent.PutIntoDB(dbCopy)
+	defer bcs.BlockchainPtr.Mutex.Unlock()
+	return blockchaincomponent.PutIntoDB(bcs.BlockchainPtr)
 }
 
 func persistBridgeTokenRegistry(info *blockchaincomponent.BridgeTokenInfo) error {
@@ -1095,9 +1111,63 @@ func (bcs *BlockchainServer) Faucet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid address", http.StatusBadRequest)
 		return
 	}
+	address = strings.ToLower(address)
+	ip := r.RemoteAddr
+	if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
+		ip = host
+	}
+	ip = faucetIPKey(ip)
+	now := time.Now()
+	addressCooldown := 24 * time.Hour
+	ipCooldown := time.Minute
+	budget := blockchaincomponent.NewAmountFromUint64(100000000000000000)
+	bcs.faucetMu.Lock()
+	if bcs.faucetStateErr != nil {
+		bcs.faucetDenied++
+		bcs.faucetMu.Unlock()
+		http.Error(w, `{"error":"faucet persistence unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if claimedAt, ok := bcs.faucetAddress[address]; ok && now.Sub(claimedAt) < addressCooldown {
+		bcs.faucetDenied++
+		remaining := addressCooldown - now.Sub(claimedAt)
+		bcs.faucetMu.Unlock()
+		w.Header().Set("Retry-After", strconv.FormatInt(int64(remaining.Seconds()), 10))
+		http.Error(w, `{"error":"address faucet cooldown active"}`, http.StatusTooManyRequests)
+		return
+	}
+	if claimedAt, ok := bcs.faucetIP[ip]; ok && now.Sub(claimedAt) < ipCooldown {
+		bcs.faucetDenied++
+		remaining := ipCooldown - now.Sub(claimedAt)
+		bcs.faucetMu.Unlock()
+		w.Header().Set("Retry-After", strconv.FormatInt(int64(remaining.Seconds()), 10))
+		http.Error(w, `{"error":"faucet IP cooldown active"}`, http.StatusTooManyRequests)
+		return
+	}
+	amount := blockchaincomponent.NewAmountFromUint64(100000000000000)
+	if new(big.Int).Add(bcs.faucetIssued, amount).Cmp(budget) > 0 {
+		bcs.faucetDenied++
+		bcs.faucetMu.Unlock()
+		http.Error(w, `{"error":"testnet faucet budget exhausted"}`, http.StatusServiceUnavailable)
+		return
+	}
+	bcs.faucetAddress[address], bcs.faucetIP[ip] = now, now
+	bcs.faucetClaims++
+	bcs.faucetIssued.Add(bcs.faucetIssued, amount)
+	if err := bcs.persistFaucetStateLocked(); err != nil {
+		delete(bcs.faucetAddress, address)
+		delete(bcs.faucetIP, ip)
+		bcs.faucetClaims--
+		bcs.faucetIssued.Sub(bcs.faucetIssued, amount)
+		bcs.faucetStateErr = err
+		bcs.faucetDenied++
+		bcs.faucetMu.Unlock()
+		http.Error(w, `{"error":"faucet state could not be persisted"}`, http.StatusServiceUnavailable)
+		return
+	}
+	bcs.faucetMu.Unlock()
 
 	// credit directly (test faucet)
-	amount := blockchaincomponent.NewAmountFromUint64(100000000000000)
 	bcs.BlockchainPtr.AddAccountBalance(address, amount)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{"credited": amount.String(), "address": address})
@@ -2787,9 +2857,7 @@ func (bcs *BlockchainServer) AddValidatorFromPeer(w http.ResponseWriter, r *http
 	bcs.BlockchainPtr.Validators = append(bcs.BlockchainPtr.Validators, &copy)
 
 	// Persist (optional but recommended)
-	dbCopy := *bcs.BlockchainPtr
-	dbCopy.Mutex = sync.Mutex{}
-	if err := blockchaincomponent.PutIntoDB(dbCopy); err != nil {
+	if err := blockchaincomponent.PutIntoDB(bcs.BlockchainPtr); err != nil {
 		log.Printf("persist validator merge failed: %v", err)
 	}
 
@@ -4299,7 +4367,7 @@ func (b *BlockchainServer) DeployBuiltin(w http.ResponseWriter, r *http.Request)
 
 	// Validate template name (whitelist)
 	validTemplates := map[string]bool{
-		"lqd20": true, "wlqd": true, "dex_swap": true, "dex_factory": true, "dex_router": true, "dex_pair": true, "strategy_vault": true,
+		"lqd20": true, "wlqd": true, "dex_swap": true, "dex_factory": true, "dex_router": true, "dex_pair": true, "advanced_pool": true, "strategy_vault": true, "test_liquidity_token": true,
 		"bridge_token": true, "lending_pool": true, "nft_collection": true, "dao_treasury": true,
 	}
 	if !validTemplates[req.Template] {
@@ -4725,11 +4793,18 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 	localValidator := ""
 	baseFee := uint64(0)
 	peers := []map[string]interface{}{}
+	var network *blockchaincomponent.NetworkService
+	latestStateRoot := ""
+	guardianMembers, guardianThreshold := 0, 0
+	guardianExpiry := uint64(0)
+	slashingCouncilMembers, slashingCouncilThreshold := 0, 0
+	slashingCouncilExpiry := uint64(0)
 
 	if b.BlockchainPtr != nil {
 		b.BlockchainPtr.Mutex.Lock()
 		if len(b.BlockchainPtr.Blocks) > 0 && b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1] != nil {
 			memoryHeight = b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1].BlockNumber
+			latestStateRoot = b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1].StateRoot
 		}
 		mempool = len(b.BlockchainPtr.Transaction_pool)
 		validatorsTotal = len(b.BlockchainPtr.Validators)
@@ -4737,10 +4812,21 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 		pendingBlocks = len(b.BlockchainPtr.PendingBlocks)
 		localValidator = strings.TrimSpace(b.BlockchainPtr.LocalValidator)
 		baseFee = b.BlockchainPtr.BaseFee
-		if b.BlockchainPtr.Network != nil {
-			peers = b.BlockchainPtr.Network.PeerStatusSnapshot()
+		if b.BlockchainPtr.Governance != nil {
+			guardianMembers = len(b.BlockchainPtr.Governance.Guardians)
+			guardianThreshold = b.BlockchainPtr.Governance.GuardianThreshold
+			guardianExpiry = b.BlockchainPtr.Governance.GuardianExpiryBlock
+			slashingCouncilMembers = len(b.BlockchainPtr.Governance.SlashingCouncil)
+			slashingCouncilThreshold = b.BlockchainPtr.Governance.SlashingCouncilThreshold
+			slashingCouncilExpiry = b.BlockchainPtr.Governance.SlashingCouncilExpiryBlock
 		}
+		network = b.BlockchainPtr.Network
 		b.BlockchainPtr.Mutex.Unlock()
+		// PeerStatusSnapshot reads chain height internally; call it outside the
+		// chain mutex to avoid a self-deadlock on readiness requests.
+		if network != nil {
+			peers = network.PeerStatusSnapshot()
+		}
 	}
 
 	activePeers := 0
@@ -4796,6 +4882,85 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 	addCheck("pending_block_pressure", pendingBlocks < 100, false, fmt.Sprintf("pending_blocks=%d", pendingBlocks))
 	addCheck("mempool_pressure", mempool < 50000, false, fmt.Sprintf("mempool=%d", mempool))
 	addCheck("base_fee_floor", baseFee >= uint64(constantset.MinBaseFee), false, fmt.Sprintf("base_fee=%d min=%d", baseFee, constantset.MinBaseFee))
+	indexReady, indexMessage := false, "indexer unavailable"
+	if index, err := b.ensureExplorerIndexer(); err == nil {
+		indexedHeight, indexedTransactions, lag, lastSync := index.Metrics(height)
+		indexReady = lag <= 2 && lastSync > 0
+		indexMessage = fmt.Sprintf("indexed_height=%d lag=%d transactions=%d last_sync=%d", indexedHeight, lag, indexedTransactions, lastSync)
+	} else {
+		indexMessage = err.Error()
+	}
+	addCheck("persistent_explorer_index", indexReady, true, indexMessage)
+	specOK := false
+	legacyFinalityDisabled := false
+	consensusReady := false
+	signedFinality := false
+	hybridBonded := false
+	if b.BlockchainPtr != nil {
+		specOK = b.BlockchainPtr.ChainSpec.Validate() == nil
+		legacyFinalityDisabled = !b.BlockchainPtr.ChainSpec.AllowLegacyFinality
+		consensus := b.BlockchainPtr.ConsensusStatus()
+		consensusReady, _ = consensus["ready"].(bool)
+		hybridBonded, _ = consensus["hybrid_bonded"].(bool)
+		if qc, ok := consensus["last_qc"].(*blockchaincomponent.QuorumCertificate); ok && qc != nil {
+			signedFinality = qc.Step == blockchaincomponent.StepPrecommit
+		}
+	}
+	addCheck("protocol_spec", specOK, true, "chain/genesis/protocol/state versions must be valid")
+	addCheck("deterministic_state_commitment", height == 0 || latestStateRoot != "", true, fmt.Sprintf("latest_state_root=%s", latestStateRoot))
+	addCheck("bft_validator_set", consensusReady && validatorsTotal >= 4, true, fmt.Sprintf("validators=%d requires>=4", validatorsTotal))
+	addCheck("hybrid_native_bonds", hybridBonded, true, "every active validator requires a native bond; liquidity credit is capped")
+	addCheck("signed_bft_finality_observed", signedFinality, true, "a signed precommit quorum certificate must be observed")
+	addCheck("legacy_finality_disabled", legacyFinalityDisabled, true, "run with LQD_REQUIRE_SIGNED_BFT=true for a mainnet candidate")
+	bridgeThresholdReady := false
+	oraclePoolsReady := false
+	governanceReady := false
+	if b.BlockchainPtr != nil {
+		bridgeStatus := b.BlockchainPtr.BridgeSecurityStatus()
+		bridgeThresholdReady, _ = bridgeStatus["mainnet_threshold_ready"].(bool)
+		lightClientReady, _ := bridgeStatus["light_client_mode_ready"].(bool)
+		bridgeThresholdReady = bridgeThresholdReady || lightClientReady
+		liquidityStatus := b.BlockchainPtr.LiquidityQualityStatus()
+		if pools, ok := liquidityStatus["pools"].([]blockchaincomponent.LiquidityQuality); ok && len(pools) > 0 {
+			oraclePoolsReady = true
+			for _, pool := range pools {
+				if !pool.Valid || pool.OracleConfidence < 0.5 || pool.CircuitBroken {
+					oraclePoolsReady = false
+					break
+				}
+			}
+		}
+		gov := b.BlockchainPtr.GovernanceStatus()
+		voting, _ := gov["voting_period_blocks"].(uint64)
+		timelock, _ := gov["timelock_blocks"].(uint64)
+		governanceReady = voting > 0 && timelock > 0
+	}
+	addCheck("bridge_proof_security", bridgeThresholdReady, true, "bridge needs enforced >=3 signer threshold or configured verified light-client proofs, plus caps")
+	addCheck("verified_oracle_pool_set", oraclePoolsReady, true, "all production pools need fresh multi-source oracle confidence and no circuit break")
+	addCheck("governance_timelock", governanceReady, false, "snapshot voting and timelock configuration must be active")
+	guardianReady := guardianMembers >= 3 && guardianThreshold >= 2 && guardianThreshold <= guardianMembers && guardianExpiry > height
+	councilReady := slashingCouncilMembers >= 3 && slashingCouncilThreshold >= 2 && slashingCouncilThreshold <= slashingCouncilMembers && slashingCouncilExpiry > height
+	addCheck("expiring_guardian_multisig", guardianReady, true, fmt.Sprintf("members=%d threshold=%d expiry=%d", guardianMembers, guardianThreshold, guardianExpiry))
+	addCheck("independent_slashing_council", councilReady, true, fmt.Sprintf("members=%d threshold=%d expiry=%d", slashingCouncilMembers, slashingCouncilThreshold, slashingCouncilExpiry))
+	signedReportReady := false
+	signedReportMessage := "validator report signer unavailable"
+	if b.BlockchainPtr != nil {
+		if report, err := b.BlockchainPtr.SignInvestorEvidenceReport(time.Now().Unix()); err == nil {
+			signedReportReady = report.Verified
+			signedReportMessage = fmt.Sprintf("signer=%s height=%d payload_hash=%s", report.Signer, report.Height, report.PayloadHash)
+		} else {
+			signedReportMessage = err.Error()
+		}
+	}
+	addCheck("signed_investor_evidence", signedReportReady, false, signedReportMessage)
+	externalAudit := strings.TrimSpace(os.Getenv("LQD_EXTERNAL_AUDIT_REPORT")) != ""
+	soakEvidence := strings.EqualFold(strings.TrimSpace(os.Getenv("LQD_TESTNET_SOAK_COMPLETE")), "true")
+	restoreEvidence := strings.EqualFold(strings.TrimSpace(os.Getenv("LQD_RESTORE_DRILL_COMPLETE")), "true")
+	onCallReady := strings.TrimSpace(os.Getenv("LQD_ONCALL_ALERT_ENDPOINT")) != "" && strings.EqualFold(strings.TrimSpace(os.Getenv("LQD_ONCALL_RUNBOOK_ACK")), "true")
+	addCheck("independent_security_audit", externalAudit, true, "set LQD_EXTERNAL_AUDIT_REPORT only after an independent report is published")
+	addCheck("public_testnet_soak", soakEvidence, true, "30-60 day public multi-validator soak evidence required")
+	addCheck("restore_and_incident_drill", restoreEvidence, true, "verified backup/restore and incident drill required")
+	addCheck("oncall_alert_route", onCallReady, true, "an acknowledged on-call rotation and live alert endpoint are required")
 
 	status := "ready_for_testnet_observation"
 	recommendation := "Run 30-60 days of testnet soak, validator onboarding, restore drills, and external audit before mainnet."
@@ -4809,6 +4974,9 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 	out := map[string]interface{}{
 		"status":                           status,
 		"mainnet_compatible_checks_passed": criticalFailures == 0,
+		"launch_mainnet_allowed":           criticalFailures == 0,
+		"testnet_recommended":              true,
+		"completion_score_percent":         int(math.Round(float64(len(checks)-criticalFailures-warnings) * 100 / math.Max(1, float64(len(checks))))),
 		"recommendation":                   recommendation,
 		"height":                           height,
 		"latest_block_hash":                latestHash,
@@ -4837,6 +5005,101 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 		out["migration_error"] = migrationErr.Error()
 	}
 	json.NewEncoder(w).Encode(out)
+}
+
+// ProtocolStatusV2 is the stable, versioned investor/operator summary. It
+// exposes protocol, consensus, liquidity quality, economics and governance in
+// one response without returning the full chain database.
+func (b *BlockchainServer) ProtocolStatusV2(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if b.BlockchainPtr == nil {
+		http.Error(w, `{"error":"chain unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	height, hash := b.currentChainTip()
+	now := time.Now().Unix()
+	out := map[string]interface{}{
+		"api_version": "v2", "height": height, "latest_block_hash": hash,
+		"protocol":          b.BlockchainPtr.ProtocolStatus(),
+		"consensus":         b.BlockchainPtr.ConsensusStatus(),
+		"liquidity":         b.BlockchainPtr.LiquidityQualityStatus(),
+		"dynamic_liquidity": b.BlockchainPtr.DynamicLiquidityStatus(),
+		"economics":         b.BlockchainPtr.EconomicStatus(),
+		"economic_history":  b.BlockchainPtr.EconomicTimeSeries(90, time.Now().Unix()),
+		"governance":        b.BlockchainPtr.GovernanceStatus(),
+		"bridge_security":   b.BlockchainPtr.BridgeSecurityStatus(),
+		"products":          b.BlockchainPtr.ProductStatus(),
+		"investor_metrics":  b.BlockchainPtr.InvestorMetrics(),
+		"timestamp":         now,
+	}
+	if report, err := b.BlockchainPtr.SignInvestorEvidenceReport(now); err == nil {
+		out["signed_investor_report"] = report
+	} else {
+		out["signed_investor_report"] = map[string]interface{}{"available": false, "reason": err.Error()}
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (b *BlockchainServer) RetailSuitability(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	setCORSHeaders(w, r)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var answers blockchaincomponent.SuitabilityAnswers
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024)).Decode(&answers); err != nil {
+		http.Error(w, `{"error":"invalid suitability answers"}`, http.StatusBadRequest)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(blockchaincomponent.EvaluateRetailSuitability(answers))
+}
+
+func (b *BlockchainServer) PrometheusMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	height, _ := b.currentChainTip()
+	validators, mempool, pending, peers := 0, 0, 0, 0
+	if b.BlockchainPtr != nil {
+		b.BlockchainPtr.Mutex.Lock()
+		validators = len(b.BlockchainPtr.Validators)
+		mempool = len(b.BlockchainPtr.Transaction_pool)
+		pending = len(b.BlockchainPtr.PendingBlocks)
+		network := b.BlockchainPtr.Network
+		b.BlockchainPtr.Mutex.Unlock()
+		if network != nil {
+			peers = len(network.PeerStatusSnapshot())
+		}
+	}
+	fmt.Fprintf(w, "# HELP podl_chain_height Latest finalized block height.\n# TYPE podl_chain_height gauge\npodl_chain_height %d\n", height)
+	fmt.Fprintf(w, "# TYPE podl_validators gauge\npodl_validators %d\n", validators)
+	fmt.Fprintf(w, "# TYPE podl_mempool_transactions gauge\npodl_mempool_transactions %d\n", mempool)
+	fmt.Fprintf(w, "# TYPE podl_pending_blocks gauge\npodl_pending_blocks %d\n", pending)
+	fmt.Fprintf(w, "# TYPE podl_peers gauge\npodl_peers %d\n", peers)
+	if index, err := b.ensureExplorerIndexer(); err == nil {
+		indexedHeight, indexedTransactions, lag, lastSync := index.Metrics(height)
+		fmt.Fprintf(w, "# TYPE podl_index_height gauge\npodl_index_height %d\n", indexedHeight)
+		fmt.Fprintf(w, "# TYPE podl_index_lag_blocks gauge\npodl_index_lag_blocks %d\n", lag)
+		fmt.Fprintf(w, "# TYPE podl_index_transactions gauge\npodl_index_transactions %d\n", indexedTransactions)
+		fmt.Fprintf(w, "# TYPE podl_index_last_sync_timestamp_seconds gauge\npodl_index_last_sync_timestamp_seconds %d\n", lastSync)
+	}
+	b.faucetMu.Lock()
+	fmt.Fprintf(w, "# TYPE podl_faucet_claims_total counter\npodl_faucet_claims_total %d\n", b.faucetClaims)
+	fmt.Fprintf(w, "# TYPE podl_faucet_denied_total counter\npodl_faucet_denied_total %d\n", b.faucetDenied)
+	fmt.Fprintf(w, "# TYPE podl_faucet_issued gauge\npodl_faucet_issued %s\n", b.faucetIssued.String())
+	b.faucetMu.Unlock()
 }
 
 func (b *BlockchainServer) OperationsSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -5283,6 +5546,11 @@ func (b *BlockchainServer) Start() {
 	http.HandleFunc("/peers/add", b.AddPeer)
 	http.HandleFunc("/health", b.HealthCheck)
 	http.HandleFunc("/readiness/mainnet", b.MainnetReadiness)
+	http.HandleFunc("/v2/index/status", b.ExplorerIndexStatus)
+	http.HandleFunc("/v2/index/search", b.ExplorerIndexSearch)
+	http.HandleFunc("/v2/protocol/status", b.ProtocolStatusV2)
+	http.HandleFunc("/v2/product/suitability", b.RetailSuitability)
+	http.HandleFunc("/metrics", b.PrometheusMetrics)
 	http.HandleFunc("/ops/snapshot", b.OperationsSnapshot)
 	http.HandleFunc("/ops/recover-tip", b.limiter.middleware(b.RecoverTipFromDB))
 	http.HandleFunc("/ops/db", b.ChainDBStatus)

@@ -33,6 +33,12 @@ type Block struct {
 	GasUsed         uint64               `json:"gas_used"`
 	GasLimit        uint64               `json:"gas_limit"`
 	RewardBreakdown BlockRewardBreakdown `json:"reward_breakdown,omitempty"`
+	ProtocolVersion uint32               `json:"protocol_version,omitempty"`
+	StateRoot       string               `json:"state_root,omitempty"`
+	ParentStateRoot string               `json:"parent_state_root,omitempty"`
+	ConsensusRound  uint32               `json:"consensus_round,omitempty"`
+	QuorumHash      string               `json:"quorum_hash,omitempty"`
+	ProposerProof   *ProposerCertificate `json:"proposer_proof,omitempty"`
 }
 
 func NewBlock(blockNumber uint64, prevHash string) Block {
@@ -43,6 +49,7 @@ func NewBlock(blockNumber uint64, prevHash string) Block {
 	newBlock.Transactions = []*Transaction{}
 	newBlock.GasLimit = uint64(constantset.MaxBlockGas)
 	newBlock.BaseFee = 0
+	newBlock.ProtocolVersion = CurrentProtocolVersion
 	newBlock.RewardBreakdown.ValidatorReward = AmountString(new(big.Int).Mul(big.NewInt(200), big.NewInt(1e8)))
 	newBlock.RewardBreakdown.ParticipantRewards = make(map[string]string)
 	newBlock.RewardBreakdown.ParticipantRewardAddresses = make(map[string]string)
@@ -152,8 +159,69 @@ func (bc *Blockchain_struct) verifyTxWorker(
 	}
 }
 
-// MineNewBlock() — Parallel Pipeline + Reward
+func cloneTransactionPool(pool []*Transaction) []*Transaction {
+	out := make([]*Transaction, 0, len(pool))
+	for _, tx := range pool {
+		if tx == nil {
+			continue
+		}
+		cp := *tx
+		cp.Value = CopyAmount(tx.Value)
+		cp.Data = append([]byte(nil), tx.Data...)
+		cp.Sig = append([]byte(nil), tx.Sig...)
+		cp.Args = append([]string(nil), tx.Args...)
+		cp.ExtraData = append([]byte(nil), tx.ExtraData...)
+		out = append(out, &cp)
+	}
+	return out
+}
+
+// MineNewBlock builds against an isolated copy-on-write state. The proposer
+// therefore never exposes speculative account/contract mutations while a
+// signed QC is still pending.
 func (bc *Blockchain_struct) MineNewBlock() *Block {
+	started := time.Now()
+	shadow, overlay, err := bc.cloneForBlockReplay()
+	if err != nil {
+		log.Printf("MineNewBlock: failed to isolate candidate state: %v", err)
+		return nil
+	}
+	shadow.Transaction_pool = cloneTransactionPool(bc.Transaction_pool)
+	candidate := shadow.mineNewBlockCandidate(true)
+	if candidate == nil {
+		return nil
+	}
+	referenceRoot := shadow.ComputeReferenceStateRootAt(candidate.BlockNumber)
+	if referenceRoot == "" || referenceRoot != candidate.StateRoot {
+		log.Printf("MineNewBlock: independent reference root mismatch: production=%s reference=%s", candidate.StateRoot, referenceRoot)
+		return nil
+	}
+	transition := captureReplayTransition(candidate.CurrentHash, candidate.StateRoot, shadow, overlay)
+	transition.ReferenceStateRoot = referenceRoot
+	bc.stageReplayTransition(transition)
+	bc.AddBlockVote(candidate.CurrentHash, candidate.RewardBreakdown.Validator)
+	bc.AddPendingBlock(candidate)
+	if bc.Network != nil {
+		if qc, voteErr := bc.CastLocalConsensusStep(candidate, StepPrevote); voteErr != nil {
+			log.Printf("Signed BFT vote unavailable, using configured bootstrap finality: %v", voteErr)
+		} else if qc != nil {
+			log.Printf("Signed BFT quorum certificate ready: %s", shortHash(qc.Hash))
+		}
+	}
+	finalized := bc.TryFinalizePending(candidate.CurrentHash, 0.67)
+	bc.LastBlockMiningTime = time.Since(started)
+	if !finalized {
+		log.Printf("⏳ Block #%d proposed without speculative state commit | tx=%d | gas=%d", candidate.BlockNumber, len(candidate.Transactions)-1, candidate.GasUsed)
+		return nil
+	}
+	log.Printf("⛏ Merged Block #%d | tx=%d | time=%s | gas=%d", candidate.BlockNumber, len(candidate.Transactions)-1, bc.LastBlockMiningTime, candidate.GasUsed)
+	return candidate
+}
+
+// mineNewBlockCandidate executes only inside the isolated shadow when
+// candidateOnly is true. The legacy completion branch is retained for focused
+// tests, but production calls always use the wrapper above.
+func (bc *Blockchain_struct) mineNewBlockCandidate(candidateOnly bool) *Block {
 	start := time.Now()
 
 	bc.EnsureRuntimeState()
@@ -176,13 +244,27 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	baseFee := bc.CalculateBaseFee()
 
 	newBlock := NewBlock(lastBlock.BlockNumber, lastBlock.CurrentHash)
+	newBlock.ConsensusRound = bc.CurrentConsensusRound(newBlock.BlockNumber)
 	newBlock.GasLimit = bc.CalculateNextGasLimit()
 	newBlock.BaseFee = baseFee
+	newBlock.ParentStateRoot = bc.ComputeDeterministicStateRootAt(lastBlock.BlockNumber)
 
-	validator, err := bc.SelectValidator()
+	validator, err := bc.SelectBlockProposer(newBlock.BlockNumber, newBlock.ConsensusRound)
 	if err != nil {
 		log.Printf("Validator selection error: %v", err)
 		return nil
+	}
+	newBlock.ProposerProof, err = bc.BuildProposerCertificate(newBlock.BlockNumber, newBlock.ConsensusRound)
+	if err != nil {
+		log.Printf("Proposer proof error: %v", err)
+		return nil
+	}
+	for _, registered := range bc.Validators {
+		if registered != nil && strings.EqualFold(registered.Address, validator.Address) {
+			registered.BlocksProposed++
+			validator.BlocksProposed = registered.BlocksProposed
+			break
+		}
 	}
 
 	txPool := bc.Transaction_pool
@@ -271,10 +353,7 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 
 		if res.Tx.IsContract {
 			if res.Tx.Type == "contract_call" {
-				_, err := bc.ContractEngine.Pipeline.ExecuteContractTx(
-					res.Tx,
-					newBlock.BlockNumber,
-				)
+				_, err := bc.ContractEngine.Pipeline.ExecuteContractTxAt(res.Tx, int64(newBlock.TimeStamp))
 				if err != nil {
 					log.Printf("ContractTx FAILED fn=%s addr=%s err=%v", res.Tx.Function, res.Tx.To, err)
 					markFailed(res.Tx, err.Error())
@@ -282,6 +361,18 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 				}
 			}
 			// contract_create is a state registration already done at deploy time
+		}
+		if res.Tx.Type == "oracle_update" {
+			if _, err := bc.ValidateOracleUpdateTransactionAt(res.Tx, int64(newBlock.TimeStamp)); err != nil {
+				markFailed(res.Tx, err.Error())
+				continue
+			}
+		}
+		if res.Tx.Type == "governance_action" {
+			if err := ValidateGovernanceTransaction(res.Tx); err != nil {
+				markFailed(res.Tx, err.Error())
+				continue
+			}
 		}
 
 		totalTxCost := new(big.Int).Add(CopyAmount(res.Tx.Value), NewAmountFromUint64(res.Fee))
@@ -293,6 +384,18 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		if senderBal.Cmp(totalTxCost) < 0 {
 			markFailed(res.Tx, fmt.Sprintf("insufficient funds (have %s need %s)", AmountString(senderBal), AmountString(totalTxCost)))
 			continue
+		}
+		if res.Tx.Type == "oracle_update" {
+			if err := bc.ApplyOracleUpdateTransactionAt(res.Tx, int64(newBlock.TimeStamp)); err != nil {
+				markFailed(res.Tx, err.Error())
+				continue
+			}
+		}
+		if res.Tx.Type == "governance_action" {
+			if err := bc.applyGovernanceTransactionAt(res.Tx, newBlock.BlockNumber); err != nil {
+				markFailed(res.Tx, err.Error())
+				continue
+			}
 		}
 
 		_ = bc.subAccountBalance(res.Tx.From, totalTxCost)
@@ -353,14 +456,15 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	// newBlock.RewardBreakdown.ValidatorReward=CalculateRewardForValidator(totalGasCost)[validator.Address]
 	// newBlock.RewardBreakdown.ParticipantRewards=make(map[string]uint64)
 	// newBlock.RewardBreakdown.LiquidityRewards=make(map[string]uint64)
-	bc.RebalancePoolsEqual()
+	// Legacy equalization is retired. Physical strategy-vault rebalancing is
+	// the only liquidity-movement path; routing weights never fabricate reserves.
 
 	rewardTx := &Transaction{
 		From:       "0x0000000000000000000000000000000000000000",
 		To:         validator.Address,
 		Value:      NewAmountFromStringOrZero(breakdown.ValidatorReward),
 		GasPrice:   0,
-		Timestamp:  uint64(time.Now().Unix()),
+		Timestamp:  newBlock.TimeStamp,
 		Status:     constantset.StatusSuccess,
 		ExtraData:  []byte("block_reward"),
 		IsContract: false,
@@ -370,12 +474,38 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 
 	newBlock.Transactions = append(newBlock.Transactions, rewardTx)
 	bc.RecordRecentTx(rewardTx)
+	// Epoch transitions are consensus state. Apply them before committing the
+	// block root, using the block timestamp so every node replays the same
+	// routing, congestion and arbitrage decision.
+	if bc.DLEngine != nil {
+		bc.DLEngine.RunEpochAt(bc, newBlock.BlockNumber, int64(newBlock.TimeStamp))
+	}
+	if err := bc.ReconcileDEXProtocolFees(newBlock.BlockNumber, int64(newBlock.TimeStamp)); err != nil {
+		log.Printf("Protocol fee reconciliation failed: %v", err)
+		return nil
+	}
+	// Commit the root only after transaction execution, reward accounting and
+	// scheduled protocol accounting have all completed.
+	newBlock.StateRoot = bc.ComputeDeterministicStateRootAt(newBlock.BlockNumber)
 
 	newBlock.CurrentHash = CalculateHash(&newBlock)
+	if candidateOnly {
+		return &newBlock
+	}
 
 	// Proposer self-votes, then route through pending → quorum → finalize
 	bc.AddBlockVote(newBlock.CurrentHash, validator.Address)
 	bc.AddPendingBlock(&newBlock)
+	// Prefer signed two-phase BFT finality whenever the validator identity key
+	// is configured. Test/dev chains without a key retain legacy bootstrap
+	// voting, and readiness reports that downgrade explicitly.
+	if bc.Network != nil {
+		if qc, err := bc.CastLocalConsensusStep(&newBlock, StepPrevote); err != nil {
+			log.Printf("Signed BFT vote unavailable, using bootstrap finality: %v", err)
+		} else if qc != nil {
+			log.Printf("Signed BFT quorum certificate ready: %s", shortHash(qc.Hash))
+		}
+	}
 	// TryFinalizePending handles txpool cleanup and DB save.
 	// Bootstrap nodes finalize against the active voting set; remote validators
 	// join that set only after their P2P connection is healthy.
@@ -384,12 +514,6 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	bc.LastBlockMiningTime = time.Since(start)
 
 	if finalized {
-		bc.RecordBlockRewardLedger(&newBlock)
-		// Dynamic Liquidity Engine must only run after finalization; otherwise
-		// failed candidate blocks can mutate strategy state.
-		if bc.DLEngine != nil {
-			bc.DLEngine.RunEpoch(bc, newBlock.BlockNumber)
-		}
 		log.Printf("⛏ Merged Block #%d | tx=%d  | time=%d | gas=%d | reward=%+v",
 			newBlock.BlockNumber,
 			len(finalTxs),

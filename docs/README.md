@@ -1,4 +1,15 @@
-# DefenceProject Blockchain — Operator & Validator Guide
+# PoDL Blockchain — Operator & Validator Guide
+
+## PoDL v2 Reports
+
+- [1–11 implementation and readiness report](./PODL_V2_IMPLEMENTATION_REPORT.md)
+- [Attachment implementation closure and external boundary](./ATTACHMENT_IMPLEMENTATION_REPORT.md)
+- [Internal engineering closure and release evidence](./INTERNAL_ENGINEERING_CLOSURE.md)
+- [Restricted-testnet operations](./PODL_V2_OPERATIONS.md)
+- [Investor-at-a-glance functional model and 3D prompt](./PODL_INVESTOR_FLOW_MODEL.md)
+- [Table-1 completion matrix](./TABLE1_COMPLETION_MATRIX.md)
+- [Deterministic state-transition specification](./STATE_TRANSITION_SPEC.md)
+- [Governance constitution](./GOVERNANCE_CONSTITUTION.md)
 
 ## Overview
 This document explains how to run the chain, add validators, and upgrade safely.
@@ -41,7 +52,7 @@ For a MetaMask-like mobile wallet blueprint and feature parity map, read [../mob
 - Linux/macOS
 - Open ports: HTTP (5000), P2P (6000) per node
 
-## Quick Start (Single Miner)
+## Quick Start (Single Local Validator)
 ```bash
 go run main.go chain -port 5000 -p2p_port 6000 \
   -db_path 5000/evodb \
@@ -109,7 +120,7 @@ export BRIDGE_MAX_RANGE=40000
 
 ## Notes
 - Using the same `-db_path` means the chain **continues** from the current height.
-- Use **one miner** for stable consensus; others sync only.
+- The single-validator command is only a local-development bootstrap. Use the signed multi-validator procedure and readiness gates in [PODL_V2_OPERATIONS.md](./PODL_V2_OPERATIONS.md) for a restricted testnet.
 - For production, use a dedicated server with NVMe SSD.
 
 ## Validator Requirements & Command
@@ -167,4 +178,5 @@ curl -X POST http://<GENESIS_IP>:9000/validators/sync
    - Watch logs for validator selection and reward distribution
 
 ## Staking Minimum
-Currently **no enforced minimum stake** in code. The validator stake is whatever you pass as `-stake_amount`. If you want a minimum, I can add a config constant (e.g., `MIN_VALIDATOR_STAKE`) and reject below it.
+
+The node enforces the configured `MIN_STAKE`/chain-spec policy. Validator operators must use the active chain specification; a local `-stake_amount` flag cannot bypass consensus validation.

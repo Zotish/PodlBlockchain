@@ -31,7 +31,11 @@ func (c *ContractDB) Close() {
 
 // newTestContextWithDB creates a Context backed by a real but temporary LevelDB.
 // This is needed for tests that call ctx.Get() on keys not previously Set().
-func newTestContextWithDB(t interface{ Helper(); TempDir() string; Cleanup(func()) },
+func newTestContextWithDB(t interface {
+	Helper()
+	TempDir() string
+	Cleanup(func())
+},
 	contract, caller string, gasLimit uint64) *Context {
 	t.Helper()
 	dir := t.(interface{ TempDir() string }).TempDir()
@@ -275,6 +279,44 @@ func TestContext_AddSubBalance_NetEffect(t *testing.T) {
 	got.SetString(v, 10)
 	if got.Cmp(big.NewInt(750)) != 0 {
 		t.Errorf("expected net balance 750, got %s", v)
+	}
+}
+
+func TestHardenedInterpreterRejectsMalformedAndUnknownPrograms(t *testing.T) {
+	vm := NewInterpreterVM()
+	for _, source := range []string{"", "SLEEP 10", "SET only-one", "JMP 99", "CALL not-an-address Run"} {
+		bytecode, err := vm.CompileGoSubset(source)
+		if err == nil && source != "CALL not-an-address Run" {
+			t.Fatalf("malformed source compiled: %q => %+v", source, bytecode)
+		}
+	}
+}
+
+func TestHardenedInterpreterDeterministicArithmeticAndGas(t *testing.T) {
+	vm := NewInterpreterVM()
+	bytecode, err := vm.CompileGoSubset("SET balance 10; ADD balance 5; SUB balance 3; GET balance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newTestContextWithDB(t, "0xcontract", "0xcaller", 1_000_000)
+	result, err := vm.ExecuteBytecode("0xcontract", bytecode, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "12" || result.GasUsed < 200 {
+		t.Fatalf("unexpected deterministic VM result: %+v", result)
+	}
+}
+
+func TestHardenedInterpreterLoopConsumesGas(t *testing.T) {
+	vm := NewInterpreterVM()
+	bytecode, err := vm.CompileGoSubset("JMP 0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newTestContext("0xcontract", "0xcaller", 500)
+	if reason := catchRevert(func() { _, _ = vm.ExecuteBytecode("0xcontract", bytecode, ctx) }); reason == "" {
+		t.Fatal("infinite loop escaped metering")
 	}
 }
 

@@ -77,6 +77,21 @@ func NewProtocolArb() *ProtocolArb { return &ProtocolArb{} }
 // RunArbitrage finds triangular opportunities and executes the most profitable.
 // Safe to call concurrently — protected by mutex + isArbitraging flag.
 func (pa *ProtocolArb) RunArbitrage(bc *Blockchain_struct, metrics []PoolMetrics) {
+	if bc == nil || !bc.ArbPolicy.Enabled || bc.ArbPolicy.RequireAuction || strings.TrimSpace(bc.ArbPolicy.AuthorizedKeeper) == "" {
+		return
+	}
+	// The ProtocolArb mutex prevents re-entry through one engine instance. The
+	// chain mutex additionally serializes different engine instances and other
+	// consensus-state mutations against the same treasury and pool snapshot.
+	bc.Mutex.Lock()
+	defer bc.Mutex.Unlock()
+	pa.runArbitrage(bc, metrics)
+}
+
+func (pa *ProtocolArb) runArbitrage(bc *Blockchain_struct, metrics []PoolMetrics) {
+	if bc == nil || !bc.ArbPolicy.Enabled || strings.TrimSpace(bc.ArbPolicy.AuthorizedKeeper) == "" {
+		return
+	}
 	// ── Reentrancy guard ──────────────────────────────────────────────────────
 	pa.mu.Lock()
 	if pa.isArbitraging {
@@ -105,8 +120,12 @@ func (pa *ProtocolArb) RunArbitrage(bc *Blockchain_struct, metrics []PoolMetrics
 	}
 
 	// Capital cap: 10% of treasury per arb
+	maxCapitalBPS := bc.ArbPolicy.MaxCapitalBPS
+	if maxCapitalBPS <= 0 || maxCapitalBPS > MaxCapitalBps {
+		maxCapitalBPS = MaxCapitalBps
+	}
 	maxCapital := new(big.Int).Div(
-		new(big.Int).Mul(new(big.Int).Set(treasuryBal), big.NewInt(MaxCapitalBps)),
+		new(big.Int).Mul(new(big.Int).Set(treasuryBal), big.NewInt(maxCapitalBPS)),
 		big.NewInt(10000),
 	)
 	if maxCapital.Sign() == 0 {
@@ -115,6 +134,13 @@ func (pa *ProtocolArb) RunArbitrage(bc *Blockchain_struct, metrics []PoolMetrics
 
 	// ── Find and execute ──────────────────────────────────────────────────────
 	paths := pa.findTriangularPaths(metrics, maxCapital)
+	pa.executePreparedPaths(bc, paths)
+}
+
+// executePreparedPaths performs the state-mutating phase after graph discovery
+// and simulation. The caller holds the chain consensus-state lock.
+func (pa *ProtocolArb) executePreparedPaths(bc *Blockchain_struct, paths []ArbPath) {
+	treasury := constantset.LiquidityPoolAddress
 	executed := 0
 	for _, path := range paths {
 		if executed >= MaxArbsPerEpoch {
@@ -322,8 +348,12 @@ func (pa *ProtocolArb) executeArb(bc *Blockchain_struct, treasury string, path A
 	amtB := arbAmountOut(amtA, r2In, r2Out)
 	lqdOut := arbAmountOut(amtB, r3In, r3Out)
 	profit := new(big.Int).Sub(lqdOut, path.InputLQD)
+	minProfitBPS := bc.ArbPolicy.MinProfitBPS
+	if minProfitBPS <= 0 {
+		minProfitBPS = MinProfitBps
+	}
 	minProfit := new(big.Int).Div(
-		new(big.Int).Mul(path.InputLQD, big.NewInt(MinProfitBps)),
+		new(big.Int).Mul(path.InputLQD, big.NewInt(minProfitBPS)),
 		big.NewInt(10000),
 	)
 	if profit.Cmp(minProfit) < 0 {
@@ -354,22 +384,17 @@ func (pa *ProtocolArb) executeArb(bc *Blockchain_struct, treasury string, path A
 		return false
 	}
 
-	// Write all 6 reserve values — rollback treasury on any failure
-	type kv struct{ addr, key, val string }
-	writes := []kv{
-		{path.Leg1.PairAddr, resKey(path.Leg1, true), newR1In.String()},
-		{path.Leg1.PairAddr, resKey(path.Leg1, false), newR1Out.String()},
-		{path.Leg2.PairAddr, resKey(path.Leg2, true), newR2In.String()},
-		{path.Leg2.PairAddr, resKey(path.Leg2, false), newR2Out.String()},
-		{path.Leg3.PairAddr, resKey(path.Leg3, true), newR3In.String()},
-		{path.Leg3.PairAddr, resKey(path.Leg3, false), newR3Out.String()},
+	// One atomic storage batch prevents a process/storage failure from leaving
+	// only a prefix of the multi-pool reserve transition committed.
+	writes := map[string]map[string]string{
+		path.Leg1.PairAddr: {resKey(path.Leg1, true): newR1In.String(), resKey(path.Leg1, false): newR1Out.String()},
+		path.Leg2.PairAddr: {resKey(path.Leg2, true): newR2In.String(), resKey(path.Leg2, false): newR2Out.String()},
+		path.Leg3.PairAddr: {resKey(path.Leg3, true): newR3In.String(), resKey(path.Leg3, false): newR3Out.String()},
 	}
-	for _, w := range writes {
-		if err := db.SaveStorage(w.addr, w.key, w.val); err != nil {
-			bc.addAccountBalance(treasury, path.InputLQD)
-			log.Printf("⚡ ProtocolArb: reserve write failed: %v", err)
-			return false
-		}
+	if err := db.SaveStorageBatch(writes); err != nil {
+		bc.addAccountBalance(treasury, path.InputLQD)
+		log.Printf("⚡ ProtocolArb: atomic reserve batch failed: %v", err)
+		return false
 	}
 
 	// Credit treasury with output (includes profit)

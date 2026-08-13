@@ -7,11 +7,10 @@ import (
 	"math/big"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
-var persistRuntimeState = func(bc Blockchain_struct) error {
+var persistRuntimeState = func(bc *Blockchain_struct) error {
 	return PutIntoDB(bc)
 }
 
@@ -267,9 +266,7 @@ func (bc *Blockchain_struct) recordStrategyVaultMoveLocked(move *StrategyVaultMo
 }
 
 func (bc *Blockchain_struct) persistRuntimeStateLocked() {
-	dbCopy := *bc
-	dbCopy.Mutex = sync.Mutex{}
-	_ = persistRuntimeState(dbCopy)
+	_ = persistRuntimeState(bc)
 }
 
 func strategyVaultID(parts ...interface{}) string {

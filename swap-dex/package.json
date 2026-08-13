@@ -3,16 +3,21 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "react-scripts": "5.0.1"
+	"react": "^19.1.1",
+	"react-dom": "^19.1.1"
   },
+	"devDependencies": {
+		"@vitejs/plugin-react": "^6.0.5",
+		"jsdom": "^29.0.1",
+		"vite": "^8.2.1",
+		"vitest": "^4.1.10"
+	},
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "registry": "npm --prefix server start",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
+	"start": "vite",
+	"dev": "vite",
+	"build": "vite build",
+	"registry": "npm --prefix server start",
+	"test": "vitest run"
   },
   "eslintConfig": {
     "extends": [
