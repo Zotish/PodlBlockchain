@@ -41,9 +41,16 @@ cp "$APP_ROOT/deploy/vps/Caddyfile" "$PODL_ROOT/Caddyfile"
 
 cd "$PODL_ROOT"
 docker build -t "${LQD_IMAGE:-podl-blockchain:local}" "$APP_ROOT" >/dev/null
-$COMPOSE up -d --no-deps dex-api wallet aggregator caddy >/dev/null
+$COMPOSE up -d --no-deps dex-api wallet aggregator >/dev/null
 $COMPOSE up -d --no-deps chain >/dev/null
 $COMPOSE up -d --remove-orphans >/dev/null
+
+enable_caddy="$(sed -n 's/^ENABLE_CADDY=//p' "$PODL_ROOT/.env" | tail -1 | tr '[:upper:]' '[:lower:]')"
+if [ "$enable_caddy" = "true" ]; then
+  $COMPOSE --profile proxy up -d caddy >/dev/null
+else
+  $COMPOSE rm -sf caddy >/dev/null 2>&1 || true
+fi
 
 ready=false
 i=1
