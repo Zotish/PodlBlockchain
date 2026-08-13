@@ -134,6 +134,14 @@ func (bc *Blockchain_struct) cloneForBlockReplay() (*Blockchain_struct, *Contrac
 	}
 	overlay := NewOverlayContractDB(bc.ContractEngine.DB)
 	registry := NewContractRegistry(overlay, bc.ContractEngine.EventDB)
+	// Go plugins are process-global and plugin.Open refuses to reopen the same
+	// package in a fresh cache. Reuse the canonical, concurrency-safe VM while
+	// keeping all contract storage in the isolated overlay. Plugin instances are
+	// already shared by digest across contract addresses and carry no state;
+	// execution state lives exclusively in Context/ContractDB.
+	if bc.ContractEngine.Registry.PluginVM != nil {
+		registry.PluginVM = bc.ContractEngine.Registry.PluginVM
+	}
 	registry.Blockchain = &shadow
 	shadow.ContractEngine = &LQDContractEngine{DB: overlay, EventDB: bc.ContractEngine.EventDB, Registry: registry, Pipeline: NewExecutionPipeline(registry)}
 	return &shadow, overlay, nil
