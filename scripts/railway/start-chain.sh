@@ -24,8 +24,8 @@ set -- ./bin/lqd chain \
   -validator "${VALIDATOR_ADDRESS:?VALIDATOR_ADDRESS is required}" \
   -stake_amount "${STAKE_AMOUNT:-3000000}" \
   -min_stake "${MIN_STAKE:-100000}" \
-	-mining="${MINING_ENABLED:-true}"
-	-require_signed_bft="${LQD_REQUIRE_SIGNED_BFT:-false}"
+  -mining="${MINING_ENABLED:-true}" \
+  -require_signed_bft="${LQD_REQUIRE_SIGNED_BFT:-false}"
 
 if [ -n "${REMOTE_NODE:-}" ]; then
   set -- "$@" -remote_node "$REMOTE_NODE"
