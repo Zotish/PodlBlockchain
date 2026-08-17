@@ -857,32 +857,19 @@ const WalletBalance = ({ address, privateKey }) => {
 
       {/* Wallet info */}
       <div className="wallet-info">
-        <h4>Wallet Information</h4>
+        <h4>Account security</h4>
         <div className="info-item">
-          <strong>Address:</strong> {address}
+          <strong>Public address:</strong> {address}
         </div>
         <div className="info-item">
-          <strong>Private Key:</strong>
+          <strong>Signing key:</strong>
           <span className="private-key-masked">
-            ••••••••••••••••••••
-            <button
-              className="btn-copy-small"
-              onClick={() => {
-                const confirmReveal = window.confirm(
-                  "Showing or copying your private key gives full control of your funds.\n\nDo you really want to copy it to clipboard?"
-                );
-                if (confirmReveal) {
-                  navigator.clipboard.writeText(privateKey);
-                }
-              }}
-            >
-              Reveal & Copy
-            </button>
+            Encrypted at rest · unlocked in this session only
           </span>
         </div>
         <div className="warning">
-          ⚠️ Keep your private key secure and never share it with anyone.
-          This key is only stored encrypted on this device and decrypted in memory when you unlock.
+          Private-key reveal and clipboard export are intentionally disabled. Use the encrypted
+          backup in Security settings and keep your recovery phrase offline.
         </div>
       </div>
     </div>

@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { fetchJSON, mergeArrayResults } from '../utils/api';
 
-const BlockList = ({ blocks: propBlocks, showTxHash = true }) => {
+const BlockList = ({ blocks: propBlocks, showTxHash = true, compact = false }) => {
   const [blocks,  setBlocks]  = useState([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
@@ -46,6 +46,45 @@ const BlockList = ({ blocks: propBlocks, showTxHash = true }) => {
   if (loading) return <div className="loading" style={{ padding: '20px' }}>Loading blocks...</div>;
   if (error)   return <div className="error">Error: {error}</div>;
   if (!blocks || blocks.length === 0) return <div style={{ color: 'var(--text-muted)', padding: '16px 0' }}>No blocks found</div>;
+
+  if (compact) {
+    return (
+      <div className="compact-block-list">
+        {blocks.map((block) => {
+          const blockNum = block.block_number ?? block.BlockNumber ?? 0;
+          const hash = block.current_hash || block.CurrentHash || '';
+          const txs = block.transactions || block.Transactions || [];
+          const protocol = block.protocol_version ?? '—';
+          const proposer = block.proposer_proof?.proposer || block.reward_breakdown?.validator || '';
+
+          return (
+            <button
+              type="button"
+              className="compact-block-row"
+              key={blockNum}
+              onClick={() => navigate(`/blocks/${blockNum}`)}
+            >
+              <span className="block-cube" aria-hidden="true"><i /></span>
+              <span className="block-identity">
+                <strong>#{Number(blockNum).toLocaleString()}</strong>
+                <small>{formatTimeAgo(block.timestamp ?? block.TimeStamp)}</small>
+              </span>
+              <span className="block-hash">
+                <strong>{hash ? `${hash.slice(0, 10)}…${hash.slice(-6)}` : '—'}</strong>
+                <small>{proposer ? `by ${proposer.slice(0, 7)}…${proposer.slice(-4)}` : 'Proposer unavailable'}</small>
+              </span>
+              <span className="block-version">v{protocol}</span>
+              <span className="block-tx-count">
+                <strong>{txs.length}</strong>
+                <small>txns</small>
+              </span>
+              <span className="row-arrow" aria-hidden="true">→</span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>

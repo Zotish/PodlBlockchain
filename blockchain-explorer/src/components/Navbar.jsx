@@ -1,163 +1,156 @@
-import React, { useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import React, { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { fetchChainJSON } from "../utils/api";
 
-const NAV_ITEMS = [
-  { to: '/',             label: 'Dashboard'  },
-  { to: '/blocks',       label: 'Blocks'     },
-  { to: '/validators',   label: 'Validators' },
-  { to: '/liquidity',    label: 'Liquidity'  },
-  { to: '/rewards',      label: 'Rewards'    },
-  { to: '/pools',        label: 'Pools'      },
-  { to: '/wallet',       label: 'Wallet'     },
-  { to: '/investor',     label: 'Investor'   },
+const PRIMARY_LINKS = [
+  { to: "/", label: "Overview" },
+  { to: "/blocks", label: "Blocks" },
+  { to: "/transactions", label: "Transactions" },
+  { to: "/validators", label: "Validators" },
+  { to: "/liquidity", label: "Liquidity" },
 ];
 
-const NAV_GROUPS = [
+const EXPLORE_GROUPS = [
   {
-    label: 'Blockchain',
+    label: "Network",
     items: [
-      { to: '/transactions', label: 'Transactions' },
-      { to: '/transactions/pending', label: 'Pending Transactions' },
-      { to: '/transactions/internal', label: 'Contract Internal Transactions' },
-      { to: '/bridge/transactions', label: 'Cross-Chain Transactions' },
-      { to: '/blocks', label: 'View Blocks' },
-      { to: '/accounts', label: 'Top Accounts' },
-      { to: '/contracts', label: 'Verified Contracts' },
+      { to: "/stats", label: "Network analytics", description: "Chain activity and performance" },
+      { to: "/rewards", label: "Reward analytics", description: "Validator and liquidity rewards" },
+      { to: "/accounts", label: "Top accounts", description: "Public account activity" },
+      { to: "/investor", label: "Investor evidence", description: "Readiness and protocol evidence" },
     ],
   },
   {
-    label: 'Tokens',
+    label: "Assets",
     items: [
-      { to: '/tokens', label: 'Top Tokens' },
-      { to: '/transactions/token-transfers', label: 'Token Transfers' },
-      { to: '/tokens/flow', label: 'Token Flow Visualizer' },
+      { to: "/tokens", label: "Tokens", description: "Verified asset registry" },
+      { to: "/pools", label: "Liquidity pools", description: "Pool state and routing" },
+      { to: "/liquidity/providers", label: "LP tracker", description: "Provider positions and rewards" },
+      { to: "/nfts", label: "NFT activity", description: "Mints, trades and transfers" },
     ],
   },
   {
-    label: 'NFTs',
+    label: "Builders",
     items: [
-      { to: '/nfts', label: 'Top NFTs' },
-      { to: '/nfts/mints', label: 'Top Mints' },
-      { to: '/nfts/trades', label: 'Latest Trades' },
-      { to: '/nfts/transfers', label: 'Latest Transfers' },
-      { to: '/nfts/latest-mints', label: 'Latest Mints' },
-    ],
-  },
-  {
-    label: 'Resources',
-    items: [
-      { to: '/stats', label: 'Charts & Stats' },
-      { to: '/validators', label: 'Validators' },
-      { to: '/liquidity', label: 'Liquidity' },
-      { to: '/pools/tracker', label: 'Pools' },
-      { to: '/liquidity/providers', label: 'LP Tracker' },
-      { to: '/rewards', label: 'Reward Analytics' },
-    ],
-  },
-  {
-    label: 'Developers',
-    items: [
-      { to: '/developers/api', label: 'API Documentation' },
-      { to: '/developers/verify-contract', label: 'Verify Contract' },
-      { to: '/developers/contracts/search', label: 'Smart Contract Search' },
-      { to: '/developers/broadcast', label: 'Broadcast Transaction' },
-    ],
-  },
-  {
-    label: 'More',
-    items: [
-      { to: '/bridge', label: 'Bridge' },
-      { to: '/pools', label: 'Pools' },
-      { to: '/liquidity', label: 'Liquidity Mining' },
-      { to: '/rewards', label: 'Reward Center' },
-      { to: '/wallet', label: 'Wallet Tools' },
+      { to: "/contracts", label: "Contracts", description: "Inspect verified deployments" },
+      { to: "/developers/api", label: "API reference", description: "Public endpoints and examples" },
+      { to: "/developers/broadcast", label: "Broadcast", description: "Submit signed transactions" },
+      { to: "/bridge", label: "Bridge", description: "Cross-chain operations" },
     ],
   },
 ];
+
+const formatHeight = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toLocaleString() : "—";
+};
 
 const Navbar = () => {
-  const location  = useLocation();
+  const location = useLocation();
   const [open, setOpen] = useState(false);
+  const [network, setNetwork] = useState({ status: "checking", height: null, baseFee: null });
+
+  useEffect(() => {
+    let active = true;
+
+    const loadNetwork = async () => {
+      const [healthResult, feeResult] = await Promise.allSettled([
+        fetchChainJSON("/health", { cacheTtlMs: 3500, timeoutMs: 6000 }),
+        fetchChainJSON("/basefee", { cacheTtlMs: 3500, timeoutMs: 6000 }),
+      ]);
+      if (!active) return;
+
+      const health = healthResult.status === "fulfilled" ? healthResult.value : null;
+      const fee = feeResult.status === "fulfilled" ? feeResult.value : null;
+      setNetwork({
+        status: health?.status === "ok" ? "live" : "degraded",
+        height: health?.height ?? null,
+        baseFee: fee?.base_fee ?? null,
+      });
+    };
+
+    loadNetwork();
+    const timer = window.setInterval(loadNetwork, 10000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => setOpen(false), [location.pathname]);
 
   const isActive = (to) =>
-    to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
-
-  const close = () => setOpen(false);
+    to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
 
   return (
-    <header className="explorer-header">
-      <div className="explorer-topbar">
-        <div className="explorer-topbar-stats">
-          <span>LQD Price: <strong>Live Testnet</strong></span>
-          <span>Gas: <strong>Dynamic</strong></span>
-        </div>
-        <div className="explorer-topbar-actions" aria-label="Explorer tools">
-          <span title="API">/</span>
-          <span title="Settings">⚙</span>
-          <span title="Theme">☼</span>
+    <header className="explorer-header premium-header">
+      <div className="network-ribbon" aria-label="Live network summary">
+        <div className="network-ribbon-inner">
+          <div className="ribbon-status">
+            <span className={`live-indicator ${network.status}`} aria-hidden="true" />
+            <span>PoDL public testnet</span>
+            <strong>{network.status === "live" ? "Operational" : "Connecting"}</strong>
+          </div>
+          <div className="ribbon-metrics">
+            <span>Height <strong>#{formatHeight(network.height)}</strong></span>
+            <span>Base fee <strong>{network.baseFee ?? "—"}</strong></span>
+            <span>Protocol <strong>PoDL v2</strong></span>
+          </div>
         </div>
       </div>
 
-      <nav className="navbar">
-        {/* ── Brand ── */}
-        <div className="navbar-brand">
-          <Link to="/" onClick={close}>
-            <span className="navbar-logo-icon">⬡</span>
-            LQD Explorer
-          </Link>
-        </div>
+      <nav className="navbar premium-navbar" aria-label="Primary navigation">
+        <Link className="premium-brand" to="/" aria-label="PoDL Explorer home">
+          <span className="podl-mark" aria-hidden="true">
+            <span />
+          </span>
+          <span className="premium-brand-copy">
+            <strong>PoDL</strong>
+            <small>Network Explorer</small>
+          </span>
+        </Link>
 
-        {/* ── Mainnet pill (always visible) ── */}
-        <span className="navbar-mainnet-pill">
-          <span className="navbar-dot" />
-          Public Testnet
-        </span>
-
-        {/* ── Hamburger (mobile only) ── */}
-        <button
-          className="navbar-hamburger"
-          onClick={() => setOpen(o => !o)}
-          aria-label="Toggle menu"
-        >
-          {open ? '✕' : '☰'}
-        </button>
-
-        {/* ── Nav links ── */}
-        <div className={`navbar-links${open ? ' open' : ''}`}>
-          {NAV_ITEMS.map(({ to, label }) => (
-            <Link
-              key={to}
-              to={to}
-              className={isActive(to) ? 'active' : ''}
-              onClick={close}
-            >
+        <div className={`premium-nav-links${open ? " open" : ""}`}>
+          {PRIMARY_LINKS.map(({ to, label }) => (
+            <Link key={to} to={to} className={isActive(to) ? "active" : ""}>
               {label}
             </Link>
           ))}
-          <div className="navbar-mega-groups">
-            {NAV_GROUPS.map((group) => (
-              <div className="navbar-dropdown" key={group.label}>
-                <button type="button" className="navbar-dropdown-trigger">
-                  {group.label} <span>⌄</span>
-                </button>
-                <div className="navbar-dropdown-menu">
+
+          <div className="explore-menu">
+            <button className="explore-trigger" type="button" aria-haspopup="true">
+              Explore <span aria-hidden="true">⌄</span>
+            </button>
+            <div className="explore-panel">
+              {EXPLORE_GROUPS.map((group) => (
+                <section key={group.label}>
+                  <p>{group.label}</p>
                   {group.items.map((item) => (
-                    <Link key={`${group.label}-${item.label}`} to={item.to} onClick={close}>
-                      {item.label}
+                    <Link key={item.to} to={item.to}>
+                      <strong>{item.label}</strong>
+                      <small>{item.description}</small>
                     </Link>
                   ))}
-                </div>
-              </div>
-            ))}
+                </section>
+              ))}
+            </div>
           </div>
+
+          <Link className="wallet-launch" to="/wallet">
+            Open wallet <span aria-hidden="true">↗</span>
+          </Link>
         </div>
 
-        <style>{`
-          @keyframes navpulse {
-            0%, 100% { opacity: 1; }
-            50%       { opacity: 0.35; }
-          }
-        `}</style>
+        <button
+          className="premium-menu-button"
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          aria-label="Toggle navigation"
+          aria-expanded={open}
+        >
+          <span />
+          <span />
+        </button>
       </nav>
     </header>
   );

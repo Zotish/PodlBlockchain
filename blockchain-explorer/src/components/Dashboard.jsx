@@ -1,530 +1,469 @@
-
-
-
-
-// src/components/Dashboard.jsx
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import BlockList from "./BlockList";
 import ValidatorList from "./ValidatorList";
-import { useNavigate } from "react-router-dom";
 import { formatLQD } from "../utils/lqdUnits";
 import {
-  fetchJSON,
   fetchChainJSON,
-  mergeArrayResults,
-  firstNodeResult,
+  fetchJSON,
   fetchRecentBlocks,
+  firstNodeResult,
+  mergeArrayResults,
   transactionsFromBlocks,
 } from "../utils/api";
 
+const SECURITY_CHECKS = [
+  ["signed_bft_finality_observed", "Signed BFT finality"],
+  ["standard_ecvrf", "RFC 9381 ECVRF"],
+  ["durable_slashing_protection", "Durable slashing protection"],
+  ["validator_signer_healthy", "Remote validator signer"],
+  ["persistent_explorer_index", "Persistent explorer index"],
+  ["deterministic_state_commitment", "Deterministic state roots"],
+];
+
+const compactNumber = (value, maximumFractionDigits = 2) => {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(number);
+};
+
+const shortHash = (value, start = 10, end = 6) => {
+  if (!value) return "—";
+  if (value.length <= start + end + 2) return value;
+  return `${value.slice(0, start)}…${value.slice(-end)}`;
+};
+
+const timeAgo = (timestamp) => {
+  const seconds = Number(timestamp);
+  if (!Number.isFinite(seconds)) return "—";
+  const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - seconds);
+  if (elapsed < 60) return `${elapsed}s ago`;
+  if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m ago`;
+  if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h ago`;
+  return `${Math.floor(elapsed / 86400)}d ago`;
+};
+
+const detectTransactionType = (transaction, validatorAddresses) => {
+  const rawType = String(
+    transaction?.tx_type || transaction?.type || transaction?.category || transaction?.kind || ""
+  ).toLowerCase();
+  const fn = String(
+    transaction?.function || transaction?.method || transaction?.function_name || ""
+  ).toLowerCase();
+  const recipient = String(transaction?.to || transaction?.To || "").toLowerCase();
+
+  if (rawType.includes("reward") || fn === "blockreward") {
+    return validatorAddresses.has(recipient) ? "Validator reward" : "Protocol reward";
+  }
+  if (rawType.includes("lp")) return "Liquidity reward";
+  if (rawType.includes("contract_create") || fn === "deploycontract") return "Contract deploy";
+  if (fn === "transfer" && transaction?.is_contract) return "Token transfer";
+  if (transaction?.is_contract || fn) return "Contract call";
+  return "Transfer";
+};
+
+const StatCard = ({ label, value, detail, accent = "blue", eyebrow }) => (
+  <article className={`network-stat premium-stat accent-${accent}`}>
+    <div className="premium-stat-topline">
+      <span>{label}</span>
+      {eyebrow && <small>{eyebrow}</small>}
+    </div>
+    <strong>{value}</strong>
+    <p>{detail}</p>
+  </article>
+);
+
 const Dashboard = () => {
   const navigate = useNavigate();
-
-  const [networkStats, setNetworkStats] = useState(null);
-  const [recentBlocks, setRecentBlocks] = useState([]);
-  const [recentTxs, setRecentTxs] = useState([]);
-  const [validators, setValidators] = useState([]);
+  const [data, setData] = useState({
+    health: null,
+    readiness: null,
+    network: null,
+    blockTime: null,
+    baseFee: null,
+    blocks: [],
+    validators: [],
+  });
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [blockTime, setBlockTime] = useState(null); 
-
-
-  /* -----------------------------
-      LOCAL STORY SEARCH / FILTER
-  ----------------------------- */
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchField, setSearchField] = useState("all");
-  const [activeTab, setActiveTab] = useState("all");
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [globalSearch, setGlobalSearch] = useState("");
+  const [transactionFilter, setTransactionFilter] = useState("all");
   const [copiedHash, setCopiedHash] = useState("");
 
-  /* -----------------------------
-      GLOBAL HYBRID SEARCH BAR
-  ----------------------------- */
-  const [globalSearch, setGlobalSearch] = useState("");
+  const fetchData = useCallback(async ({ background = false } = {}) => {
+    if (background) setRefreshing(true);
+    setError("");
 
-  // Debounce (local story search)
-  const [debouncedQuery, setDebouncedQuery] = useState("");
-  useEffect(() => {
-    const id = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 300);
-    return () => clearTimeout(id);
-  }, [searchQuery]);
+    const results = await Promise.allSettled([
+      fetchChainJSON("/health", { cacheTtlMs: 2500, timeoutMs: 6500 }),
+      fetchChainJSON("/readiness/mainnet", { cacheTtlMs: 5000, timeoutMs: 8000 }),
+      fetchChainJSON("/basefee", { cacheTtlMs: 2500, timeoutMs: 6500 }),
+      fetchJSON("/network", { cacheTtlMs: 3000, timeoutMs: 7500 }),
+      fetchJSON("/blocktime/latest", { cacheTtlMs: 2500, timeoutMs: 6500 }),
+      fetchRecentBlocks(14, { timeoutMs: 8000 }),
+      fetchJSON("/validators", { cacheTtlMs: 5000, timeoutMs: 8000 }),
+    ]);
 
-  /* -----------------------------
-      FETCH DASHBOARD DATA
-  ----------------------------- */
-  const fetchData = async () => {
-    try {
-      setError(null);
-
-      const [statsRes, blocksRes, blockTimeRes, validatorsRes] = await Promise.allSettled([
-        fetchJSON("/network", { cacheTtlMs: 3000, timeoutMs: 8000 }),
-        fetchRecentBlocks(14, { timeoutMs: 8000 }),
-        fetchJSON("/blocktime/latest", { cacheTtlMs: 3000, timeoutMs: 6000 }),
-        fetchJSON("/validators", { cacheTtlMs: 5000, timeoutMs: 8000 }),
-      ]);
-
-      if (statsRes.status === "fulfilled") {
-        setNetworkStats(firstNodeResult(statsRes.value));
-      }
-
-      const sortedBlocks = blocksRes.status === "fulfilled" ? blocksRes.value : [];
-      if (sortedBlocks.length > 0) {
-        setRecentBlocks(sortedBlocks);
-      }
-
-      if (blockTimeRes.status === "fulfilled") {
-        const btResult = firstNodeResult(blockTimeRes.value);
-        setBlockTime(btResult && !btResult.error ? btResult : null);
-      } else {
-        setBlockTime(null);
-      }
-
-      let val = [];
-      if (validatorsRes.status === "fulfilled") {
-        val = mergeArrayResults(validatorsRes.value, "address");
-      }
-      setValidators(val);
-
-      // Avoid the heavy /transactions/recent payload; recent blocks already
-      // include reward/user transactions and render instantly.
-      const arr = transactionsFromBlocks(sortedBlocks, 12);
-
-      // Attach type tags
-      const withType = arr.map((t) => ({
-        ...t,
-        __txType: detectTxType(t),
-      }));
-
-      setRecentTxs(withType);
-    } catch (err) {
-      setError("Failed to load dashboard data");
-    } finally {
-      setLoading(false);
+    const fulfilled = results.filter((result) => result.status === "fulfilled").length;
+    if (fulfilled === 0) {
+      setError("The public network APIs are temporarily unreachable. Live data will retry automatically.");
     }
-  };
+
+    setData((current) => ({
+      health: results[0].status === "fulfilled" ? results[0].value : current.health,
+      readiness: results[1].status === "fulfilled" ? results[1].value : current.readiness,
+      baseFee: results[2].status === "fulfilled" ? results[2].value : current.baseFee,
+      network: results[3].status === "fulfilled" ? firstNodeResult(results[3].value) : current.network,
+      blockTime: results[4].status === "fulfilled" ? firstNodeResult(results[4].value) : current.blockTime,
+      blocks: results[5].status === "fulfilled" && results[5].value.length ? results[5].value : current.blocks,
+      validators:
+        results[6].status === "fulfilled"
+          ? mergeArrayResults(results[6].value, "address")
+          : current.validators,
+    }));
+    if (fulfilled > 0) setLastUpdated(new Date());
+    setLoading(false);
+    setRefreshing(false);
+  }, []);
 
   useEffect(() => {
     fetchData();
-    const id = setInterval(fetchData, 5000);
-    return () => clearInterval(id);
-    // fetchData intentionally re-created with latest dashboard state.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const timer = window.setInterval(() => fetchData({ background: true }), 7000);
+    return () => window.clearInterval(timer);
+  }, [fetchData]);
 
-  /* -----------------------------
-      HELPERS: TYPE DETECTION
-  ----------------------------- */
-  const validatorSet = useMemo(
-    () =>
-      new Set(
-        validators.map((v) => (v.Address || v.address || "").toLowerCase())
-      ),
-    [validators]
+  const validatorAddresses = useMemo(
+    () => new Set(data.validators.map((validator) => String(validator.address || "").toLowerCase())),
+    [data.validators]
   );
 
-  const detectTxType = (tx) => {
-    if (!tx) return "transfer";
+  const recentTransactions = useMemo(
+    () =>
+      transactionsFromBlocks(data.blocks, 16).map((transaction) => ({
+        ...transaction,
+        displayType: detectTransactionType(transaction, validatorAddresses),
+      })),
+    [data.blocks, validatorAddresses]
+  );
 
-    const raw =
-      tx.tx_type ||
-      tx.type ||
-      tx.category ||
-      tx.reward_type ||
-      tx.kind ||
-      "";
-    const fn =
-      (tx.function ||
-        tx.method ||
-        tx.function_name ||
-        tx.method_name ||
-        "") + "";
+  const visibleTransactions = useMemo(() => {
+    if (transactionFilter === "all") return recentTransactions.slice(0, 6);
+    return recentTransactions
+      .filter((transaction) =>
+        transactionFilter === "rewards"
+          ? transaction.displayType.toLowerCase().includes("reward")
+          : !transaction.displayType.toLowerCase().includes("reward")
+      )
+      .slice(0, 6);
+  }, [recentTransactions, transactionFilter]);
 
-    const to = (tx.to || tx.To || "").toLowerCase();
+  const blockIntervals = useMemo(() => {
+    return data.blocks.slice(0, 10).map((block, index, blocks) => {
+      const previous = blocks[index + 1];
+      const seconds = previous
+        ? Math.max(0, Number(block.timestamp || 0) - Number(previous.timestamp || 0))
+        : Number(data.network?.average_block_time || 0);
+      return { number: block.block_number, seconds };
+    });
+  }, [data.blocks, data.network]);
 
-    const l = raw.toLowerCase();
-    const f = fn.toLowerCase();
+  const averageBlockTime = useMemo(() => {
+    const valid = blockIntervals.map((item) => item.seconds).filter((seconds) => seconds > 0);
+    if (valid.length) return valid.reduce((sum, seconds) => sum + seconds, 0) / valid.length;
+    return Number(data.network?.average_block_time || 0);
+  }, [blockIntervals, data.network]);
 
-    // Rewards
-    if (l.includes("validator") && l.includes("reward")) return "reward_validator";
-    if (l.includes("lp")) return "reward_lp";
-    if (l.includes("contributor")) return "reward_contributor";
-    if (f === "blockreward") {
-      if (validatorSet.has(to)) return "reward_validator";
-      return "reward";
-    }
+  const securityChecks = useMemo(() => {
+    const checks = new Map((data.readiness?.checks || []).map((check) => [check.name, check]));
+    return SECURITY_CHECKS.map(([name, label]) => ({ name, label, ...(checks.get(name) || {}) }));
+  }, [data.readiness]);
 
-    // Contract interactions
-    if (
-      l.includes("contract_create") ||
-      f === "deploycontract" ||
-      to === "0x0000000000000000000000000000000000000000"
-    )
-      return "contract_create";
+  const pendingMainnetGates = useMemo(
+    () => (data.readiness?.checks || []).filter((check) => check.critical && !check.ok),
+    [data.readiness]
+  );
 
-    if (f === "transfer" && tx.is_contract) return "token_transfer";
+  const readinessScore = Number(data.readiness?.completion_score_percent);
+  const latestBlock = data.blocks[0] || null;
+  const chainHeight = data.health?.height ?? data.readiness?.height ?? latestBlock?.block_number;
+  const protocolVersion = latestBlock?.protocol_version ?? "—";
+  const bftObserved = securityChecks.find((check) => check.name === "signed_bft_finality_observed")?.ok;
+  const vrfObserved = securityChecks.find((check) => check.name === "standard_ecvrf")?.ok;
 
-    if (tx.is_contract || f.length > 0) return "contract_call";
+  const handleSearch = async (event) => {
+    event.preventDefault();
+    const query = globalSearch.trim();
+    if (!query) return;
 
-    return "transfer";
-  };
-
-  const timeAgo = (ts) => {
-    if (!ts) return "N/A";
-    const now = Math.floor(Date.now() / 1000);
-    let d = now - ts;
-    if (d < 0) d = 0;
-    if (d < 60) return `${d}s ago`;
-    const m = Math.floor(d / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
-  };
-
-  /* -----------------------------
-      PROFESSIONAL HYBRID SEARCH
-  ----------------------------- */
-  const isHash = (q) =>
-    q.startsWith("0x") && (q.length === 66 || q.length === 64 || q.length > 40);
-
-  const isAddress = (q) =>
-    q.startsWith("0x") && q.length === 42;
-
-  const isBlockNumber = (q) => /^\d+$/.test(q);
-
-  const handleGlobalSearchSubmit = async (e) => {
-    e.preventDefault();
-    const q = globalSearch.trim();
-
-    if (!q) return;
-
-    // Query the persistent finalized-chain index first. This disambiguates a
-    // transaction hash from a block hash without scanning recent dashboard data.
     try {
-      const result = await fetchChainJSON(`/v2/index/search?q=${encodeURIComponent(q)}`, {
+      const result = await fetchChainJSON(`/v2/index/search?q=${encodeURIComponent(query)}`, {
         timeoutMs: 8000,
       });
-      if (result?.type === "address") return navigate(`/address/${result.query || q}`);
+      if (result?.type === "address") return navigate(`/address/${result.query || query}`);
       if (result?.type === "transaction") return navigate(`/tx/${result.transaction.hash}`);
-      if (result?.type === "block") return navigate(`/blocks/${result.block.hash || result.block.number}`);
+      if (result?.type === "block") {
+        return navigate(`/blocks/${result.block.hash || result.block.number}`);
+      }
     } catch {
-      // Older nodes may not expose the index yet; preserve deterministic routes.
+      // Fall through to deterministic route matching for older nodes.
     }
 
-    if (isAddress(q)) return navigate(`/address/${q}`);
-    if (isHash(q)) return navigate(`/tx/${q}`);
-    if (isBlockNumber(q)) return navigate(`/blocks/${q.replace(/^#/, "").trim()}`);
-
-
-    // Otherwise fallback to local dashboard story search
-    setSearchQuery(q);
+    if (/^\d+$/.test(query)) return navigate(`/blocks/${query}`);
+    if (/^0x[a-fA-F0-9]{40}$/.test(query)) return navigate(`/address/${query}`);
+    if (/^(0x)?[a-fA-F0-9]{64}$/.test(query)) return navigate(`/tx/${query}`);
+    setError("No exact block, transaction, or address match was found for that query.");
   };
 
-  /* -----------------------------
-      LOCAL RECENT TX FILTERING
-  ----------------------------- */
-  const visibleTxs = useMemo(() => {
-    let arr = [...recentTxs];
-
-    const tab = activeTab.toLowerCase();
-    const q = debouncedQuery.toLowerCase();
-
-    // Tabs
-    if (tab !== "all") {
-      arr = arr.filter((t) => {
-        const s = (t.status || "").toLowerCase();
-        if (tab === "confirmed") return s === "succsess";
-        if (tab === "pending") return s !== "succsess" && s !== "failed";
-        if (tab === "failed") return s === "failed";
-        return true;
-      });
-    }
-
-    // Search filters
-    if (q) {
-      arr = arr.filter((t) => {
-        const h = (t.tx_hash || t.txHash || "").toLowerCase();
-        const from = (t.from || "").toLowerCase();
-        const to = (t.to || "").toLowerCase();
-        const st = (t.status || "").toLowerCase();
-        const tp = (t.__txType || "").toLowerCase();
-
-        if (searchField === "hash") return h.includes(q);
-        if (searchField === "address") return from.includes(q) || to.includes(q);
-        if (searchField === "status") return st.includes(q);
-        if (searchField === "type") return tp.includes(q);
-
-        // All fields
-        return (
-          h.includes(q) ||
-          from.includes(q) ||
-          to.includes(q) ||
-          st.includes(q) ||
-          tp.includes(q)
-        );
-      });
-    }
-
-    return arr.slice(0, 4); // show only top
-  }, [recentTxs, debouncedQuery, searchField, activeTab]);
-
-  /* -----------------------------
-      BADGES
-  ----------------------------- */
-  const StatusBadge = ({ status }) => {
-    const s = (status || "").toLowerCase();
-    const cls =
-      s === "succsess" ? "badge badge-green"
-      : s === "failed" ? "badge badge-red"
-      : "badge badge-yellow";
-    const text =
-      s === "succsess" ? "Confirmed"
-      : s === "failed"  ? "Failed"
-      : "Pending";
-    return <span className={cls}>{text}</span>;
-  };
-
-  const TypeBadge = ({ type }) => {
-    const t = (type || "").toLowerCase();
-    const map = {
-      reward_validator: ["badge badge-cyan",   "Validator Reward"],
-      reward_lp:        ["badge badge-purple", "LP Reward"],
-      reward_contributor:["badge badge-teal",  "Contributor"],
-      reward:           ["badge badge-cyan",   "Reward"],
-      contract_create:  ["badge badge-purple", "Deploy"],
-      contract_call:    ["badge badge-green",  "Contract Call"],
-      token_transfer:   ["badge badge-orange", "Token Transfer"],
-      transfer:         ["badge badge-gray",   "Transfer"],
-    };
-    const [cls, label] = map[t] || map.transfer;
-    return <span className={cls}>{label}</span>;
-  };
-
-  /* -----------------------------
-      COPY HELPER
-  ----------------------------- */
-  const copyHash = async (h) => {
+  const copyHash = async (hash) => {
     try {
-      await navigator.clipboard.writeText(h);
-      setCopiedHash(h);
-      setTimeout(() => setCopiedHash(""), 1200);
-    } catch {}
+      await navigator.clipboard.writeText(hash);
+      setCopiedHash(hash);
+      window.setTimeout(() => setCopiedHash(""), 1200);
+    } catch {
+      setError("Clipboard access is not available in this browser.");
+    }
   };
 
-  if (loading && !networkStats)
-    return <div className="loading">Loading dashboard…</div>;
+  if (loading && !data.health && data.blocks.length === 0) {
+    return (
+      <div className="premium-loading" aria-live="polite">
+        <span />
+        <p>Connecting to the PoDL public network…</p>
+      </div>
+    );
+  }
 
-  /* ===========================================================
-                         RENDER START
-     =========================================================== */
   return (
-    <div className="dashboard">
-
-      {/* ══════════ HERO SEARCH ══════════ */}
-      <div className="search-hero">
-        <p className="search-hero-title">LQD Blockchain Explorer</p>
-        <p className="search-hero-sub">
-          Search by transaction hash, address, or block number
-        </p>
-        <form className="search-form" onSubmit={handleGlobalSearchSubmit}>
-          <input
-            className="search-input"
-            value={globalSearch}
-            onChange={(e) => setGlobalSearch(e.target.value)}
-            placeholder="0x… tx hash  /  0x… address  /  block number"
-          />
-          <button type="submit" className="btn-primary" style={{ flexShrink: 0 }}>
-            Search
-          </button>
-        </form>
-      </div>
-
-      {error && <div className="error-message">{error}</div>}
-
-      {/* ══════════ NETWORK STATS ══════════ */}
-      <div className="network-stats">
-        <div className="stats-grid">
-          <div className="stat-card">
-            <h4>Block Height</h4>
-            <p>
-              {blockTime && typeof blockTime.mining_time_sec === "number"
-                ? `#${blockTime.block_number}`
-                : (networkStats?.block_height ?? "—")}
-            </p>
+    <main className="dashboard premium-dashboard">
+      <section className="intelligence-hero">
+        <div className="hero-copy">
+          <div className="hero-eyebrow">
+            <span className="live-indicator live" />
+            Live public network intelligence
           </div>
-          <div className="stat-card">
-            <h4>Block Time</h4>
-            <p>
-              {blockTime && typeof blockTime.mining_time_sec === "number"
-                ? `${blockTime.mining_time_sec.toFixed(3)} s`
-                : "—"}
-            </p>
-          </div>
-          <div className="stat-card">
-            <h4>Validators</h4>
-            <p>{validators.length || "—"}</p>
-          </div>
-          <div className="stat-card">
-            <h4>Avg Block Time</h4>
-            <p>
-              {networkStats?.average_block_time
-                ? `${networkStats.average_block_time.toFixed(2)} s`
-                : "—"}
-            </p>
-          </div>
-        </div>
-      </div>
+          <h1>Every PoDL block.<br />One transparent view.</h1>
+          <p>
+            Inspect finalized state, validator activity, dynamic-liquidity infrastructure,
+            transactions and protocol readiness directly from public backend APIs.
+          </p>
 
-      {/* ══════════ RECENT BLOCKS + TXS ══════════ */}
-      <div className="recent-data">
-
-        {/* ── Recent Blocks ── */}
-        <div className="recent-blocks">
-          <h3>Recent Blocks
-            <span style={{ marginLeft: "auto", fontSize: "0.72rem",
-              color: "var(--text-muted)", fontWeight: 400 }}>
-              {recentBlocks.length} blocks
-            </span>
-          </h3>
-          <BlockList blocks={recentBlocks} showTxHash={false} />
-        </div>
-
-        {/* ── Recent Transactions ── */}
-        <div className="recent-transactions">
-          <h3>Recent Transactions</h3>
-
-          {/* Search + filter row */}
-          <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <form className="premium-search" onSubmit={handleSearch} role="search">
+            <span className="search-symbol" aria-hidden="true" />
+            <label className="sr-only" htmlFor="global-chain-search">Search the PoDL chain</label>
             <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter transactions…"
-              style={{ flex: 1, minWidth: 120 }}
+              id="global-chain-search"
+              value={globalSearch}
+              onChange={(event) => setGlobalSearch(event.target.value)}
+              placeholder="Search address, transaction hash, or block height"
+              autoComplete="off"
             />
-            <select
-              value={searchField}
-              onChange={(e) => setSearchField(e.target.value)}
-              style={{ width: "auto" }}
+            <button type="submit">Search network</button>
+          </form>
+
+          <div className="hero-evidence-row" aria-label="Protocol evidence">
+            <span className={bftObserved ? "verified" : "pending"}>Signed BFT {bftObserved ? "observed" : "checking"}</span>
+            <span className={vrfObserved ? "verified" : "pending"}>ECVRF {vrfObserved ? "verified" : "checking"}</span>
+            <span>Protocol v{protocolVersion}</span>
+          </div>
+        </div>
+
+        <aside className="chain-pulse-card" aria-label="Live chain pulse">
+          <div className="pulse-card-header">
+            <div>
+              <span>Chain pulse</span>
+              <strong>Public testnet</strong>
+            </div>
+            <button
+              className={refreshing ? "refresh-button refreshing" : "refresh-button"}
+              type="button"
+              onClick={() => fetchData({ background: true })}
+              disabled={refreshing}
+              aria-label="Refresh live network data"
+              title="Refresh live data"
             >
-              <option value="all">All fields</option>
-              <option value="hash">Tx hash</option>
-              <option value="address">Address</option>
-              <option value="status">Status</option>
-              <option value="type">Tx type</option>
-            </select>
+              ↻
+            </button>
+          </div>
+          <div className="pulse-height">
+            <span>Finalized height</span>
+            <strong>#{compactNumber(chainHeight, 0)}</strong>
+            <small>{latestBlock ? timeAgo(latestBlock.timestamp) : "Waiting for latest block"}</small>
+          </div>
+          <div className="cadence-chart" aria-label="Recent block interval chart">
+            {blockIntervals.map((item, index) => {
+              const height = Math.min(100, Math.max(26, (item.seconds / Math.max(averageBlockTime, 1)) * 48));
+              return (
+                <span
+                  key={`${item.number}-${index}`}
+                  style={{ height: `${height}%` }}
+                  title={`Block ${item.number}: ${item.seconds.toFixed(1)} seconds`}
+                />
+              );
+            })}
+          </div>
+          <div className="pulse-footer">
+            <span>Average cadence <strong>{averageBlockTime ? `${averageBlockTime.toFixed(2)}s` : "—"}</strong></span>
+            <span>Latest hash <strong>{shortHash(data.health?.latest_block_hash, 8, 5)}</strong></span>
+          </div>
+        </aside>
+      </section>
+
+      {error && <div className="premium-alert" role="status">{error}</div>}
+
+      <section className="network-stat-grid" aria-label="Live network metrics">
+        <StatCard label="Block height" value={`#${compactNumber(chainHeight, 0)}`} detail="Persistent index synchronized" accent="cyan" eyebrow="Live" />
+        <StatCard label="Block cadence" value={averageBlockTime ? `${averageBlockTime.toFixed(2)}s` : "—"} detail={`${data.blockTime?.mining_time_ms ? compactNumber(data.blockTime.mining_time_ms, 0) : "—"} ms latest mining time`} accent="blue" />
+        <StatCard label="Base fee" value={compactNumber(data.baseFee?.base_fee ?? data.readiness?.base_fee, 0)} detail="Network-native gas unit" accent="violet" />
+        <StatCard label="Active validators" value={compactNumber(data.validators.length, 0)} detail={`${data.health?.peers ?? 0} connected public peers`} accent="green" />
+        <StatCard label="Mempool" value={compactNumber(data.readiness?.mempool ?? data.network?.transaction_pool, 0)} detail="Pending public transactions" accent="amber" />
+        <StatCard
+          label="Readiness evidence"
+          value={Number.isFinite(readinessScore) ? `${readinessScore}%` : "—"}
+          detail={data.readiness?.testnet_recommended ? "Public testnet recommended" : "Readiness under evaluation"}
+          accent="indigo"
+          eyebrow="Evidence"
+        />
+      </section>
+
+      <section className="dashboard-intelligence-grid">
+        <article className="premium-panel activity-panel">
+          <div className="panel-heading">
+            <div>
+              <span className="panel-kicker">Finalized ledger</span>
+              <h2>Latest blocks</h2>
+            </div>
+            <Link to="/blocks">View all blocks <span aria-hidden="true">→</span></Link>
+          </div>
+          <BlockList blocks={data.blocks.slice(0, 7)} showTxHash={false} compact />
+        </article>
+
+        <article className="premium-panel readiness-panel">
+          <div className="panel-heading">
+            <div>
+              <span className="panel-kicker">Verifiable infrastructure</span>
+              <h2>Security posture</h2>
+            </div>
+            <Link to="/investor">Full evidence <span aria-hidden="true">→</span></Link>
           </div>
 
-          {/* Status tabs */}
-          <div className="tx-tabs" style={{ marginBottom: 10 }}>
-            {["all", "pending", "confirmed", "failed"].map((tab) => (
-              <button
-                key={tab}
-                className={`tx-tab${activeTab === tab ? " active" : ""}`}
-                onClick={() => setActiveTab(tab)}
-              >
-                {tab[0].toUpperCase() + tab.slice(1)}
-              </button>
+          <div className="readiness-score-row">
+            <div
+              className="readiness-ring"
+              style={{ "--readiness": Number.isFinite(readinessScore) ? readinessScore : 0 }}
+              aria-label={`${Number.isFinite(readinessScore) ? readinessScore : 0}% readiness evidence complete`}
+            >
+              <strong>{Number.isFinite(readinessScore) ? `${readinessScore}%` : "—"}</strong>
+              <span>evidence</span>
+            </div>
+            <div>
+              <strong>Testnet operational</strong>
+              <p>{pendingMainnetGates.length} critical mainnet gates remain openly tracked.</p>
+            </div>
+          </div>
+
+          <div className="security-check-list">
+            {securityChecks.map((check) => (
+              <div key={check.name}>
+                <span className={check.ok ? "check-ok" : "check-wait"} aria-hidden="true">
+                  {check.ok ? "✓" : "·"}
+                </span>
+                <span>{check.label}</span>
+                <small>{check.ok ? "Verified" : "Pending"}</small>
+              </div>
             ))}
           </div>
 
-          {/* TX count */}
-          <div style={{ fontSize: "0.72rem", color: "var(--text-muted)",
-            marginBottom: 8, textAlign: "right" }}>
-            {visibleTxs.length} result{visibleTxs.length !== 1 ? "s" : ""}
+          {pendingMainnetGates.length > 0 && (
+            <div className="mainnet-gates">
+              <span>Mainnet gates</span>
+              <div>
+                {pendingMainnetGates.slice(0, 3).map((check) => (
+                  <small key={check.name}>{check.name.replaceAll("_", " ")}</small>
+                ))}
+              </div>
+            </div>
+          )}
+        </article>
+      </section>
+
+      <section className="dashboard-intelligence-grid lower-grid">
+        <article className="premium-panel transaction-stream">
+          <div className="panel-heading transaction-heading">
+            <div>
+              <span className="panel-kicker">On-chain activity</span>
+              <h2>Latest transactions</h2>
+            </div>
+            <div className="segment-control" aria-label="Filter recent transactions">
+              {["all", "rewards", "user"].map((filter) => (
+                <button
+                  key={filter}
+                  type="button"
+                  className={transactionFilter === filter ? "active" : ""}
+                  onClick={() => setTransactionFilter(filter)}
+                >
+                  {filter === "user" ? "User activity" : filter[0].toUpperCase() + filter.slice(1)}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* TX List */}
-          {visibleTxs.length === 0 ? (
-            <div className="no-transactions">No matching transactions.</div>
-          ) : (
-            visibleTxs.map((tx, i) => {
-              const h       = tx.tx_hash || tx.txHash || `idx-${i}`;
-              const from    = tx.from || tx.From || "";
-              const to      = tx.to || tx.To || "";
-              const gas     = tx.gas || tx.Gas || 0;
-              const gasPrice = tx.gas_price || tx.GasPrice || 0;
-              const fee     = gas * gasPrice;
-
-              return (
-                <div
-                  key={h}
-                  className="tx-item"
-                  onClick={() => navigate(`/tx/${h}`)}
-                >
-                  {/* top row */}
-                  <div style={{ display: "flex", justifyContent: "space-between",
-                    alignItems: "flex-start", gap: 8 }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: "0.8rem", color: "var(--text-link)",
-                        fontFamily: "var(--font-mono)", marginBottom: 2 }}>
-                        {h.slice(0, 20)}…
-                      </div>
-                      <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
-                        {timeAgo(tx.timestamp || tx.Timestamp)}
-                      </div>
+          <div className="premium-transaction-list">
+            {visibleTransactions.length === 0 ? (
+              <div className="empty-state">No matching finalized transactions in the recent block window.</div>
+            ) : (
+              visibleTransactions.map((transaction, index) => {
+                const hash = transaction.tx_hash || transaction.txHash || `transaction-${index}`;
+                const status = String(transaction.status || "pending").toLowerCase();
+                const confirmed = status === "succsess" || status === "success" || status === "confirmed";
+                return (
+                  <div className="premium-transaction-row" key={hash}>
+                    <button className="transaction-type-mark" type="button" onClick={() => navigate(`/tx/${hash}`)} aria-label={`Open ${transaction.displayType}`}>
+                      {transaction.displayType.includes("reward") ? "R" : "T"}
+                    </button>
+                    <div className="transaction-primary">
+                      <button type="button" onClick={() => navigate(`/tx/${hash}`)}>{shortHash(hash, 12, 7)}</button>
+                      <span>{transaction.displayType} · {timeAgo(transaction.timestamp)}</span>
                     </div>
-
-                    <div style={{ display: "flex", gap: 5, alignItems: "center",
-                      flexShrink: 0 }}>
-                      <button
-                        className="btn-copy-small"
-                        onClick={(e) => { e.stopPropagation(); copyHash(h); }}
-                      >
-                        {copiedHash === h ? "✓" : "Copy"}
-                      </button>
-                      <TypeBadge type={tx.__txType} />
-                      <StatusBadge status={tx.status || tx.Status} />
+                    <div className="transaction-route">
+                      <span>{shortHash(transaction.from, 7, 4)}</span>
+                      <i aria-hidden="true">→</i>
+                      <span>{shortHash(transaction.to, 7, 4)}</span>
                     </div>
+                    <div className="transaction-value">
+                      <strong>{formatLQD(transaction.value || 0)} LQD</strong>
+                      <span className={confirmed ? "confirmed" : "pending"}>{confirmed ? "Finalized" : "Pending"}</span>
+                    </div>
+                    <button className="copy-row-button" type="button" onClick={() => copyHash(hash)}>
+                      {copiedHash === hash ? "Copied" : "Copy"}
+                    </button>
                   </div>
+                );
+              })
+            )}
+          </div>
+          <Link className="panel-footer-link" to="/transactions">Explore transaction history <span aria-hidden="true">→</span></Link>
+        </article>
 
-                  {/* address row */}
-                  <div style={{ marginTop: 8, fontSize: "0.78rem",
-                    color: "var(--text-secondary)", display: "flex",
-                    alignItems: "center", gap: 6 }}>
-                    <span style={{ color: "var(--text-muted)", fontSize: "0.7rem" }}>FROM</span>
-                    <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-link)" }}>
-                      {from.slice(0, 14)}…
-                    </span>
-                    <span style={{ color: "var(--text-muted)" }}>→</span>
-                    <span style={{ color: "var(--text-muted)", fontSize: "0.7rem" }}>TO</span>
-                    <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-link)" }}>
-                      {to.slice(0, 14)}…
-                    </span>
-                  </div>
+        <article className="premium-panel validator-panel">
+          <div className="panel-heading">
+            <div>
+              <span className="panel-kicker">Consensus participants</span>
+              <h2>Validator set</h2>
+            </div>
+            <Link to="/validators">All validators <span aria-hidden="true">→</span></Link>
+          </div>
+          <ValidatorList validators={data.validators.slice(0, 4)} premium />
+        </article>
+      </section>
 
-                  {/* value / gas row */}
-                  <div style={{ marginTop: 6, display: "flex", gap: 14,
-                    fontSize: "0.75rem", color: "var(--text-muted)", flexWrap: "wrap" }}>
-                    <span><span style={{ color: "var(--text-secondary)" }}>Value</span>{" "}
-                      <strong style={{ color: "var(--text-primary)" }}>{formatLQD(tx.value || 0)}</strong> LQD
-                    </span>
-                    <span><span style={{ color: "var(--text-secondary)" }}>Gas</span>{" "}
-                      <strong style={{ color: "var(--text-primary)" }}>{gas}</strong>
-                    </span>
-                    {!!fee && (
-                      <span><span style={{ color: "var(--text-secondary)" }}>Fee</span>{" "}
-                        <strong style={{ color: "var(--text-primary)" }}>{formatLQD(fee)}</strong>
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
+      <div className="dashboard-refresh-note">
+        <span className={`live-indicator ${data.health?.status === "ok" ? "live" : "degraded"}`} />
+        Public data refreshes every 7 seconds
+        {lastUpdated && <time dateTime={lastUpdated.toISOString()}> · updated {lastUpdated.toLocaleTimeString()}</time>}
       </div>
-
-      {/* ══════════ VALIDATORS ══════════ */}
-      <div className="validators-section">
-        <h3>Active Validators</h3>
-        {validators.length > 0 ? (
-          <ValidatorList validators={validators} />
-        ) : (
-          <div className="no-validators">No validators found.</div>
-        )}
-      </div>
-    </div>
+    </main>
   );
 };
 
