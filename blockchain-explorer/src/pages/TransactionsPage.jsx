@@ -1,6 +1,7 @@
 // TransactionsPage.js
 import React, { useState, useEffect, useCallback } from 'react';
 import TransactionList from '../components/TransactionList';
+import { DataSurface, ExplorerPageHero, MetricStrip, PremiumPagination } from '../components/ExplorerPage';
 import { fetchHistoricalTransactionPage } from '../utils/api';
 
 const PAGE_SIZE = 10;
@@ -54,22 +55,21 @@ const TransactionsPage = () => {
   if (loading) return <div className="loading">Loading transactions...</div>;
 
   return (
-    <div className="transactions-page" style={{ maxWidth: 1200 }}>
-      <h2 style={{
-        fontSize: '1.35rem', fontWeight: 700,
-        color: 'var(--text-primary)', margin: '0 0 20px',
-        letterSpacing: '-0.3px'
-      }}>
-        Transactions
-        {total > 0 && (
-          <span style={{
-            marginLeft: 12, fontSize: '0.8rem', fontWeight: 500,
-            color: 'var(--text-muted)'
-          }}>
-            {total.toLocaleString()} transactions
-          </span>
-        )}
-      </h2>
+    <main className="transactions-page premium-route-page">
+      <ExplorerPageHero
+        eyebrow="Transaction intelligence"
+        title="Every state change, clearly resolved."
+        description="Follow transfers, contract calls, fees and settlement status across the live PoDL public ledger."
+        metaLabel="Index cadence"
+        metaValue="Refreshes every 15 seconds"
+      />
+
+      <MetricStrip items={[
+        { label: 'Indexed transactions', value: total.toLocaleString(), note: 'historical ledger' },
+        { label: 'Current page', value: `${safePage} / ${Math.max(totalPages, 1)}`, note: `${PAGE_SIZE} rows per page` },
+        { label: 'Settlement', value: 'Finalized', note: 'status-aware records' },
+        { label: 'Data mode', value: 'Live', note: 'automatic refresh' },
+      ]} />
 
       {error && (
         <div className="error" style={{ marginBottom: 16 }}>
@@ -77,118 +77,33 @@ const TransactionsPage = () => {
         </div>
       )}
 
-      {/* ── Pagination top ── */}
-      <PaginationBar
-        page={safePage}
-        totalPages={totalPages}
-        pageNumbers={pageNumbers()}
-        startIdx={startIdx}
-        endIdx={Math.min(startIdx + PAGE_SIZE, total)}
-        total={total}
-        label="transactions"
-        goTo={goTo}
-      />
-
-      <TransactionList transactions={pageTxs} />
-
-      {/* ── Pagination bottom ── */}
-      {totalPages > 1 && (
-        <PaginationBar
+      <DataSurface title="Transaction stream" description="Decoded movement, counterparties, value, gas and final execution state.">
+        <PremiumPagination
           page={safePage}
           totalPages={totalPages}
           pageNumbers={pageNumbers()}
-          startIdx={startIdx}
-          endIdx={Math.min(startIdx + PAGE_SIZE, total)}
+          start={startIdx + 1}
+          end={Math.min(startIdx + PAGE_SIZE, total)}
           total={total}
           label="transactions"
           goTo={goTo}
         />
-      )}
-    </div>
+        <TransactionList transactions={pageTxs} />
+        {totalPages > 1 && (
+          <PremiumPagination
+            page={safePage}
+            totalPages={totalPages}
+            pageNumbers={pageNumbers()}
+            start={startIdx + 1}
+            end={Math.min(startIdx + PAGE_SIZE, total)}
+            total={total}
+            label="transactions"
+            goTo={goTo}
+          />
+        )}
+      </DataSurface>
+    </main>
   );
 };
-
-/* ══════════════════════════════════════════════
-   Reusable pagination bar
-══════════════════════════════════════════════ */
-const PaginationBar = ({ page, totalPages, pageNumbers, startIdx, endIdx, total, label, goTo }) => (
-  <div style={{
-    display: 'flex', alignItems: 'center', gap: 6,
-    margin: '12px 0 16px', flexWrap: 'wrap',
-  }}>
-    {/* showing info */}
-    <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginRight: 8 }}>
-      Showing <strong style={{ color: 'var(--text-secondary)' }}>{total > 0 ? startIdx + 1 : 0}–{endIdx}</strong> of{' '}
-      <strong style={{ color: 'var(--text-secondary)' }}>{total.toLocaleString()}</strong> {label}
-    </span>
-
-    {/* ← First */}
-    <button
-      className="btn-secondary"
-      style={{ padding: '5px 10px', fontSize: '0.78rem' }}
-      onClick={() => goTo(1)}
-      disabled={page === 1}
-    >
-      «
-    </button>
-
-    {/* ← Prev */}
-    <button
-      className="btn-secondary"
-      style={{ padding: '5px 12px', fontSize: '0.78rem' }}
-      onClick={() => goTo(page - 1)}
-      disabled={page === 1}
-    >
-      ‹ Prev
-    </button>
-
-    {/* page number pills */}
-    {pageNumbers.map((p, i, arr) => (
-      <React.Fragment key={p}>
-        {/* ellipsis gap */}
-        {i > 0 && arr[i - 1] !== p - 1 && (
-          <span style={{ color: 'var(--text-muted)', padding: '0 2px', fontSize: '0.8rem' }}>…</span>
-        )}
-        <button
-          onClick={() => goTo(p)}
-          style={{
-            padding: '5px 11px',
-            fontSize: '0.8rem',
-            fontWeight: p === page ? 700 : 400,
-            borderRadius: 6,
-            border: p === page ? '1px solid var(--primary)' : '1px solid var(--border)',
-            background: p === page ? 'var(--primary-subtle)' : 'var(--bg-badge)',
-            color: p === page ? 'var(--primary-light)' : 'var(--text-secondary)',
-            cursor: p === page ? 'default' : 'pointer',
-            transition: 'all 0.15s',
-            minWidth: 34,
-          }}
-        >
-          {p}
-        </button>
-      </React.Fragment>
-    ))}
-
-    {/* Next → */}
-    <button
-      className="btn-secondary"
-      style={{ padding: '5px 12px', fontSize: '0.78rem' }}
-      onClick={() => goTo(page + 1)}
-      disabled={page === totalPages}
-    >
-      Next ›
-    </button>
-
-    {/* Last → */}
-    <button
-      className="btn-secondary"
-      style={{ padding: '5px 10px', fontSize: '0.78rem' }}
-      onClick={() => goTo(totalPages)}
-      disabled={page === totalPages}
-    >
-      »
-    </button>
-  </div>
-);
 
 export default TransactionsPage;

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ExplorerPageHero } from '../components/ExplorerPage';
 import {
   API_BASE,
   CHAIN_BASE,
@@ -96,16 +97,13 @@ const useContracts = () => {
 };
 
 const PageHeader = ({ title, subtitle, count }) => (
-  <div className="tracker-header">
-    <div>
-      <p className="section-title">Explorer Tracker</p>
-      <h2 className="page-title">
-        {title}
-        {typeof count === 'number' && <span>{count.toLocaleString()} total</span>}
-      </h2>
-      {subtitle && <p>{subtitle}</p>}
-    </div>
-  </div>
+  <ExplorerPageHero
+    eyebrow="Network intelligence"
+    title={title}
+    description={subtitle}
+    metaLabel={typeof count === 'number' ? 'Indexed records' : 'Data source'}
+    metaValue={typeof count === 'number' ? count.toLocaleString() : 'PoDL public APIs'}
+  />
 );
 
 const TrackerShell = ({ title, subtitle, count, loading, error, children }) => (
