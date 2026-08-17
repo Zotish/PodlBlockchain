@@ -37,7 +37,7 @@ printf '%s\n' \
   'LQD_REQUIRE_SIGNED_BFT=false' > "$PODL_ROOT/.env"
 chmod 600 "$PODL_ROOT/.env"
 
-PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" \
+PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" SKIP_IMAGE_PULL=true \
   sh "$REPO_ROOT/scripts/ops/podl_setup_validator_signer.sh" >/dev/null
 
 grep -q '^ENABLE_VALIDATOR_SIGNER=false$' "$PODL_ROOT/.env"
@@ -56,7 +56,7 @@ test -s "$PODL_ROOT/signer-secrets/chain-client.crt"
 encrypted_backup="$(find "$PODL_ROOT/signer-ca-backup" -name 'env-before-signer-*.enc' -type f | head -1)"
 test -s "$encrypted_backup"
 
-PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" \
+PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" SKIP_IMAGE_PULL=true \
   sh "$REPO_ROOT/scripts/ops/podl_setup_validator_signer.sh" >/dev/null
 
 echo "PASS signer provisioning creates mTLS material, verifies address, stages raw-key-free config and is idempotent"

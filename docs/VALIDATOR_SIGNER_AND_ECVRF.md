@@ -90,6 +90,8 @@ sh ./podl_setup_validator_signer.sh
 
 The GitHub `Deploy Backend To VPS` workflow exposes the same operation as the manual `configure_validator_signer` input. Normal push deployments never perform key migration implicitly. `podl_image_deploy.sh` checks the staged signer files/settings, takes a state snapshot while the old environment is still active, atomically activates the staged environment, waits for signer health before starting the chain, verifies all local services and rejects any height regression. A failed deploy decrypts the protected pre-migration environment, recreates the previous image and reports the snapshot path. Only a successful rollout removes the pending marker and leaves the active environment without the raw validator key.
 
+For an emergency direct-SSH rollout, build and inspect the image locally first and pass `SKIP_IMAGE_PULL=true` to both scripts. This is an explicit operator mode; the default workflow still pulls an immutable GHCR image.
+
 ## PKCS#11 HSM mode
 
 Configure `LQD_PKCS11_MODULE`, `LQD_PKCS11_TOKEN_LABEL`, `LQD_PKCS11_KEY_LABEL`, `LQD_PKCS11_PUBLIC_KEY`, `LQD_PKCS11_PIN` and an explicit distinct `LQD_VALIDATOR_VRF_PRIVATE_KEY`. The PKCS#11 backend selects exactly one signing object, requests `CKM_ECDSA`, accepts raw or DER vendor signature encoding, normalizes low-S and reconstructs the recovery byte only when the result matches the pinned public key.
