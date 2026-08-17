@@ -128,6 +128,7 @@ import {
   secp256k1CompressedPublicKey,
   encodeErc20Transfer,
   signCosmosTx,
+  signCosmosWasmExecuteTx,
   signSolanaTransfer,
   signSolanaTokenTransfer,
   signNearTransfer,
@@ -138,6 +139,7 @@ import {
   exportKeyInfo,
   base58Encode as cryptoBase58Encode,
 } from "./src/crypto";
+import { nftKey, normalizeNftUri, resolveEvmNftMetadata, resolveNftUriMetadata, validateNftIdentifier } from "./src/nft";
 import {
   buildTonTransferBoc,
   buildJettonTransferBoc,
@@ -190,9 +192,7 @@ const deriveFamilyAddress = (privKey, family) => {
       return deriveCosmosLikeAddress(privKey, "inj", CryptoJS);
     if (fam === "tron")
       return deriveTronAddress(privKey, CryptoJS);
-    // secp256k1 chains whose address IS the EVM address, just bech32-wrapped — handled in activeAddress
-    // ed25519 / other-curve chains — address derivation not available without mnemonic + BIP44
-    // solana, near, aptos, sui, ton, utxo, litecoin, starknet → return "" to trigger "unsupported" UI
+    // Remaining families use the mnemonic-derived keys from deriveAllChainKeys.
     return "";
   } catch { return ""; }
 };
@@ -833,6 +833,13 @@ const initialTokenImportForm = {
   decimals: "",
 };
 
+const initialNftImportForm = {
+  address: "",
+  tokenId: "",
+  name: "",
+  image: "",
+};
+
 const FAMILY_TOKEN_UI = {
   evm: { label: "Contract Address", placeholder: "0x...", hint: "ERC-20 token contract address", autoFetch: true, supported: true },
   solana: { label: "Mint Address", placeholder: "EPjFWdd5…", hint: "SPL token mint address (base58)", autoFetch: false, supported: true },
@@ -871,8 +878,8 @@ const SEND_ADDR_PLACEHOLDER = {
   aptos: "0x...",
   sui: "0x...",
   starknet: "0x0...",
-  utxo: "tb1... or m...",
-  litecoin: "tltc1...",
+  utxo: "tb1q...",
+  litecoin: "tltc1q...",
 };
 
 const initialTokenSendForm = {
@@ -1073,6 +1080,8 @@ function App() {
 
   const [sendForm, setSendForm] = useState(initialSendForm);
   const [tokenImportForm, setTokenImportForm] = useState(initialTokenImportForm);
+  const [nftImportForm, setNftImportForm] = useState(initialNftImportForm);
+  const [nfts, setNfts] = useState([]);
   const [selectedTokenForSend, setSelectedTokenForSend] = useState(null);
   const [tokenSendForm, setTokenSendForm] = useState(initialTokenSendForm);
   const [hiddenTokens, setHiddenTokens] = useState([]); // [{address, networkId}]
@@ -3266,7 +3275,7 @@ function App() {
       return broadcastStarknetTransfer({ senderAddress: address, toAddress: recipient, amountWei: String(amount), maxFee: tx.maxFee, nodeUrl }, privateKey);
     }
 
-    throw new Error(`${currentNetwork.name} dApp transaction signing is not supported in browser yet`);
+    throw new Error(`${currentNetwork.name} does not expose a safe browser transaction adapter for this request`);
   }
 
   function browserConnectResult(method) {
@@ -3504,7 +3513,7 @@ function App() {
             leakedKeys: audit.leakedKeys || [],
           }).catch(() => {});
         }
-        const [vault, savedNetworks, savedNetworkId, savedEndpoints, savedWatchlist, savedActivity, savedFactory, savedBridgeChainId, savedSettings, savedApprovals, savedTrustedOrigins, savedWatchAddresses, savedHiddenTokens, savedRemovedTokens, savedLegalRiskAccepted, savedTrackedTxs] = await Promise.all([
+        const [vault, savedNetworks, savedNetworkId, savedEndpoints, savedWatchlist, savedActivity, savedFactory, savedBridgeChainId, savedSettings, savedApprovals, savedTrustedOrigins, savedWatchAddresses, savedHiddenTokens, savedRemovedTokens, savedLegalRiskAccepted, savedTrackedTxs, savedNfts] = await Promise.all([
           loadJSON(STORAGE_KEYS.vault, null),
           loadJSON(STORAGE_KEYS.networks, null),
           loadJSON(STORAGE_KEYS.activeNetworkId, null),
@@ -3521,6 +3530,7 @@ function App() {
           loadJSON(STORAGE_KEYS.removedTokens, []),
           loadJSON(STORAGE_KEYS.legalRiskAccepted, false),
           loadJSON(STORAGE_KEYS.pendingTransactions, []),
+          loadJSON(STORAGE_KEYS.nfts, []),
         ]);
 
         if (!alive) return;
@@ -3554,6 +3564,7 @@ function App() {
         if (Array.isArray(savedRemovedTokens)) setRemovedTokens(savedRemovedTokens);
         setLegalRiskAccepted(Boolean(savedLegalRiskAccepted));
         if (Array.isArray(savedTrackedTxs)) setTrackedTxs(savedTrackedTxs);
+        if (Array.isArray(savedNfts)) setNfts(savedNfts);
         setVaultRecord(vault || null);
       } catch (e) {
         recordError("boot", e).catch(() => {});
@@ -3594,6 +3605,10 @@ function App() {
   useEffect(() => {
     saveJSON(STORAGE_KEYS.removedTokens, removedTokens).catch(() => { });
   }, [removedTokens]);
+
+  useEffect(() => {
+    saveJSON(STORAGE_KEYS.nfts, nfts).catch(() => { });
+  }, [nfts]);
 
   useEffect(() => {
     saveJSON(STORAGE_KEYS.activity, activity).catch(() => { });
@@ -4488,7 +4503,7 @@ function App() {
         );
 
       } else {
-        throw new Error(`Send not yet supported for ${currentNetwork.name} (${family})`);
+        throw new Error(`No native-send adapter is registered for ${currentNetwork.name} (${family})`);
       }
 
       setProcessingMessage("");
@@ -4643,6 +4658,120 @@ function App() {
     }
   }
 
+  async function importNftAction() {
+    if (!wallet?.address) {
+      showToast("Unlock wallet first", "error");
+      return;
+    }
+    const family = String(currentNetwork.family || "evm").toLowerCase();
+    const address = nftImportForm.address.trim();
+    const tokenId = nftImportForm.tokenId.trim();
+    if (!validateNftIdentifier(address, tokenId, family)) {
+      const message = ["utxo", "litecoin"].includes(family)
+        ? `${currentNetwork.name} has no account-based NFT contract standard`
+        : `Enter a valid ${currentNetwork.name} NFT identifier and token ID`;
+      showToast(message, "error");
+      return;
+    }
+
+    setBusy(true);
+    setBusyAction("addNft");
+    setProcessingMessage("Verifying NFT...");
+    try {
+      let metadata = {};
+      if (currentNetwork.id === "lqd") {
+        const [abi, storage] = await Promise.all([
+          nodeContractAbi(nodeUrl, address),
+          nodeContractStorage(nodeUrl, address).catch(() => null),
+        ]);
+        if (!abi) throw new Error("No LQD contract is deployed at this address");
+        const storageData = storage?.State?.storage || storage?.State || storage?.state?.storage || storage?.state || storage?.storage || storage || {};
+        const owner = String(storageData[`owner:${tokenId}`] || storageData[`ownerOf:${tokenId}`] || "");
+        if (!owner) throw new Error(`LQD NFT token #${tokenId} does not exist in this contract`);
+        const baseUri = String(storageData["uri:base"] || "");
+        const tokenUri = String(storageData[`uri:${tokenId}`] || (baseUri ? `${baseUri}${tokenId}` : ""));
+        const uriMetadata = await resolveNftUriMetadata(tokenUri, tokenId).catch(() => null);
+        const expectedOwner = String(activeAddress || wallet.address).toLowerCase();
+        metadata = {
+          name: uriMetadata?.name || storageData.name || storageData.Name || "",
+          symbol: storageData.symbol || storageData.Symbol || "",
+          description: uriMetadata?.description || "",
+          image: normalizeNftUri(uriMetadata?.image || storageData.image || storageData.Image || ""),
+          tokenUri: normalizeNftUri(tokenUri),
+          owner,
+          ownershipVerified: owner.toLowerCase() === expectedOwner,
+          ownershipMismatch: owner.toLowerCase() !== expectedOwner,
+          contractVerified: true,
+        };
+      } else if (["evm", "harmony"].includes(family) || (family === "sei" && /^0x[a-fA-F0-9]{40}$/.test(address))) {
+        const ownerAddress = family === "sei"
+          ? (chainKeys?.sei?.evmAddress || chainKeys?.evm?.address || wallet.address)
+          : (chainKeys?.evm?.address || wallet.address);
+        let lastError = null;
+        for (const rpcUrl of getRpcCandidatesForFamily(currentNetwork, family)) {
+          try {
+            metadata = await resolveEvmNftMetadata({ rpcUrl, contract: address, tokenId, ownerAddress });
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (lastError) throw lastError;
+      }
+
+      const imported = {
+        address,
+        tokenId,
+        name: nftImportForm.name.trim() || metadata.name || `NFT #${tokenId}`,
+        symbol: metadata.symbol || "NFT",
+        description: metadata.description || "",
+        image: normalizeNftUri(nftImportForm.image.trim() || metadata.image || ""),
+        tokenUri: metadata.tokenUri || "",
+        owner: metadata.owner || "",
+        ownershipVerified: Boolean(metadata.ownershipVerified),
+        ownershipMismatch: Boolean(metadata.ownershipMismatch),
+        contractVerified: Boolean(metadata.contractVerified),
+        networkId: activeNetworkId,
+        family,
+        importedAt: Date.now(),
+      };
+      setNfts((previous) => [imported, ...previous.filter((item) => nftKey(item) !== nftKey(imported))]);
+      setNftImportForm(initialNftImportForm);
+      setNftImportVisible(false);
+      setHomeSubTab("nfts");
+      if (imported.ownershipMismatch) {
+        showToast("NFT imported as watch-only; active address is not the on-chain owner", "info");
+      } else {
+        showToast(`Imported ${imported.name}`, "success");
+      }
+    } catch (error) {
+      showToast(error?.message || "NFT import failed", "error");
+    } finally {
+      setBusy(false);
+      setBusyAction("");
+      setProcessingMessage("");
+    }
+  }
+
+  function removeNftAction(nft) {
+    Alert.alert(
+      "Remove NFT",
+      `Remove ${nft?.name || `NFT #${nft?.tokenId || ""}`} from this wallet view? This does not affect on-chain ownership.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: () => {
+            setNfts((previous) => previous.filter((item) => nftKey(item) !== nftKey(nft)));
+            showToast("NFT removed from wallet view", "info");
+          },
+        },
+      ]
+    );
+  }
+
   // Import a list of pre-discovered {address, balance} items for a non-EVM chain.
   // Fetches metadata, skips already-watchlisted tokens, and stores holderAddress.
   async function importMultichainDiscovery(items, holderAddress, family) {
@@ -4768,7 +4897,7 @@ function App() {
         return;
       }
 
-      showToast(`Auto detect not yet available for ${currentNetwork.name}`, "info");
+      showToast(`${currentNetwork.name} requires an external token indexer for automatic discovery. Use Import Token for manual on-chain lookup.`, "info");
     } catch (e) {
       showToast(e.message || "Auto token discovery failed", "error");
     } finally {
@@ -5155,7 +5284,7 @@ function App() {
         hash = res?.tx_hash || res?.hash || "";
 
         // ── EVM / Harmony / Tron / SEI: ERC-20 EIP-155 ──────────────────────
-      } else if (family === "evm" || family === "harmony" || family === "tron" || family === "sei") {
+      } else if (family === "evm" || family === "harmony" || family === "tron" || (family === "sei" && String(token.address || "").startsWith("0x"))) {
         let privKey, fromAddr;
         if (family === "harmony") {
           privKey = chainKeys?.harmony?.privateKey || chainKeys?.evm?.privateKey || wallet.privateKey;
@@ -5204,9 +5333,7 @@ function App() {
           fromAddr = chainKeys.cosmos.address;
         }
         const cosmosChainId = currentNetwork.cosmosChainId || currentNetwork.id;
-        const denom = token.address; // IBC denom or native denom
-
-        if (denom.startsWith("0x") || denom.length < 3) throw new Error("CW20 contract token send not yet supported. Only IBC/native denoms are supported.");
+        const denom = token.address;
 
         // SEI nodeUrl is EVM RPC; use cosmosRestUrl for amino broadcast
         const restBase = (currentNetwork.cosmosRestUrl || nodeUrl).replace(/\/$/, "");
@@ -5215,7 +5342,21 @@ function App() {
         const sequence = parseInt(accInfo?.sequence || "0", 10);
         const accountNumber = parseInt(accInfo?.account_number || "0", 10);
 
-        const txBody = signCosmosTx({ chainId: cosmosChainId, sequence, accountNumber, fromAddress: fromAddr, toAddress: recipient, amount, denom, memo: "", gas: 200000 }, privKey);
+        const isCw20 = /^(?:cosmos|osmo|sei|inj|stars|juno|neutron|migaloo|kujira)1[0-9a-z]+$/.test(denom);
+        const feeDenom = family === "sei" ? "usei" : family === "injective" ? "inj" : "uatom";
+        const txBody = isCw20
+          ? signCosmosWasmExecuteTx({
+              chainId: cosmosChainId,
+              sequence,
+              accountNumber,
+              sender: fromAddr,
+              contract: denom,
+              executeMsg: { transfer: { recipient, amount: String(amount) } },
+              feeDenom,
+              memo: "",
+              gas: 300000,
+            }, privKey)
+          : signCosmosTx({ chainId: cosmosChainId, sequence, accountNumber, fromAddress: fromAddr, toAddress: recipient, amount, denom, memo: "", gas: 200000 }, privKey);
         const broadcastRes = await postJson(`${restBase}/cosmos/tx/v1beta1/txs`, { tx: txBody.tx, mode: "BROADCAST_MODE_SYNC" }).catch(() => null);
         hash = broadcastRes?.tx_response?.txhash || "";
         if (!hash) throw new Error(broadcastRes?.tx_response?.raw_log || "Cosmos token broadcast failed");
@@ -5362,7 +5503,7 @@ function App() {
         );
 
       } else {
-        throw new Error(`Token send not yet supported for ${currentNetwork.name} (${family})`);
+        throw new Error(`No token-send adapter is registered for ${currentNetwork.name} (${family})`);
       }
 
       setProcessingMessage("");
@@ -6100,6 +6241,11 @@ function App() {
     return currentTokens.filter(t => t.address && hiddenSet.has(String(t.address).toLowerCase()));
   }, [currentTokens, hiddenTokens, activeNetworkId]);
 
+  const currentNfts = useMemo(
+    () => (nfts || []).filter((nft) => nft?.networkId === activeNetworkId),
+    [nfts, activeNetworkId]
+  );
+
   const currentActivity = useMemo(() => {
     const holder = activeAddress || wallet?.address || "";
     if (!holder) return [];
@@ -6552,10 +6698,13 @@ function App() {
                 </View>
               </View>
 
-              {/* Sub Tabs: Tokens / Activity */}
+              {/* Sub Tabs: Tokens / NFTs / Activity */}
               <View style={[styles.mmSubTabRow, { alignItems: 'center' }]}>
                 <TouchableOpacity onPress={() => setHomeSubTab("tokens")} style={[styles.mmSubTab, homeSubTab === "tokens" && styles.mmSubTabActive]}>
                   <Text style={[styles.mmSubTabText, homeSubTab === "tokens" && styles.mmSubTabTextActive]}>ASSETS</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setHomeSubTab("nfts")} style={[styles.mmSubTab, homeSubTab === "nfts" && styles.mmSubTabActive]}>
+                  <Text style={[styles.mmSubTabText, homeSubTab === "nfts" && styles.mmSubTabTextActive]}>NFTS</Text>
                 </TouchableOpacity>
                 <TouchableOpacity onPress={() => setHomeSubTab("activity")} style={[styles.mmSubTab, homeSubTab === "activity" && styles.mmSubTabActive]}>
                   <Text style={[styles.mmSubTabText, homeSubTab === "activity" && styles.mmSubTabTextActive]}>ACTIVITY</Text>
@@ -6635,6 +6784,38 @@ function App() {
                       </TouchableOpacity>
                     )}
                   </View>
+                ) : homeSubTab === "nfts" ? (
+                  <View style={styles.nftGrid}>
+                    {!currentNfts.length ? (
+                      <View style={styles.nftEmptyState}>
+                        <Text style={styles.nftEmptyIcon}>🖼️</Text>
+                        <Text style={styles.mmTokenName}>No NFTs imported on {currentNetwork.name}</Text>
+                        <Text style={styles.mmEmptyText}>Import a collection address and token ID. EVM ownership and metadata are verified from the active RPC.</Text>
+                        <Button label="Import NFT" onPress={() => setNftImportVisible(true)} compact />
+                      </View>
+                    ) : currentNfts.map((nft) => (
+                      <View key={nftKey(nft)} style={styles.nftCard}>
+                        {nft.image ? (
+                          <Image source={{ uri: nft.image }} style={styles.nftImage} resizeMode="cover" />
+                        ) : (
+                          <View style={[styles.nftImage, styles.nftImageFallback]}>
+                            <Text style={styles.nftEmptyIcon}>🖼️</Text>
+                          </View>
+                        )}
+                        <View style={styles.nftCardBody}>
+                          <Text style={styles.mmTokenName} numberOfLines={1}>{nft.name || `NFT #${nft.tokenId}`}</Text>
+                          <Text style={styles.mmTokenSymbol}>#{nft.tokenId} · {nft.symbol || "NFT"}</Text>
+                          <Text style={styles.walletTokenMeta}>{shortAddress(nft.address)} · {nft.contractVerified ? "Contract verified" : "Manual metadata"}</Text>
+                          {nft.ownershipVerified && <Text style={styles.nftOwnedBadge}>✓ Ownership verified</Text>}
+                          {nft.ownershipMismatch && <Text style={styles.walletWarningText}>Watch-only · another address owns this token</Text>}
+                          <TouchableOpacity onPress={() => removeNftAction(nft)} style={styles.nftRemoveButton}>
+                            <Text style={styles.nftRemoveText}>Remove from wallet view</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
+                    {!!currentNfts.length && <Button label="Import another NFT" onPress={() => setNftImportVisible(true)} compact secondary />}
+                  </View>
                 ) : (
                   <View style={styles.activityList}>
                     {!currentActivity.length ? (
@@ -6654,7 +6835,8 @@ function App() {
               const sendFam = currentNetwork.id === "lqd" ? "lqd" : (currentNetwork.family || "evm");
               const isLqdSend = sendFam === "lqd";
               const isEvmSend = !isLqdSend && (sendFam === "evm" || sendFam === "harmony");
-              const canSignSend = isLqdSend || isEvmSend;
+              const supportedNativeSendFamilies = new Set(["lqd", "evm", "harmony", "tron", "sei", "cosmos", "cosmos-testnet", "injective", "solana", "near", "aptos", "sui", "utxo", "litecoin", "ton", "starknet"]);
+              const canSignSend = supportedNativeSendFamilies.has(sendFam);
               const addrPlaceholder = SEND_ADDR_PLACEHOLDER[sendFam] || "...";
               return (
                 <View style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.95)', justifyContent: 'flex-end' }}>
@@ -6665,17 +6847,16 @@ function App() {
                     <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: scale(6) }}>
                       <Text style={{ color: '#f4f7ff', fontSize: scale(20), fontWeight: '800', flex: 1 }}>Send {currentNetwork.symbol}</Text>
                       <View style={{ backgroundColor: canSignSend ? 'rgba(16,185,129,0.1)' : 'rgba(251,191,36,0.1)', borderRadius: scale(10), paddingHorizontal: scale(8), paddingVertical: scale(3), borderWidth: 1, borderColor: canSignSend ? 'rgba(16,185,129,0.3)' : 'rgba(251,191,36,0.3)' }}>
-                        <Text style={{ color: canSignSend ? '#10b981' : '#fbbf24', fontSize: scale(10), fontWeight: '800' }}>{isLqdSend ? '✓ LQD' : (isEvmSend ? '✓ EVM' : String(sendFam).toUpperCase())}</Text>
+                        <Text style={{ color: canSignSend ? '#10b981' : '#fbbf24', fontSize: scale(10), fontWeight: '800' }}>{isLqdSend ? '✓ LQD' : (isEvmSend ? '✓ EVM' : `${canSignSend ? '✓ ' : ''}${String(sendFam).toUpperCase()}`)}</Text>
                       </View>
                     </View>
                     <Text style={{ color: '#717da4', fontSize: scale(13), marginBottom: scale(16) }}>{currentNetwork.name} · {currentNetwork.symbol}</Text>
 
-                    {/* Non-EVM warning banner */}
                     {!canSignSend && (
                       <View style={{ backgroundColor: 'rgba(251,191,36,0.08)', borderRadius: scale(12), padding: scale(12), marginBottom: scale(16), borderWidth: 1, borderColor: 'rgba(251,191,36,0.25)' }}>
-                        <Text style={{ color: '#fbbf24', fontSize: scale(12), fontWeight: '700', marginBottom: scale(4) }}>⚠️ Signing not supported</Text>
+                        <Text style={{ color: '#fbbf24', fontSize: scale(12), fontWeight: '700', marginBottom: scale(4) }}>⚠️ Unknown signing family</Text>
                         <Text style={{ color: '#9aa5ca', fontSize: scale(11), lineHeight: scale(17) }}>
-                          Your LQD private key is EVM-only (secp256k1). {String(sendFam).toUpperCase()} transactions need a different signing algorithm. Paste a valid {currentNetwork.name} address to verify its format, but use a native {currentNetwork.name} wallet app to sign and broadcast.
+                          This custom network does not declare a wallet signing adapter. Add a supported family before sending funds.
                         </Text>
                       </View>
                     )}
@@ -6931,14 +7112,33 @@ function App() {
           </Modal>
 
           {/* NFT Import Modal */}
-          <Modal visible={nftImportVisible} transparent animationType="slide" onRequestClose={() => setNftImportVisible(false)}>
+          <Modal visible={nftImportVisible} transparent animationType="slide" onRequestClose={() => { setNftImportVisible(false); setNftImportForm(initialNftImportForm); }}>
             <View style={{ flex: 1, backgroundColor: 'rgba(7, 10, 21, 0.95)', justifyContent: 'center', padding: scale(20) }}>
-              <Card title="Import NFT" subtitle="Add NFT by contract and token ID.">
-                <Field label="Contract Address" value={tokenImportForm.address} onChangeText={(v) => setTokenImportForm(p => ({ ...p, address: v }))} placeholder="0x..." />
-                <Field label="Token ID" value={tokenImportForm.symbol} onChangeText={(v) => setTokenImportForm(p => ({ ...p, symbol: v }))} placeholder="e.g. 1" />
+              <Card title="Import NFT" subtitle={`Add an NFT on ${currentNetwork.name}. EVM metadata and ownership are checked on-chain.`}>
+                {["utxo", "litecoin"].includes(String(currentNetwork.family || "").toLowerCase()) ? (
+                  <View style={styles.nftUnsupportedNotice}>
+                    <Text style={styles.walletWarningText}>{currentNetwork.name} has no account-based NFT contract standard, so NFT import is unavailable on this network.</Text>
+                  </View>
+                ) : (
+                  <>
+                    <Field
+                      label="Collection / Contract Address"
+                      value={nftImportForm.address}
+                      onChangeText={(value) => setNftImportForm((previous) => ({ ...previous, address: value }))}
+                      placeholder={(FAMILY_TOKEN_UI[currentNetwork.family] || DEFAULT_FAMILY_UI).placeholder || "Contract or collection address"}
+                    />
+                    <Field label="Token ID" value={nftImportForm.tokenId} onChangeText={(value) => setNftImportForm((previous) => ({ ...previous, tokenId: value }))} placeholder="e.g. 1" />
+                    <Field label="Display Name (optional)" value={nftImportForm.name} onChangeText={(value) => setNftImportForm((previous) => ({ ...previous, name: value }))} placeholder="Fetched automatically when supported" />
+                    <Field label="Image URL / IPFS URI (optional)" value={nftImportForm.image} onChangeText={(value) => setNftImportForm((previous) => ({ ...previous, image: value }))} placeholder="ipfs://... or https://..." />
+                  </>
+                )}
                 <View style={styles.inlineButtons}>
-                  <Button label="Import NFT" onPress={() => { setNftImportVisible(false); showToast("NFT import coming soon", "success"); }} />
-                  <Button label="Cancel" onPress={() => setNftImportVisible(false)} secondary />
+                  <Button
+                    label={busyAction === "addNft" ? "Verifying..." : "Import NFT"}
+                    onPress={importNftAction}
+                    disabled={busy || ["utxo", "litecoin"].includes(String(currentNetwork.family || "").toLowerCase())}
+                  />
+                  <Button label="Cancel" onPress={() => { setNftImportVisible(false); setNftImportForm(initialNftImportForm); }} secondary />
                 </View>
               </Card>
             </View>
@@ -6966,7 +7166,7 @@ function App() {
               <Card title={`Send ${selectedTokenForSend.symbol}`} subtitle={`${currentNetwork.name} · ${shortAddress(selectedTokenForSend.address)}`}>
                 {!isEvmTk && (
                   <View style={{ backgroundColor: 'rgba(251,191,36,0.08)', borderRadius: scale(10), padding: scale(10), marginBottom: scale(10), borderWidth: 1, borderColor: 'rgba(251,191,36,0.2)' }}>
-                    <Text style={{ color: '#fbbf24', fontSize: scale(11) }}>⚠️ {String(tkFam).toUpperCase()} token send requires a native {currentNetwork.name} wallet. This will validate the address format only.</Text>
+                    <Text style={{ color: '#fbbf24', fontSize: scale(11) }}>🔐 {String(tkFam).toUpperCase()} transfer is signed locally with the network-specific key and broadcast to the active RPC. Confirm the recipient and network before sending.</Text>
                   </View>
                 )}
                 <Field
@@ -9252,6 +9452,64 @@ const styles = StyleSheet.create({
     color: '#f4f7ff',
     fontSize: scale(14),
     fontWeight: '700',
+  },
+  nftGrid: {
+    gap: scale(12),
+    paddingVertical: scale(8),
+  },
+  nftCard: {
+    backgroundColor: '#11182e',
+    borderColor: '#273152',
+    borderWidth: 1,
+    borderRadius: scale(16),
+    overflow: 'hidden',
+  },
+  nftImage: {
+    width: '100%',
+    height: scale(180),
+    backgroundColor: '#0f152a',
+  },
+  nftImageFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  nftCardBody: {
+    padding: scale(14),
+    gap: scale(4),
+  },
+  nftOwnedBadge: {
+    color: '#10b981',
+    fontSize: scale(11),
+    fontWeight: '700',
+    marginTop: scale(4),
+  },
+  nftRemoveButton: {
+    marginTop: scale(10),
+    paddingVertical: scale(9),
+    borderTopWidth: 1,
+    borderTopColor: '#273152',
+  },
+  nftRemoveText: {
+    color: '#f87171',
+    fontSize: scale(12),
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  nftEmptyState: {
+    alignItems: 'center',
+    gap: scale(10),
+    padding: scale(24),
+  },
+  nftEmptyIcon: {
+    fontSize: scale(36),
+  },
+  nftUnsupportedNotice: {
+    backgroundColor: 'rgba(245,158,11,0.08)',
+    borderColor: 'rgba(245,158,11,0.25)',
+    borderWidth: 1,
+    borderRadius: scale(12),
+    padding: scale(12),
+    marginBottom: scale(12),
   },
   mmEmptyText: {
     color: '#717da4',

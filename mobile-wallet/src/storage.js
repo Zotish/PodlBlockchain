@@ -20,6 +20,7 @@ export const STORAGE_KEYS = {
   watchAddresses: "lqd_mobile_watch_addresses_v1",
   hiddenTokens: "lqd_mobile_hidden_tokens_v1",
   removedTokens: "lqd_mobile_removed_tokens_v1",
+  nfts: "lqd_mobile_nfts_v1",
   legalRiskAccepted: "lqd_mobile_legal_risk_accepted_v1",
   pendingTransactions: "lqd_mobile_pending_transactions_v1",
   telemetryEvents: "lqd_mobile_telemetry_events_v1",

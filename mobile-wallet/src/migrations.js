@@ -1,6 +1,6 @@
 import { STORAGE_KEYS, loadJSON, saveJSON } from "./storage";
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 export async function runWalletMigrations() {
   const previous = Number(await loadJSON(STORAGE_KEYS.schemaVersion, 0));
@@ -40,6 +40,16 @@ export async function runWalletMigrations() {
       storageAuditEnabled: settings?.storageAuditEnabled !== false,
       nonEvmSigningProof: settings?.nonEvmSigningProof !== false,
     });
+  }
+
+  if (previous < 4) {
+    const nfts = await loadJSON(STORAGE_KEYS.nfts, []);
+    await saveJSON(
+      STORAGE_KEYS.nfts,
+      Array.isArray(nfts)
+        ? nfts.filter((nft) => nft && nft.address && nft.tokenId !== undefined).slice(0, 500)
+        : []
+    );
   }
 
   await saveJSON(STORAGE_KEYS.schemaVersion, CURRENT_SCHEMA_VERSION);
