@@ -3,6 +3,7 @@ set -eu
 
 PODL_ROOT="${PODL_ROOT:-/opt/podl}"
 LQD_IMAGE="${LQD_IMAGE:?LQD_IMAGE is required}"
+SKIP_IMAGE_PULL="${SKIP_IMAGE_PULL:-false}"
 ENV_FILE="$PODL_ROOT/.env"
 SECRETS_DIR="$PODL_ROOT/signer-secrets"
 CA_BACKUP_DIR="$PODL_ROOT/signer-ca-backup"
@@ -88,7 +89,11 @@ cleanup_files="$cleanup_files $create_env"
 } > "$create_env"
 chmod 600 "$create_env"
 
-docker pull "$LQD_IMAGE" >/dev/null
+if [ "$SKIP_IMAGE_PULL" = "true" ]; then
+  docker image inspect "$LQD_IMAGE" >/dev/null
+else
+  docker pull "$LQD_IMAGE" >/dev/null
+fi
 rm -f "$SECRETS_DIR/validator-key.json"
 docker run --rm --env-file "$create_env" \
   -v "$SECRETS_DIR:/secure" \

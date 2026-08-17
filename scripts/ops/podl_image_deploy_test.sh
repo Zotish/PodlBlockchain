@@ -44,7 +44,7 @@ chmod 700 "$MOCK_BIN/docker" "$MOCK_BIN/curl" "$PODL_ROOT/podl_snapshot.sh"
 printf '%s\n' 'ENABLE_VALIDATOR_SIGNER=false' 'ENABLE_CADDY=false' > "$PODL_ROOT/.env"
 printf '%s\n' 'services: {}' > "$PODL_ROOT/docker-compose.yml"
 
-PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" \
+PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" SKIP_IMAGE_PULL=true \
   sh "$REPO_ROOT/scripts/ops/podl_image_deploy.sh" >/dev/null
 
 test -s "$PODL_ROOT/last-deploy.env"

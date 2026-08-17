@@ -9,6 +9,7 @@ DEX_API_URL="${DEX_API_URL:-http://127.0.0.1:9100}"
 COMPOSE="${COMPOSE:-docker compose}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-60}"
 NEW_IMAGE="${LQD_IMAGE:?LQD_IMAGE is required}"
+SKIP_IMAGE_PULL="${SKIP_IMAGE_PULL:-false}"
 SNAPSHOT_SCRIPT="${SNAPSHOT_SCRIPT:-$PODL_ROOT/podl_snapshot.sh}"
 ENV_FILE="$PODL_ROOT/.env"
 PENDING_FILE="$PODL_ROOT/signer-migration.pending"
@@ -149,7 +150,11 @@ if [ "$MIGRATION_PENDING" = "true" ]; then
 fi
 
 export LQD_IMAGE="$NEW_IMAGE"
-if ! compose_run pull; then rollback "image pull failed"; fi
+if [ "$SKIP_IMAGE_PULL" = "true" ]; then
+  if ! docker image inspect "$NEW_IMAGE" >/dev/null 2>&1; then rollback "local image is unavailable"; fi
+else
+  if ! compose_run pull; then rollback "image pull failed"; fi
+fi
 
 if [ "$SIGNER_ENABLED" = "true" ]; then
   if ! compose_run up -d --no-deps signer; then rollback "signer failed to start"; fi
