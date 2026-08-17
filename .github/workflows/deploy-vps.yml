@@ -5,6 +5,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      configure_validator_signer:
+        description: "Migrate the existing validator key into the encrypted mTLS signer"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: podl-vps-deploy
@@ -74,6 +80,7 @@ jobs:
           ssh "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/systemd'"
           scp deploy/vps/docker-compose.yml deploy/vps/Caddyfile deploy/vps/.env.example "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
           scp deploy/vps/systemd/* "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/systemd/"
+          scp scripts/ops/podl_snapshot.sh scripts/ops/podl_image_deploy.sh scripts/ops/podl_setup_validator_signer.sh "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
 
       - name: Pull image and restart services
         env:
@@ -81,26 +88,11 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
           LQD_IMAGE: ${{ needs.build.outputs.image }}
+          CONFIGURE_VALIDATOR_SIGNER: ${{ inputs.configure_validator_signer || false }}
         run: |
           DEPLOY_PATH="${DEPLOY_PATH:-/opt/podl}"
-          ssh "$VPS_USER@$VPS_HOST" "DEPLOY_PATH='$DEPLOY_PATH' LQD_IMAGE='$LQD_IMAGE' bash -s" <<'REMOTE'
-          set -euo pipefail
-          cd "$DEPLOY_PATH"
-
-          if [ ! -f .env ]; then
-            cp .env.example .env
-            echo "Created $DEPLOY_PATH/.env. Fill it on the server, then re-run this workflow."
-            exit 1
+          if [ "$CONFIGURE_VALIDATOR_SIGNER" = "true" ]; then
+            ssh "$VPS_USER@$VPS_HOST" "PODL_ROOT='$DEPLOY_PATH' LQD_IMAGE='$LQD_IMAGE' sh '$DEPLOY_PATH/podl_setup_validator_signer.sh'"
           fi
-
-          export LQD_IMAGE
-          export COMPOSE_PROFILES=""
-          if grep -q '^ENABLE_CADDY=true' .env; then
-            export COMPOSE_PROFILES="proxy"
-          fi
-
-          docker compose -f docker-compose.yml pull
-          docker compose -f docker-compose.yml up -d --remove-orphans
-          docker image prune -f
-          docker compose -f docker-compose.yml ps
-          REMOTE
+          ssh "$VPS_USER@$VPS_HOST" "PODL_ROOT='$DEPLOY_PATH' LQD_IMAGE='$LQD_IMAGE' sh '$DEPLOY_PATH/podl_image_deploy.sh'"
+          ssh "$VPS_USER@$VPS_HOST" "cd '$DEPLOY_PATH' && docker compose -f docker-compose.yml ps"

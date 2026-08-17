@@ -51,8 +51,8 @@ export function isLikelyAddressForFamily(value, family) {
     case "aptos":
     case "sui":
     case "starknet":  return v.startsWith("0x") && v.length >= 10;
-    case "utxo":
-    case "litecoin":  return false;
+    case "utxo":      return /^tb1[ac-hj-np-z02-9]{11,71}$/.test(v.toLowerCase()) && v === v.toLowerCase();
+    case "litecoin":  return /^tltc1[ac-hj-np-z02-9]{11,71}$/.test(v.toLowerCase()) && v === v.toLowerCase();
     default:          return v.length >= 10;
   }
 }
@@ -276,4 +276,3 @@ export function deriveTronAddress(privKeyHex, CryptoJS) {
     return _base58Check(addr, CryptoJS);
   } catch { return ""; }
 }
-

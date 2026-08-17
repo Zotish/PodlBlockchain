@@ -10,6 +10,7 @@ const files = {
   storage: read("src/storage.js"),
   tracker: read("src/txTracker.js"),
   migrations: read("src/migrations.js"),
+  nft: read("src/nft.js"),
   pkg: read("package.json"),
 };
 
@@ -23,7 +24,11 @@ const checks = [
   ["transient network retry", files.api, /fetchWithRetry[\s\S]*retryableStatus/],
   ["pending tx expiry", files.tracker, /MAX_PENDING_AGE_MS[\s\S]*withStatus\(tx, "dropped"/],
   ["tx recheck throttling", files.tracker, /MIN_RECHECK_INTERVAL_MS/],
-  ["schema v3 settings migration", files.migrations, /CURRENT_SCHEMA_VERSION = 3[\s\S]*backgroundTxTrackingEnabled/],
+  ["schema v4 NFT migration", files.migrations, /CURRENT_SCHEMA_VERSION = 4[\s\S]*STORAGE_KEYS\.nfts/],
+  ["persistent NFT portfolio", files.app, /loadJSON\(STORAGE_KEYS\.nfts[\s\S]*saveJSON\(STORAGE_KEYS\.nfts/],
+  ["NFT on-chain metadata resolver", files.nft, /eth_getCode[\s\S]*0xc87b56dd[\s\S]*ownershipVerified/],
+  ["NFT import is wired", files.app, /function importNftAction[\s\S]*setNfts[\s\S]*homeSubTab === "nfts"/],
+  ["BTC and LTC address validation", read("src/utils.js"), /case "utxo"[\s\S]*case "litecoin"[\s\S]*tltc/],
   ["non-EVM proof script wired", files.pkg, /"test:non-evm"/],
 ];
 

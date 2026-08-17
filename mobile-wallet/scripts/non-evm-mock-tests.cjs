@@ -22,6 +22,9 @@ const checks = [
   ["sui token signing", app, /family === "sui"[\s\S]*signSuiTx/],
   ["ton jetton BOC signing", app, /family === "ton"[\s\S]*buildJettonTransferBoc/],
   ["starknet token signing", app, /family === "starknet"[\s\S]*broadcastStarknetTokenTransfer/],
+  ["Bitcoin SegWit send enabled", app, /family === "utxo"[\s\S]*signBtcP2WPKHTx/],
+  ["Litecoin SegWit send enabled", app, /family === "litecoin"[\s\S]*signBtcP2WPKHTx/],
+  ["CW20 execute signing", app, /signCosmosWasmExecuteTx[\s\S]*transfer:[\s\S]*recipient/],
   ["crypto solana transfer builder", crypto, /export function signSolanaTransfer/],
   ["crypto near transfer builder", crypto, /export function signNearTransfer/],
   ["crypto aptos entry signer", crypto, /export function signAptosEntry/],
@@ -45,6 +48,7 @@ const checks = [
   ["Keplr browser provider", app, /window\.keplr/],
   ["Keplr amino signature shape", crypto, /export function signCosmosAminoDoc/],
   ["No direct dApp signing restriction", app, (source) => !/Direct dApp signing is restricted/.test(source)],
+  ["No false non-EVM signing warning", app, (source) => !/transactions need a different signing algorithm/.test(source)],
   ["persistent tx tracking", app, /addTrackedTx/],
 ];
 

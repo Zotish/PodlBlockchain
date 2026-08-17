@@ -7,7 +7,7 @@
 import CryptoJS from "crypto-js";
 import * as secp from "@noble/secp256k1";
 import nacl from "tweetnacl";
-import { blake2b as _blake2bLib } from "@noble/hashes/blake2";
+import { blake2b as _blake2bLib } from "@noble/hashes/blake2.js";
 
 // ─── Configure @noble/secp256k1 HMAC-SHA256 (required for synchronous ops) ───
 secp.utils.hmacSha256Sync = (key, ...msgs) => {
@@ -239,9 +239,9 @@ export function aptosAddressFromPrivKey(privKeyHex) {
 export function suiAddressFromPrivKey(privKeyHex) {
   const seed = hexToUint8(privKeyHex);
   const kp = nacl.sign.keyPair.fromSeed(seed);
-  // SUI address = blake2b(0x00 || pubkey)[0..32] — approximate with sha256 for compatibility
+  // Sui Ed25519 address = BLAKE2b-256(signature-scheme flag || public key).
   const hashInput = concatUint8(new Uint8Array([0x00]), kp.publicKey);
-  const hash = sha256(hashInput);
+  const hash = _blake2b256(hashInput);
   return "0x" + uint8ToHex(hash);
 }
 
@@ -541,20 +541,17 @@ export function tonV3R2Address(pubkeyHex, workchain = 0) {
   const stateInitData = new Uint8Array([0x34]);
   const stateInitHash = tvmCellHash(0x02, 0x01, 5, stateInitData, [CODE_HASH, dataHash]);
 
-  // TON user-friendly address: workchain(int8) + hash(32) + crc16(2), base64url
-  const addrBytes = new Uint8Array(34);
-  addrBytes[0] = workchain === 0 ? 0x11 : 0x51; // 0x11 = bounceable mainchain
-  addrBytes.set(stateInitHash, 1);
-  const crc = _crc16Ton(addrBytes.slice(0, 33));
-  addrBytes[33] = 0; // placeholder; use full 35-byte for encoding
-
+  // User-friendly address = tag(1) + workchain(int8) + account ID(32) + CRC16(2).
+  const body = new Uint8Array(34);
+  body[0] = 0x11; // bounceable, mainnet/testnet-independent form
+  body[1] = workchain === -1 ? 0xff : workchain & 0xff;
+  body.set(stateInitHash, 2);
+  const crc = _crc16Ton(body);
   const full = new Uint8Array(36);
-  full[0] = workchain === 0 ? 0x11 : 0x51;
-  full.set(stateInitHash, 1);
-  full[33] = (crc >> 8) & 0xff;
-  full[34] = crc & 0xff;
-  // base64url encode 36 bytes
-  return _uint8ToBase64Url(full.slice(0, 35));
+  full.set(body);
+  full[34] = (crc >> 8) & 0xff;
+  full[35] = crc & 0xff;
+  return _uint8ToBase64Url(full);
 }
 
 function _crc16Ton(data) {
@@ -958,6 +955,41 @@ export function encodeErc20Approve(spender, amount) {
  * @param {string} privKeyHex
  * @returns {{ tx: object, signature: string }} broadcast-ready tx object
  */
+function signCosmosAminoTx({ chainId, sequence, accountNumber, feeDenom, memo = "", gas = 200000, msgs }, privKeyHex) {
+  if (!Array.isArray(msgs) || !msgs.length) throw new Error("At least one Cosmos message is required");
+  if (!feeDenom) throw new Error("Cosmos fee denom is required");
+  const signDoc = {
+    account_number: String(accountNumber),
+    chain_id: chainId,
+    fee: {
+      amount: [{ amount: "5000", denom: feeDenom }],
+      gas: String(gas),
+    },
+    memo,
+    msgs,
+    sequence: String(sequence),
+  };
+
+  const signDocBytes = new TextEncoder().encode(JSON.stringify(signDoc));
+  const hash = sha256(signDocBytes);
+  const sig = secp.signSync(hash, hexToUint8(privKeyHex), { recovered: true, der: false });
+  const sigBase64 = uint8ToBase64(sig[0]);
+  const pubKeyBase64 = uint8ToBase64(secp.getPublicKey(hexToUint8(privKeyHex), true));
+
+  return {
+    tx: {
+      msg: signDoc.msgs,
+      fee: signDoc.fee,
+      signatures: [{
+        pub_key: { type: "tendermint/PubKeySecp256k1", value: pubKeyBase64 },
+        signature: sigBase64,
+      }],
+      memo,
+    },
+    mode: "sync",
+  };
+}
+
 export function signCosmosTx(params, privKeyHex) {
   const {
     chainId,
@@ -971,54 +1003,57 @@ export function signCosmosTx(params, privKeyHex) {
     gas = 200000,
   } = params;
 
-  // Canonical amino SignDoc
-  const signDoc = {
-    account_number: String(accountNumber),
-    chain_id: chainId,
-    fee: {
-      amount: [{ amount: "5000", denom }],
-      gas: String(gas),
-    },
+  return signCosmosAminoTx({
+    chainId,
+    sequence,
+    accountNumber,
+    feeDenom: denom,
     memo,
-    msgs: [
-      {
-        type: "cosmos-sdk/MsgSend",
-        value: {
-          amount: [{ amount: String(amount), denom }],
-          from_address: fromAddress,
-          to_address: toAddress,
-        },
+    gas,
+    msgs: [{
+      type: "cosmos-sdk/MsgSend",
+      value: {
+        amount: [{ amount: String(amount), denom }],
+        from_address: fromAddress,
+        to_address: toAddress,
       },
-    ],
-    sequence: String(sequence),
-  };
+    }],
+  }, privKeyHex);
+}
 
-  const signDocBytes = new TextEncoder().encode(JSON.stringify(signDoc));
-  const hash = sha256(signDocBytes);
-  const sig = secp.signSync(hash, hexToUint8(privKeyHex), { recovered: true, der: false });
-  const sigBytes = sig[0]; // raw 64-byte r+s
-  const sigBase64 = btoa(String.fromCharCode(...sigBytes));
-
-  const pubKey = secp.getPublicKey(hexToUint8(privKeyHex), true);
-  const pubKeyBase64 = btoa(String.fromCharCode(...pubKey));
-
-  return {
-    tx: {
-      msg: signDoc.msgs,
-      fee: signDoc.fee,
-      signatures: [
-        {
-          pub_key: {
-            type: "tendermint/PubKeySecp256k1",
-            value: pubKeyBase64,
-          },
-          signature: sigBase64,
-        },
-      ],
-      memo,
-    },
-    mode: "sync",
-  };
+/**
+ * Sign a CosmWasm execute message with legacy Amino JSON. CW20 transfer uses
+ * executeMsg: { transfer: { recipient, amount } }. The native fee denom is
+ * intentionally separate from the CW20 contract address.
+ */
+export function signCosmosWasmExecuteTx(params, privKeyHex) {
+  const {
+    chainId,
+    sequence,
+    accountNumber,
+    sender,
+    contract,
+    executeMsg,
+    feeDenom,
+    memo = "",
+    gas = 300000,
+    funds = [],
+  } = params;
+  if (!sender || !contract || !executeMsg || typeof executeMsg !== "object") {
+    throw new Error("CosmWasm sender, contract and execute message are required");
+  }
+  return signCosmosAminoTx({
+    chainId,
+    sequence,
+    accountNumber,
+    feeDenom,
+    memo,
+    gas,
+    msgs: [{
+      type: "wasm/MsgExecuteContract",
+      value: { sender, contract, msg: executeMsg, funds: Array.isArray(funds) ? funds : [] },
+    }],
+  }, privKeyHex);
 }
 
 // ─── Solana Transfer signing (ed25519 + compact tx format) ───────────────────
@@ -1194,7 +1229,7 @@ export function signNearTransfer({ signerId, receiverId, amount, nonce, blockHas
     borshU128LE(amount),
   );
 
-  const hash = sha256(sha256(txBytes));
+  const hash = sha256(txBytes);
   const sig = nacl.sign.detached(hash, kp.secretKey);
   const signedTx = concatUint8(txBytes, new Uint8Array([0]), sig); // sig type=0 (ed25519)
   return btoa(String.fromCharCode(...signedTx));
@@ -1227,7 +1262,7 @@ export function signNearFunctionCall(
     borshU128LE(deposit),
   );
 
-  const hash = sha256(sha256(txBytes));
+  const hash = sha256(txBytes);
   const sig = nacl.sign.detached(hash, kp.secretKey);
   const signedTx = concatUint8(txBytes, new Uint8Array([0]), sig);
   return btoa(String.fromCharCode(...signedTx));
@@ -1332,7 +1367,7 @@ export function signSolanaTokenTransfer(
 // ─── Cosmos Token Send (IBC / native denom) ───────────────────────────────────
 
 /**
- * Same as signCosmosTx but for any denom (IBC tokens, CW20 not supported).
+ * Same as signCosmosTx but for any native or IBC denom.
  * Re-exports signCosmosTx under a clearer name for token sends.
  */
 export { signCosmosTx as signCosmosTokenSend };
