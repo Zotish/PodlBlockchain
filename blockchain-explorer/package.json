@@ -22,7 +22,7 @@
   "scripts": {
 	"start": "vite",
 	"dev": "vite",
-	"build": "vite build",
+	"build": "vite build && node scripts/create-sites-entry.mjs",
 	"test": "vitest run"
   },
   "eslintConfig": {
