@@ -8,7 +8,7 @@ Date: 2026-08-13
 |---|---|---|---|
 | State transition | incoming full-state re-execution, contract overlay, parent/post root, reward check, staged full-state commit and a separate canonicalizer | production/reference differential replay, mutation/forgery tests | independently authored full client and review |
 | Formal model | TLA+ safety specification plus dependency-free bounded state-space checker | equal-power 4–100 validator distributions and joint-quorum states | official TLC log and formal review |
-| Consensus | all-contributor signature beacon with prior-QC fallback, weighted proposer certificate, signed prevote/precommit, strict >2/3, timeout certificate, joint quorum | 4–20 in-process/process tests plus 20–100 process fault/churn campaign: 14,742 signed votes, 162 vote QCs, 81 timeout QCs and 81 full-set churn QCs | independently operated machines/public soak/cryptographic review |
+| Consensus | canonical RFC 9381 P-256 VRF entropy committed by the current proposer for the next height, weighted proposer certificate, signed prevote/precommit, strict >2/3, timeout certificate, joint quorum | official RFC vector, canonical/tamper tests, 4–20 in-process/process tests plus 20–100 process fault/churn campaign: 14,742 signed votes, 162 vote QCs, 81 timeout QCs and 81 full-set churn QCs | independently operated machines/public soak/cryptographic review |
 | Bond/slashing | native custody/unbond delay; evidence, appeal, governance resolution; upheld slash moves custody to protocol escrow and revenue ledger | atomic plugin E2E and reconciliation tests | custody audit |
 | Liquidity power | capped hybrid power; depth, organic flow, volatility, confidence, concentration | manipulation simulation | historical/live calibration |
 | DLE/TWAP | rolling TWAP, learned congestion, onboarding/recovery delay, exposure/correlation caps | deterministic tests | live dataset backtest |
@@ -24,7 +24,7 @@ Date: 2026-08-13
 | Developer | JS SDK prerelease, typings/tests/examples, transferable-position helpers, persistent abuse-aware faucet/localnet | four npm tests/package dry-run and faucet restart/corruption tests | registry publication and public use |
 | Explorer/operations | persistent reorg-aware index/search/lag metrics, latency/restart/webhook monitor and on-call/readiness gates | index persistence/reorg tests, shell validation, Explorer 83 tests/build | hosted SLA, real pager/on-call/failover evidence |
 | Retail/investor | profiles, suitability gate, receipts, loss warnings, historical evidence page, activity/retention counters and signed validator report | signed-report tamper test; Explorer 83 tests + build; Swap 21 tests + build | actual users, comprehension study and audited finance |
-| Security | tests/race/vet/five fuzz targets/chaos/plugins/bank-run/manipulation/upgrade drills; Explorer/Swap Vite toolchain | `scripts/validate_table1.sh`; npm audit/build gates | audits/bug bounty/public soak |
+| Security | HSM/remote validator signer, TLS 1.3 mTLS, PKCS#11 identity-key adapter, encrypted fallback, persistent write-before-sign slashing protection, tests/race/vet/five fuzz targets/chaos/plugins/bank-run/manipulation/upgrade drills | RFC vector, restart/conflict/mTLS/PKCS#11 conversion tests; `scripts/validate_table1.sh`; npm audit/build gates | physical-HSM/vendor certification, audits/bug bounty/public soak |
 
 Run:
 

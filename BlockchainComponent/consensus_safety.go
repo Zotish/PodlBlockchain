@@ -1,6 +1,7 @@
 package blockchaincomponent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +36,20 @@ func SignConsensusTimeoutVote(v *ConsensusTimeoutVote, privateKeyHex string) err
 	}
 	v.Validator = strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex())
 	v.Signature = "0x" + hex.EncodeToString(sig)
+	return nil
+}
+
+func SignConsensusTimeoutVoteWithSigner(ctx context.Context, v *ConsensusTimeoutVote, signer ValidatorSigner) error {
+	if v == nil || v.Height == 0 || signer == nil {
+		return fmt.Errorf("valid timeout vote and signer required")
+	}
+	slot := fmt.Sprintf("timeout/%d/%d", v.Height, v.Round)
+	signature, err := signer.SignMessage(ctx, SignerDomainConsensusTimeout, []byte(timeoutVoteMessage(*v)), slot)
+	if err != nil {
+		return err
+	}
+	v.Validator = signer.Address()
+	v.Signature = signature
 	return nil
 }
 

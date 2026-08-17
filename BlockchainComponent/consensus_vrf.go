@@ -1,31 +1,29 @@
 package blockchaincomponent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// ConsensusVRFProof is a publicly verifiable, deterministic signature-based
-// randomness contribution. The secp256k1 proof is recoverable to the validator
-// address, while Output is domain-separated from the proof itself. A single
-// contributor cannot choose the final beacon. A >2/3 contribution produces a
-// verifiable candidate for observability, but proposer election only consumes a
-// beacon after every active validator has contributed. If a validator withholds,
-// consensus stays live by falling back to the prior QC entropy.
+// ConsensusVRFProof is an RFC 9381 ECVRF-P256-SHA256-TAI randomness
+// contribution. The validator's secp256k1 identity key signs a binding to the
+// P-256 VRF public key, while the ECVRF proof supplies uniqueness and
+// pseudorandomness for the parent-bound consensus seed.
 type ConsensusVRFProof struct {
-	Height    uint64 `json:"height"`
-	Round     uint32 `json:"round"`
-	SpecHash  string `json:"spec_hash"`
-	Seed      string `json:"seed"`
-	Validator string `json:"validator"`
-	Proof     string `json:"proof"`
-	Output    string `json:"output"`
+	Height     uint64 `json:"height"`
+	Round      uint32 `json:"round"`
+	SpecHash   string `json:"spec_hash"`
+	Seed       string `json:"seed"`
+	Validator  string `json:"validator"`
+	Suite      string `json:"suite"`
+	PublicKey  string `json:"public_key"`
+	Proof      string `json:"proof"`
+	Output     string `json:"output"`
+	KeyBinding string `json:"key_binding"`
 }
 
 type ConsensusVRFBeacon struct {
@@ -48,43 +46,103 @@ func ConsensusVRFSeed(specHash, parentEntropy string, height uint64, round uint3
 	return "0x" + hex.EncodeToString(sum[:])
 }
 
-func consensusVRFMessage(proof ConsensusVRFProof) string {
-	return fmt.Sprintf("PODL-VRF-PROOF-V1:%s:%s:%d:%d", strings.ToLower(proof.SpecHash), strings.ToLower(proof.Seed), proof.Height, proof.Round)
-}
-
-func consensusVRFOutput(signature string) string {
-	sum := sha256.Sum256([]byte("PODL-VRF-OUTPUT-V1:" + strings.ToLower(signature)))
+// ConsensusBlockVRFSeed binds a next-height VRF proof to the executed block
+// without introducing a circular dependency on that block's final hash.
+func ConsensusBlockVRFSeed(specHash string, blockHeight uint64, previousHash, stateRoot string, targetHeight uint64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("PODL-BLOCK-VRF-SEED-V1:%s:%d:%s:%s:%d", strings.ToLower(specHash), blockHeight, strings.ToLower(previousHash), strings.ToLower(stateRoot), targetHeight)))
 	return "0x" + hex.EncodeToString(sum[:])
 }
 
+func consensusVRFMessage(proof ConsensusVRFProof) string {
+	return fmt.Sprintf("PODL-RFC9381-VRF-ALPHA-V2:%s:%s:%d:%d", strings.ToLower(proof.SpecHash), strings.ToLower(proof.Seed), proof.Height, proof.Round)
+}
+
+func consensusVRFOutput(proofHex string) string {
+	proof, err := decodeFixedHex(proofHex, ecvrfP256ProofLen)
+	if err != nil {
+		return ""
+	}
+	output, err := ECVRFP256ProofToHash(proof)
+	if err != nil {
+		return ""
+	}
+	return "0x" + hex.EncodeToString(output)
+}
+
 func SignConsensusVRFProof(proof *ConsensusVRFProof, privateKeyHex string) error {
+	signer, err := NewLocalValidatorSigner(privateKeyHex, "", "")
+	if err != nil {
+		return err
+	}
+	defer signer.Close()
+	return SignConsensusVRFProofWithSigner(context.Background(), proof, signer)
+}
+
+func SignConsensusVRFProofWithSigner(ctx context.Context, proof *ConsensusVRFProof, signer ValidatorSigner) error {
 	if proof == nil || proof.Height == 0 || strings.TrimSpace(proof.SpecHash) == "" || strings.TrimSpace(proof.Seed) == "" {
 		return fmt.Errorf("complete VRF request required")
 	}
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(strings.TrimSpace(privateKeyHex), "0x"))
+	if signer == nil || !ValidateAddress(signer.Address()) {
+		return fmt.Errorf("validator signer is required")
+	}
+	result, err := signer.ProveVRF(ctx, []byte(consensusVRFMessage(*proof)), consensusVRFKey(proof.Height, proof.Round))
 	if err != nil {
 		return err
 	}
-	sig, err := crypto.Sign(accounts.TextHash([]byte(consensusVRFMessage(*proof))), key)
-	if err != nil {
-		return err
-	}
-	proof.Validator = strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex())
-	proof.Proof = "0x" + hex.EncodeToString(sig)
-	proof.Output = consensusVRFOutput(proof.Proof)
+	proof.Validator = strings.ToLower(signer.Address())
+	proof.Suite = result.Suite
+	proof.PublicKey = result.PublicKey
+	proof.Proof = result.Proof
+	proof.Output = result.Output
+	proof.KeyBinding = result.KeyBinding
 	return nil
 }
 
 func VerifyConsensusVRFProof(proof ConsensusVRFProof) bool {
-	if proof.Height == 0 || proof.Round > 1_000_000 || !ValidateAddress(proof.Validator) || proof.Output != consensusVRFOutput(proof.Proof) {
+	if proof.Height == 0 || proof.Round > 1_000_000 || !ValidateAddress(proof.Validator) || strings.TrimSpace(proof.SpecHash) == "" || strings.TrimSpace(proof.Seed) == "" {
 		return false
 	}
-	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(proof.Proof), "0x"))
-	if err != nil || len(raw) != 65 {
+	result := ValidatorVRFResult{Suite: proof.Suite, PublicKey: proof.PublicKey, Proof: proof.Proof, Output: proof.Output, KeyBinding: proof.KeyBinding}
+	return VerifyValidatorVRFResult(proof.Validator, []byte(consensusVRFMessage(proof)), result)
+}
+
+// AttachNextProposerVRF adds the elected proposer's RFC 9381 proof for the
+// following height. Unlike an arrival-order-dependent off-chain beacon, this
+// proof becomes part of the canonical block hash and is therefore identical
+// on every node before it can influence proposer selection.
+func (bc *Blockchain_struct) AttachNextProposerVRF(block *Block) error {
+	if bc == nil || block == nil || block.BlockNumber == 0 || strings.TrimSpace(block.StateRoot) == "" || bc.Network == nil {
+		return fmt.Errorf("complete executed block and validator network required")
+	}
+	address, signer := bc.Network.ValidatorSignerSnapshot()
+	if signer == nil || !strings.EqualFold(address, block.RewardBreakdown.Validator) {
+		return fmt.Errorf("elected proposer signer is unavailable")
+	}
+	proof := &ConsensusVRFProof{
+		Height:   block.BlockNumber + 1,
+		Round:    0,
+		SpecHash: bc.ChainSpec.Hash(),
+		Seed:     ConsensusBlockVRFSeed(bc.ChainSpec.Hash(), block.BlockNumber, block.PreviousHash, block.StateRoot, block.BlockNumber+1),
+	}
+	if err := SignConsensusVRFProofWithSigner(context.Background(), proof, signer); err != nil {
+		return err
+	}
+	if !strings.EqualFold(proof.Validator, block.RewardBreakdown.Validator) {
+		return fmt.Errorf("next-height VRF proof is not signed by the elected proposer")
+	}
+	block.NextVRFProof = proof
+	return nil
+}
+
+func (bc *Blockchain_struct) VerifyBlockVRFContribution(block *Block) bool {
+	if bc == nil || block == nil || block.NextVRFProof == nil {
 		return false
 	}
-	pub, err := crypto.SigToPub(accounts.TextHash([]byte(consensusVRFMessage(proof))), raw)
-	return err == nil && strings.EqualFold(crypto.PubkeyToAddress(*pub).Hex(), proof.Validator)
+	proof := *block.NextVRFProof
+	expectedSeed := ConsensusBlockVRFSeed(bc.ChainSpec.Hash(), block.BlockNumber, block.PreviousHash, block.StateRoot, block.BlockNumber+1)
+	return proof.Height == block.BlockNumber+1 && proof.Round == 0 &&
+		proof.SpecHash == bc.ChainSpec.Hash() && proof.Seed == expectedSeed &&
+		strings.EqualFold(proof.Validator, block.RewardBreakdown.Validator) && VerifyConsensusVRFProof(proof)
 }
 
 // AddConsensusVRFProof accepts one proof per active validator. A strict weighted
@@ -162,4 +220,15 @@ func (bc *Blockchain_struct) proposerParentEntropy(height uint64) string {
 		return bc.ChainSpec.Hash()
 	}
 	return ""
+}
+
+func (bc *Blockchain_struct) canonicalBlockVRFEntropy(height uint64) string {
+	if bc == nil || len(bc.Blocks) == 0 {
+		return ""
+	}
+	parent := bc.Blocks[len(bc.Blocks)-1]
+	if parent == nil || parent.BlockNumber+1 != height || parent.NextVRFProof == nil || !bc.VerifyBlockVRFContribution(parent) {
+		return ""
+	}
+	return parent.NextVRFProof.Output
 }

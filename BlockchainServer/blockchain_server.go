@@ -4800,7 +4800,10 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 	baseFee := uint64(0)
 	peers := []map[string]interface{}{}
 	var network *blockchaincomponent.NetworkService
+	var signerStatus blockchaincomponent.ValidatorSignerStatus
+	signerConfigured := false
 	latestStateRoot := ""
+	canonicalVRFObserved := false
 	guardianMembers, guardianThreshold := 0, 0
 	guardianExpiry := uint64(0)
 	slashingCouncilMembers, slashingCouncilThreshold := 0, 0
@@ -4832,7 +4835,18 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 		// chain mutex to avoid a self-deadlock on readiness requests.
 		if network != nil {
 			peers = network.PeerStatusSnapshot()
+			_, signer := network.ValidatorSignerSnapshot()
+			if signer != nil {
+				signerStatus = signer.Status(r.Context())
+				signerConfigured = true
+			}
 		}
+		b.BlockchainPtr.Mutex.Lock()
+		if len(b.BlockchainPtr.Blocks) > 0 {
+			latest := b.BlockchainPtr.Blocks[len(b.BlockchainPtr.Blocks)-1]
+			canonicalVRFObserved = latest != nil && latest.NextVRFProof != nil && b.BlockchainPtr.VerifyBlockVRFContribution(latest)
+		}
+		b.BlockchainPtr.Mutex.Unlock()
 	}
 
 	activePeers := 0
@@ -4918,6 +4932,13 @@ func (b *BlockchainServer) MainnetReadiness(w http.ResponseWriter, r *http.Reque
 	addCheck("hybrid_native_bonds", hybridBonded, true, "every active validator requires a native bond; liquidity credit is capped")
 	addCheck("signed_bft_finality_observed", signedFinality, true, "a signed precommit quorum certificate must be observed")
 	addCheck("legacy_finality_disabled", legacyFinalityDisabled, true, "run with LQD_REQUIRE_SIGNED_BFT=true for a mainnet candidate")
+	signerHealthy := signerConfigured && signerStatus.Healthy && strings.EqualFold(signerStatus.Address, localValidator)
+	signerHardened := strings.HasPrefix(signerStatus.Backend, "remote-mtls") || strings.HasPrefix(signerStatus.Backend, "pkcs11-hsm")
+	standardVRF := signerHealthy && signerStatus.VRFSuite == blockchaincomponent.ECVRFP256SHA256TAI && strings.TrimSpace(signerStatus.VRFPublicKey) != ""
+	addCheck("validator_signer_healthy", signerHealthy, true, fmt.Sprintf("address=%s backend=%s healthy=%t", signerStatus.Address, signerStatus.Backend, signerStatus.Healthy))
+	addCheck("validator_key_custody", signerHardened, true, fmt.Sprintf("backend=%s requires remote mTLS or PKCS#11 HSM", signerStatus.Backend))
+	addCheck("durable_slashing_protection", signerStatus.SlashingProtection, true, "signing intent must persist before every consensus/VRF signature")
+	addCheck("standard_ecvrf", standardVRF && canonicalVRFObserved, true, fmt.Sprintf("suite=%s canonical_proof_observed=%t", signerStatus.VRFSuite, canonicalVRFObserved))
 	bridgeThresholdReady := false
 	oraclePoolsReady := false
 	governanceReady := false

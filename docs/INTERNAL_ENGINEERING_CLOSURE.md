@@ -18,7 +18,8 @@ This is closure of the scoped repository-controlled engineering backlog, not 100
 |---|---|---|
 | Incoming blocks | isolated full-state replay, state-version-4 commitment, production/reference post-root comparison and staged full-state commit | extended mutation plus forged root/reward/replay rejection tests |
 | Formal safety | TLA+ model plus dependency-free 4–100 bounded state-space checker | strict quorum, non-equivocation/agreement and joint-quorum invariants |
-| Proposer election | all-active-validator signature beacon; non-final subsets excluded; prior-QC fallback | contribution/order/withholding/tampered-entropy tests |
+| Proposer election | RFC 9381 P-256 proof committed by the current proposer inside block `H` for height `H+1`; prior-QC compatibility fallback; off-chain arrival-order beacon excluded from selection | published RFC vector, canonical-block, identity-binding, wrong-seed and tampered-proof tests |
+| Validator signing | signer-only key access, TLS 1.3 mutual-TLS remote service, PKCS#11 identity-key adapter, encrypted fallback and durable write-before-sign slashing protection | conflict/restart/corruption/domain/mTLS/no-client-cert/PKCS#11-encoding tests and local verification of every remote result |
 | Multi-validator BFT | test-liquidity token, 4–20 signer processes and 20–100 persistent-process WAN/churn model | 14,742 votes, 162 vote QCs, 81 timeout QCs and 81 full-set churn QCs |
 | Static safety | pointer-based persistence and serialized speculative replay snapshots | `go vet ./...` zero warnings; full race pass |
 | Router | graph search over simple paths, configurable 1–8-hop cap, real per-hop amount propagation | A→B→C→D→E four-hop quote and atomic execution; exact quote/receipt match |
@@ -88,6 +89,7 @@ A percentage is intentionally not used: source-code completeness, public testnet
 | Customers, retention and realized revenue history | requires actual adoption, not seeded repository data |
 | Legal entity, token/yield classification, KYC/AML boundary | requires jurisdiction-specific licensed counsel |
 | Official TLC/formal proof and independently authored client equivalence | requires the external checker/reviewers and a separately authored client; local TLA+ and reference replay are not independent certification |
+| Physical HSM and vendor certification | the PKCS#11 adapter is implemented, but a real provisioned token, vendor library, conformance lab and certification are external hardware/assurance evidence |
 
 ## Launch decision
 

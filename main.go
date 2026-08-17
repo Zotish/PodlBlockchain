@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -29,11 +32,20 @@ func main() {
 	loadEnvFile(".env")
 	chainCmdSet := flag.NewFlagSet("chain", flag.ExitOnError)
 	walletCmdSet := flag.NewFlagSet("wallet", flag.ExitOnError)
+	signerCmdSet := flag.NewFlagSet("signer", flag.ExitOnError)
 
 	chainPort := chainCmdSet.Uint("port", 5000, "HTTP port to launch our blockchain server")
 	p2pPort := chainCmdSet.Uint("p2p_port", 0, "P2P TCP port for validator sync (default: port+1000)")
 	validatorAddress := chainCmdSet.String("validator", "", "Validator address to receive staking rewards")
-	validatorPrivateKey := chainCmdSet.String("validator_private_key", "", "Private key used to sign P2P validator handshakes")
+	validatorPrivateKey := chainCmdSet.String("validator_private_key", "", "Development-only local validator key; prefer remote signer or encrypted key file")
+	validatorVRFPrivateKey := chainCmdSet.String("validator_vrf_private_key", os.Getenv("LQD_VALIDATOR_VRF_PRIVATE_KEY"), "P-256 VRF private scalar")
+	validatorKeyFile := chainCmdSet.String("validator_key_file", os.Getenv("LQD_VALIDATOR_KEY_FILE"), "Encrypted local validator key file")
+	validatorSignerURL := chainCmdSet.String("validator_signer_url", os.Getenv("LQD_VALIDATOR_SIGNER_URL"), "Remote mTLS validator signer URL")
+	validatorSignerCA := chainCmdSet.String("validator_signer_ca", os.Getenv("LQD_VALIDATOR_SIGNER_CA"), "Remote signer CA certificate")
+	validatorSignerCert := chainCmdSet.String("validator_signer_cert", os.Getenv("LQD_VALIDATOR_SIGNER_CERT"), "Remote signer client certificate")
+	validatorSignerKey := chainCmdSet.String("validator_signer_key", os.Getenv("LQD_VALIDATOR_SIGNER_KEY"), "Remote signer client key")
+	validatorSignerName := chainCmdSet.String("validator_signer_name", os.Getenv("LQD_VALIDATOR_SIGNER_NAME"), "Remote signer TLS server name")
+	validatorSlashingDB := chainCmdSet.String("validator_slashing_db", os.Getenv("LQD_VALIDATOR_SLASHING_DB"), "Durable anti-double-sign database")
 	remoteNode := chainCmdSet.String("remote_node", "", "Remote P2P node (host:port) to sync from")
 	minStake := chainCmdSet.Float64("min_stake", 100000, "Minimum stake amount to become a validator")
 	stakeAmount := chainCmdSet.Float64("stake_amount", 2000000, "Amount being staked by the validator (legacy PoS)")
@@ -49,10 +61,26 @@ func main() {
 	walletPort := walletCmdSet.Uint("port", 8080, "HTTP port to launch our wallet server")
 	blockchainNodeAddress := walletCmdSet.String("node_address", "http://127.0.0.1:5000", "Blockchain node address for the wallet gateway")
 
+	signerListen := signerCmdSet.String("listen", "127.0.0.1:9100", "Remote signer HTTPS listen address")
+	signerTLSCert := signerCmdSet.String("tls_cert", os.Getenv("LQD_SIGNER_TLS_CERT"), "Signer TLS certificate")
+	signerTLSKey := signerCmdSet.String("tls_key", os.Getenv("LQD_SIGNER_TLS_KEY"), "Signer TLS private key")
+	signerClientCA := signerCmdSet.String("client_ca", os.Getenv("LQD_SIGNER_CLIENT_CA"), "Signer trusted client CA")
+	signerLocalKeyFile := signerCmdSet.String("key_file", os.Getenv("LQD_VALIDATOR_KEY_FILE"), "Encrypted local validator key file")
+	signerCreateKeyFile := signerCmdSet.String("create_key_file", "", "Create an encrypted validator key file and exit")
+	signerLocalPrivateKey := signerCmdSet.String("validator_private_key", os.Getenv("LQD_VALIDATOR_PRIVATE_KEY"), "Development-only raw validator key")
+	signerVRFPrivateKey := signerCmdSet.String("vrf_private_key", os.Getenv("LQD_VALIDATOR_VRF_PRIVATE_KEY"), "P-256 VRF private scalar")
+	signerSlashingDB := signerCmdSet.String("slashing_db", os.Getenv("LQD_VALIDATOR_SLASHING_DB"), "Durable anti-double-sign database")
+	pkcs11Module := signerCmdSet.String("pkcs11_module", os.Getenv("LQD_PKCS11_MODULE"), "PKCS#11 module path")
+	pkcs11Token := signerCmdSet.String("pkcs11_token", os.Getenv("LQD_PKCS11_TOKEN_LABEL"), "PKCS#11 token label")
+	pkcs11KeyLabel := signerCmdSet.String("pkcs11_key", os.Getenv("LQD_PKCS11_KEY_LABEL"), "PKCS#11 validator key label")
+	pkcs11PublicKey := signerCmdSet.String("pkcs11_public_key", os.Getenv("LQD_PKCS11_PUBLIC_KEY"), "Pinned uncompressed secp256k1 public key")
+	pkcs11Slot := signerCmdSet.String("pkcs11_slot", "", "Optional PKCS#11 slot ID, including slot 0")
+
 	if len(os.Args) < 2 {
 		fmt.Println("Usage:")
 		fmt.Println("  chain -port PORT -validator ADDRESS -stake_amount AMOUNT [-remote_node URL] [-min_stake AMOUNT]")
 		fmt.Println("  wallet -port PORT -node_address URL")
+		fmt.Println("  signer -listen HOST:PORT -tls_cert FILE -tls_key FILE -client_ca FILE")
 		os.Exit(1)
 	}
 
@@ -88,7 +116,40 @@ func main() {
 				*p2pPort = *chainPort + 1000
 			}
 			bc.Network.HTTPPort = int(*chainPort)
-			bc.Network.SetValidatorIdentity(*validatorAddress, *validatorPrivateKey)
+			slashingPath := strings.TrimSpace(*validatorSlashingDB)
+			if slashingPath == "" {
+				base := strings.TrimSpace(*dbPath)
+				if base == "" {
+					base = filepath.Join("data", "chain")
+				}
+				slashingPath = filepath.Join(base, "validator-slashing-protection.json")
+			}
+			var validatorSigner blockchaincomponent.ValidatorSigner
+			var signerErr error
+			switch {
+			case strings.TrimSpace(*validatorSignerURL) != "":
+				validatorSigner, signerErr = blockchaincomponent.NewRemoteValidatorSigner(context.Background(), blockchaincomponent.RemoteValidatorSignerConfig{
+					URL: *validatorSignerURL, CAFile: *validatorSignerCA, ClientCertificateFile: *validatorSignerCert,
+					ClientKeyFile: *validatorSignerKey, ServerName: *validatorSignerName, Timeout: 5 * time.Second,
+				})
+			case strings.TrimSpace(*validatorKeyFile) != "":
+				validatorSigner, signerErr = blockchaincomponent.LoadEncryptedLocalValidatorSigner(*validatorKeyFile, os.Getenv("LQD_VALIDATOR_KEY_PASSPHRASE"), slashingPath)
+			case strings.TrimSpace(*validatorPrivateKey) != "":
+				validatorSigner, signerErr = blockchaincomponent.NewLocalValidatorSigner(*validatorPrivateKey, *validatorVRFPrivateKey, slashingPath)
+			}
+			if signerErr != nil {
+				log.Fatalf("Validator signer configuration failed: %v", signerErr)
+			}
+			if validatorSigner != nil {
+				if err := bc.Network.SetValidatorSigner(*validatorAddress, validatorSigner); err != nil {
+					log.Fatalf("Validator signer rejected: %v", err)
+				}
+			} else {
+				bc.Network.SetValidatorIdentity(*validatorAddress, "")
+				if *requireSignedBFT {
+					log.Fatal("Signed BFT requires a remote, encrypted-file, or local development validator signer")
+				}
+			}
 			if err := bc.Network.Start(strconv.FormatUint(uint64(*p2pPort), 10)); err != nil {
 				log.Fatalf("Failed to start P2P network: %v", err)
 			}
@@ -240,6 +301,70 @@ func main() {
 			}
 		}
 
+	case "signer":
+		signerCmdSet.Parse(os.Args[2:])
+		if signerCmdSet.Parsed() {
+			if strings.TrimSpace(*signerCreateKeyFile) != "" {
+				if strings.TrimSpace(*signerLocalPrivateKey) == "" {
+					log.Fatal("-create_key_file requires -validator_private_key")
+				}
+				if err := blockchaincomponent.WriteEncryptedValidatorKeyFile(*signerCreateKeyFile, *signerLocalPrivateKey, *signerVRFPrivateKey, os.Getenv("LQD_VALIDATOR_KEY_PASSPHRASE")); err != nil {
+					log.Fatalf("Encrypted validator key creation failed: %v", err)
+				}
+				log.Printf("Encrypted validator key written to %s", *signerCreateKeyFile)
+				return
+			}
+			if strings.TrimSpace(*signerSlashingDB) == "" {
+				log.Fatal("Remote signer requires -slashing_db for durable anti-double-sign protection")
+			}
+			var signer blockchaincomponent.ValidatorSigner
+			var err error
+			if strings.TrimSpace(*pkcs11Module) != "" {
+				var slotID *uint
+				if strings.TrimSpace(*pkcs11Slot) != "" {
+					parsed, parseErr := strconv.ParseUint(strings.TrimSpace(*pkcs11Slot), 10, 32)
+					if parseErr != nil {
+						log.Fatalf("Invalid PKCS#11 slot ID: %v", parseErr)
+					}
+					value := uint(parsed)
+					slotID = &value
+				}
+				signer, err = blockchaincomponent.NewPKCS11ValidatorSigner(blockchaincomponent.PKCS11ValidatorSignerConfig{
+					ModulePath: *pkcs11Module, TokenLabel: *pkcs11Token, PIN: os.Getenv("LQD_PKCS11_PIN"),
+					KeyLabel: *pkcs11KeyLabel, PublicKeyHex: *pkcs11PublicKey, SlotID: slotID,
+				}, *signerVRFPrivateKey, *signerSlashingDB)
+			} else if strings.TrimSpace(*signerLocalKeyFile) != "" {
+				signer, err = blockchaincomponent.LoadEncryptedLocalValidatorSigner(*signerLocalKeyFile, os.Getenv("LQD_VALIDATOR_KEY_PASSPHRASE"), *signerSlashingDB)
+			} else if strings.TrimSpace(*signerLocalPrivateKey) != "" {
+				signer, err = blockchaincomponent.NewLocalValidatorSigner(*signerLocalPrivateKey, *signerVRFPrivateKey, *signerSlashingDB)
+			} else {
+				err = fmt.Errorf("configure PKCS#11, encrypted key file, or development local key")
+			}
+			if err != nil {
+				log.Fatalf("Signer backend initialization failed: %v", err)
+			}
+			defer signer.Close()
+			tlsConfig, err := blockchaincomponent.ValidatorSignerServerTLSConfig(blockchaincomponent.ValidatorSignerTLSFiles{
+				CertificateFile: *signerTLSCert, KeyFile: *signerTLSKey, ClientCAFile: *signerClientCA,
+			})
+			if err != nil {
+				log.Fatalf("Signer mTLS configuration failed: %v", err)
+			}
+			server := &http.Server{
+				Addr:              *signerListen,
+				Handler:           blockchaincomponent.NewValidatorSignerHandler(signer, true),
+				TLSConfig:         tlsConfig,
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      10 * time.Second,
+				IdleTimeout:       30 * time.Second,
+			}
+			log.Printf("Remote validator signer listening on %s address=%s backend=%s", *signerListen, signer.Address(), signer.Status(context.Background()).Backend)
+			if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Remote signer stopped: %v", err)
+			}
+		}
+
 	case "wallet":
 		walletCmdSet.Parse(os.Args[2:])
 		if walletCmdSet.Parsed() {
@@ -270,7 +395,7 @@ func main() {
 		}
 
 	default:
-		fmt.Println("Expected 'chain' or 'wallet' subcommands")
+		fmt.Println("Expected 'chain', 'signer', 'wallet', or 'aggregate' subcommands")
 		os.Exit(1)
 	}
 }

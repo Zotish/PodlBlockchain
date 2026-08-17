@@ -1,6 +1,10 @@
 package blockchaincomponent
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestThresholdVRFBeaconAndProposerBinding(t *testing.T) {
 	bc, keys := consensusFixture(t, 4)
@@ -42,8 +46,59 @@ func TestThresholdVRFBeaconAndProposerBinding(t *testing.T) {
 		t.Fatalf("all-contributor beacon not finalized: %#v", beacon)
 	}
 	cert, err := bc.BuildProposerCertificate(2, 0)
-	if err != nil || cert.Entropy != beacon.Output || !bc.VerifyProposerCertificate(*cert) {
-		t.Fatalf("proposer certificate did not bind finalized beacon: cert=%#v err=%v", cert, err)
+	if err != nil || cert.Entropy == beacon.Output || !bc.VerifyProposerCertificate(*cert) {
+		t.Fatalf("off-chain beacon influenced canonical proposer selection: cert=%#v err=%v", cert, err)
+	}
+}
+
+func TestCanonicalBlockVRFDrivesNextProposerEntropy(t *testing.T) {
+	bc, keys := consensusFixture(t, 4)
+	bc.Network = NewNetworkService(bc)
+	proposer, err := bc.SelectBlockProposer(1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposerKey string
+	for _, key := range keys {
+		proof := ConsensusVRFProof{Height: 9, SpecHash: bc.ChainSpec.Hash(), Seed: "lookup"}
+		if err := SignConsensusVRFProof(&proof, key); err == nil && strings.EqualFold(proof.Validator, proposer.Address) {
+			proposerKey = key
+			break
+		}
+	}
+	if proposerKey == "" {
+		t.Fatal("fixture proposer key not found")
+	}
+	signer, err := NewLocalValidatorSigner(proposerKey, testP256VRFSecret, filepath.Join(t.TempDir(), "slashing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signer.Close()
+	if err := bc.Network.SetValidatorSigner(proposer.Address, signer); err != nil {
+		t.Fatal(err)
+	}
+	parent := bc.Blocks[len(bc.Blocks)-1]
+	block := &Block{BlockNumber: 1, PreviousHash: parent.CurrentHash, StateRoot: "0xstate-root", RewardBreakdown: BlockRewardBreakdown{Validator: proposer.Address}}
+	if err := bc.AttachNextProposerVRF(block); err != nil {
+		t.Fatal(err)
+	}
+	if !bc.VerifyBlockVRFContribution(block) {
+		t.Fatal("canonical block VRF contribution did not verify")
+	}
+	block.CurrentHash = CalculateHash(block)
+	bc.Blocks = append(bc.Blocks, block)
+	cert, err := bc.BuildProposerCertificate(2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cert.Entropy != block.NextVRFProof.Output || !bc.VerifyProposerCertificate(*cert) {
+		t.Fatal("next proposer certificate did not consume canonical RFC 9381 output")
+	}
+	tampered := *block.NextVRFProof
+	tampered.Output = "0xdead"
+	block.NextVRFProof = &tampered
+	if bc.VerifyBlockVRFContribution(block) || bc.canonicalBlockVRFEntropy(2) != "" {
+		t.Fatal("tampered canonical VRF output was accepted")
 	}
 }
 

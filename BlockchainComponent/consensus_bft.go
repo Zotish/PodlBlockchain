@@ -1,6 +1,7 @@
 package blockchaincomponent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -70,8 +71,9 @@ type TimeoutCertificate struct {
 	Hash          string   `json:"hash"`
 }
 
-// ProposerCertificate makes proposer election independently reproducible. It
-// is a deterministic election proof, not a claim of a private-output VRF.
+// ProposerCertificate makes proposer election independently reproducible. Its
+// entropy is sourced from the parent block's canonical RFC 9381 proof when
+// present, with the prior signed QC as the compatibility fallback.
 type ProposerCertificate struct {
 	Height      uint64 `json:"height"`
 	Round       uint32 `json:"round"`
@@ -252,6 +254,20 @@ func SignConsensusVote(v *ConsensusVote, privateKeyHex string) error {
 	}
 	v.Validator = crypto.PubkeyToAddress(key.PublicKey).Hex()
 	v.Signature = "0x" + hex.EncodeToString(sig)
+	return nil
+}
+
+func SignConsensusVoteWithSigner(ctx context.Context, v *ConsensusVote, signer ValidatorSigner) error {
+	if v == nil || signer == nil {
+		return fmt.Errorf("vote and validator signer are required")
+	}
+	slot := fmt.Sprintf("vote/%d/%d/%s", v.Height, v.Round, v.Step)
+	signature, err := signer.SignMessage(ctx, SignerDomainConsensusVote, []byte(consensusVoteMessage(*v)), slot)
+	if err != nil {
+		return err
+	}
+	v.Validator = signer.Address()
+	v.Signature = signature
 	return nil
 }
 
@@ -506,8 +522,8 @@ func (bc *Blockchain_struct) SelectBlockProposer(height uint64, round uint32) (V
 }
 
 func (bc *Blockchain_struct) proposerEntropy(height uint64) string {
-	if bc != nil && bc.ConsensusV2 != nil && bc.ConsensusV2.LastVRFBeacon != nil && bc.ConsensusV2.LastVRFBeacon.Finalized && bc.ConsensusV2.LastVRFBeacon.Height == height && bc.ConsensusV2.LastVRFBeacon.Output != "" {
-		return bc.ConsensusV2.LastVRFBeacon.Output
+	if output := bc.canonicalBlockVRFEntropy(height); output != "" {
+		return output
 	}
 	if bc != nil && bc.ConsensusV2 != nil && bc.ConsensusV2.LastQC != nil && bc.ConsensusV2.LastQC.Height+1 == height && bc.ConsensusV2.LastQC.Randomness != "" {
 		return bc.ConsensusV2.LastQC.Randomness
@@ -611,12 +627,12 @@ func (bc *Blockchain_struct) createLocalConsensusVote(block *Block, step Consens
 	if bc == nil || block == nil || bc.Network == nil {
 		return ConsensusVote{}, fmt.Errorf("consensus network unavailable")
 	}
-	address, privateKey := bc.Network.ValidatorIdentitySnapshot()
-	if address == "" || privateKey == "" {
+	address, signer := bc.Network.ValidatorSignerSnapshot()
+	if address == "" || signer == nil {
 		return ConsensusVote{}, fmt.Errorf("validator signing identity is not configured")
 	}
 	vote := ConsensusVote{Height: block.BlockNumber, Round: block.ConsensusRound, Step: step, BlockHash: block.CurrentHash, Validator: address}
-	if err := SignConsensusVote(&vote, privateKey); err != nil {
+	if err := SignConsensusVoteWithSigner(context.Background(), &vote, signer); err != nil {
 		return ConsensusVote{}, err
 	}
 	if !strings.EqualFold(vote.Validator, address) || (bc.LocalValidator != "" && !strings.EqualFold(vote.Validator, bc.LocalValidator)) {

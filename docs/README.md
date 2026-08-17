@@ -3,6 +3,7 @@
 ## PoDL v2 Reports
 
 - [1–11 implementation and readiness report](./PODL_V2_IMPLEMENTATION_REPORT.md)
+- [Validator signer and RFC 9381 ECVRF](./VALIDATOR_SIGNER_AND_ECVRF.md)
 - [Attachment implementation closure and external boundary](./ATTACHMENT_IMPLEMENTATION_REPORT.md)
 - [Internal engineering closure and release evidence](./INTERNAL_ENGINEERING_CLOSURE.md)
 - [Restricted-testnet operations](./PODL_V2_OPERATIONS.md)

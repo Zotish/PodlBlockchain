@@ -21,7 +21,7 @@ cd "$PODL_ROOT"
 
 stopped=false
 if [ "$STOP_SERVICES" = "true" ]; then
-  $COMPOSE stop chain wallet aggregator dex-api >/dev/null 2>&1 || true
+  $COMPOSE --profile signer stop chain wallet aggregator dex-api signer >/dev/null 2>&1 || true
   stopped=true
 fi
 
@@ -29,7 +29,11 @@ tar -C "$PODL_ROOT" -czf "$BACKUP_FILE" "$(basename "$DATA_DIR")"
 sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256" 2>/dev/null || shasum -a 256 "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
 
 if [ "$stopped" = "true" ]; then
-  $COMPOSE up -d chain wallet aggregator dex-api >/dev/null
+  if [ "$(sed -n 's/^ENABLE_VALIDATOR_SIGNER=//p' "$PODL_ROOT/.env" 2>/dev/null | tail -1 | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+    $COMPOSE --profile signer up -d signer chain wallet aggregator dex-api >/dev/null
+  else
+    $COMPOSE up -d chain wallet aggregator dex-api >/dev/null
+  fi
 fi
 
 if [ "$RETENTION_DAYS" -gt 0 ] 2>/dev/null; then
