@@ -6,6 +6,7 @@
   REACT_APP_CHAIN_BASE = "https://chain.178-105-133-94.sslip.io"
   REACT_APP_API_BASE = "https://api.178-105-133-94.sslip.io"
   REACT_APP_WALLET_BASE = "https://wallet.178-105-133-94.sslip.io"
+  REACT_APP_DEX_APP_ORIGIN = "https://bright-crisp-91fe94.netlify.app"
 
 [[redirects]]
   from = "/*"

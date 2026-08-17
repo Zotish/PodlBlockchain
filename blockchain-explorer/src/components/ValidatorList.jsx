@@ -1,9 +1,45 @@
 // src/components/ValidatorList.jsx
 import React from 'react';
 
-const ValidatorList = ({ validators }) => {
+const compactNumber = (value, digits = 2) => {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '—';
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: digits }).format(number);
+};
+
+const ValidatorList = ({ validators, premium = false }) => {
   if (!validators || validators.length === 0) {
     return <p>No validators found</p>;
+  }
+
+  if (premium) {
+    return (
+      <div className="premium-validator-list">
+        {validators.map((validator, index) => {
+          const address = validator.address || '';
+          const voting = validator.voting_eligible !== false && validator.node_status !== 'jailed';
+          return (
+            <div className="premium-validator-row" key={address || index}>
+              <span className="validator-rank">{String(index + 1).padStart(2, '0')}</span>
+              <div className="validator-identity">
+                <strong>{address ? `${address.slice(0, 9)}…${address.slice(-6)}` : 'Unknown validator'}</strong>
+                <span className={voting ? 'validator-online' : 'validator-offline'}>
+                  <i /> {voting ? 'Voting' : 'Unavailable'}
+                </span>
+              </div>
+              <div className="validator-power">
+                <span>Hybrid power</span>
+                <strong>{compactNumber(validator.liquidity_power)}</strong>
+              </div>
+              <div className="validator-blocks">
+                <span>Blocks</span>
+                <strong>{compactNumber(validator.blocks_included, 0)}</strong>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
   }
 
   return (

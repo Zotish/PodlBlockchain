@@ -447,6 +447,14 @@ export default function App() {
   // ── Postmessage wallet connect ────────────────────────────────────────────
   useEffect(() => {
     function onMsg(e) {
+      let trustedWalletOrigin = "";
+      try {
+        trustedWalletOrigin = new URL(WEB_WALLET_URL, window.location.href).origin;
+      } catch {
+        return;
+      }
+      if (e.origin !== trustedWalletOrigin) return;
+      if (popupRef.current && e.source !== popupRef.current) return;
       if (!e.data || typeof e.data !== "object") return;
       if (e.data.type === "LQD_WALLET_CONNECT") {
         const { address, privateKey } = e.data;
@@ -1030,7 +1038,7 @@ export default function App() {
   }
 
   function connectWebWallet() {
-    popupRef.current = window.open(WEB_WALLET_URL, "lqd_wallet", "width=420,height=720");
+    popupRef.current = window.open(WEB_WALLET_URL, "lqd_wallet", "width=1080,height=820");
   }
 
   function disconnectWallet() {
