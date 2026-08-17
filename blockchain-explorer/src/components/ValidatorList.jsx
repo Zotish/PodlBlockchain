@@ -1,5 +1,6 @@
 // src/components/ValidatorList.jsx
 import React from 'react';
+import { Link } from 'react-router-dom';
 
 const compactNumber = (value, digits = 2) => {
   const number = Number(value);
@@ -22,19 +23,30 @@ const ValidatorList = ({ validators, premium = false }) => {
             <div className="premium-validator-row" key={address || index}>
               <span className="validator-rank">{String(index + 1).padStart(2, '0')}</span>
               <div className="validator-identity">
-                <strong>{address ? `${address.slice(0, 9)}…${address.slice(-6)}` : 'Unknown validator'}</strong>
+                <Link to={address ? `/validator/${address}` : '/validators'}>
+                  {address ? `${address.slice(0, 11)}…${address.slice(-7)}` : 'Unknown validator'}
+                </Link>
                 <span className={voting ? 'validator-online' : 'validator-offline'}>
                   <i /> {voting ? 'Voting' : 'Unavailable'}
                 </span>
+              </div>
+              <div className="validator-stake">
+                <span>Native stake</span>
+                <strong>{compactNumber(validator.stake)} LQD</strong>
               </div>
               <div className="validator-power">
                 <span>Hybrid power</span>
                 <strong>{compactNumber(validator.liquidity_power)}</strong>
               </div>
               <div className="validator-blocks">
-                <span>Blocks</span>
-                <strong>{compactNumber(validator.blocks_included, 0)}</strong>
+                <span>Proposed / included</span>
+                <strong>{compactNumber(validator.blocks_proposed, 0)} / {compactNumber(validator.blocks_included, 0)}</strong>
               </div>
+              <div className="validator-penalty">
+                <span>Penalty</span>
+                <strong>{compactNumber(Number(validator.penalty_score || 0) * 100, 1)}%</strong>
+              </div>
+              <Link className="validator-row-link" to={address ? `/validator/${address}` : '/validators'} aria-label="Open validator">→</Link>
             </div>
           );
         })}

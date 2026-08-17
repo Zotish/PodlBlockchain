@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { DataSurface, ExplorerPageHero, MetricStrip } from "../components/ExplorerPage";
 import { fetchDexRegistryPools, fetchJSON, firstNodeResult } from "../utils/api";
 import { formatLQD } from "../utils/lqdUnits";
 
@@ -39,50 +40,53 @@ export default function PoolsPage() {
   const entries = Object.entries(pools);
 
   return (
-    <div>
-      <h2>Liquidity Pools</h2>
-      <p>Dynamic routing keeps pools balanced to the target equal share.</p>
+    <main className="pools-page premium-route-page">
+      <ExplorerPageHero
+        eyebrow="Dynamic liquidity fabric"
+        title="Liquidity, routed by measurable demand."
+        description="Inspect pool reserves, registry policy and capital still available for allocation across the PoDL liquidity network."
+        metaLabel="Routing model"
+        metaValue="Dynamic pool allocation"
+      />
       {error && <div className="error">{error}</div>}
 
-      <div className="stats-card">
-        <div>Total Liquidity: {formatLQD(total)}</div>
-        <div>Target Equal: {formatLQD(target)}</div>
-        <div>Unallocated: {formatLQD(unallocated)}</div>
-      </div>
+      <MetricStrip items={[
+        { label: 'Total liquidity', value: `${formatLQD(total)} LQD`, note: 'tracked reserves' },
+        { label: 'Allocation target', value: `${formatLQD(target)} LQD`, note: 'current target share' },
+        { label: 'Unallocated', value: `${formatLQD(unallocated)} LQD`, note: 'available capital' },
+        { label: 'Tracked pools', value: Math.max(entries.length, registryPools.length).toLocaleString(), note: 'live and registered' },
+      ]} />
 
       {registryPools.length > 0 && (
-        <div className="stats-card">
-          <strong>DEX Registry Pools</strong>
-          {registryPools.map((pool) => (
-            <div key={pool.address || `${pool.token_a}-${pool.token_b}`}>
-              {pool.token_a || "LQD"} / {pool.token_b || pool.symbol || "Token"} · {pool.tier || "Tier 3"} · Weight {pool.weight || "0.35x"}
-            </div>
-          ))}
-        </div>
+        <DataSurface title="Verified registry" description="Governed pool metadata and active routing weights.">
+          <div className="pool-registry-grid">{registryPools.map((pool) => (
+            <article key={pool.address || `${pool.token_a}-${pool.token_b}`}>
+              <span>{pool.tier || "Tier 3"}</span>
+              <strong>{pool.token_a || "LQD"} / {pool.token_b || pool.symbol || "Token"}</strong>
+              <small>Routing weight {pool.weight || "0.35x"}</small>
+            </article>
+          ))}</div>
+        </DataSurface>
       )}
 
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Pool (Contract)</th>
-            <th>Liquidity</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entries.length === 0 ? (
-            <tr>
-              <td colSpan="2">No pools found</td>
-            </tr>
-          ) : (
-            entries.map(([addr, amount]) => (
+      <DataSurface title="On-chain pool reserves" description="Current contract-level liquidity reported by the public API.">
+        <div className="premium-table-scroll"><table className="table">
+          <thead>
+            <tr><th>Pool contract</th><th>Liquidity</th><th>State</th></tr>
+          </thead>
+          <tbody>
+            {entries.length === 0 ? (
+              <tr><td colSpan="3" className="tracker-empty">No pools found</td></tr>
+            ) : entries.map(([addr, amount]) => (
               <tr key={addr}>
-                <td>{addr}</td>
-                <td>{formatLQD(amount)}</td>
+                <td><code>{addr}</code></td>
+                <td><strong>{formatLQD(amount)} LQD</strong></td>
+                <td><span className="badge badge-green">Active</span></td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
-    </div>
+            ))}
+          </tbody>
+        </table></div>
+      </DataSurface>
+    </main>
   );
 }

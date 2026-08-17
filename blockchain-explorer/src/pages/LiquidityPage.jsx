@@ -1,6 +1,7 @@
 /* global BigInt */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { ExplorerPageHero } from "../components/ExplorerPage";
 import { formatLQD } from "../utils/lqdUnits";
 import { buildSignedClaimPayload, connectExtensionWallet, shortWalletAddress } from "../utils/claimWallet";
 import { CHAIN_BASE, fetchJSON, firstNodeResult, mergeArrayResults } from "../utils/api";
@@ -150,17 +151,13 @@ export default function LiquidityPage() {
 
   return (
     <div className="liquidity-page">
-      <div className="tracker-header">
-        <p className="section-title">Liquidity Provider Dashboard</p>
-        <h2 className="page-title">
-          Liquidity Providers
-          <span>{providers.length.toLocaleString()} total</span>
-        </h2>
-        <p>
-          Track user liquidity, LP reward accrual, estimated APR/APY, and reward
-          claim/sync status in one production dashboard.
-        </p>
-      </div>
+      <ExplorerPageHero
+        eyebrow="Liquidity provider intelligence"
+        title="Capital positions, rewards and risk in one view."
+        description="Track user liquidity, LP reward accrual, estimated APR/APY and signed claim status across the live protocol."
+        metaLabel="Indexed providers"
+        metaValue={providers.length.toLocaleString()}
+      />
 
       {error && <div className="error">{error}</div>}
 

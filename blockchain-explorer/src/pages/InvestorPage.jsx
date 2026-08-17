@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { DataSurface, ExplorerPageHero, MetricStrip } from '../components/ExplorerPage';
 import { fetchChainJSON } from '../utils/api';
 
 const value = (input, fallback = '—') => input === undefined || input === null || input === '' ? fallback : input;
@@ -38,48 +39,56 @@ export default function InvestorPage() {
   const blockers = checks.filter((check) => check.critical && !check.ok);
 
   return (
-    <main className="investor-page">
-      <h1>PoDL Investor Evidence Dashboard</h1>
-      <p>Live protocol evidence only. No projected revenue, guaranteed APY, or guaranteed principal is shown.</p>
+    <main className="investor-page premium-route-page">
+      <ExplorerPageHero
+        eyebrow="Institutional evidence room"
+        title="Protocol claims, backed by live evidence."
+        description="A diligence-first view of PoDL consensus, realized economics, concentration and launch readiness—without forecasts or guaranteed returns."
+        metaLabel="Evidence posture"
+        metaValue={signedReport?.verified ? 'Validator-signed' : 'Verification pending'}
+      />
       {error && <div className="error-message">{error}</div>}
-      <section className="dashboard-grid">
-        <article className="stat-card"><span>Finalized height</span><strong>{value(status?.height)}</strong></article>
-        <article className="stat-card"><span>Validators</span><strong>{value(metrics.validator_count, 0)}</strong></article>
-        <article className="stat-card"><span>Largest power share</span><strong>{percent(metrics.largest_validator_power_share)}</strong></article>
-        <article className="stat-card"><span>Realized protocol revenue</span><strong>{value(metrics.realized_protocol_revenue, '0')} LQD</strong></article>
-        <article className="stat-card"><span>Business pilots</span><strong>{value(metrics.business_pilot_count, 0)}</strong></article>
-        <article className="stat-card"><span>Buyback enabled</span><strong>{economics?.policy?.buyback_enabled ? 'Yes' : 'No'}</strong></article>
-        <article className="stat-card"><span>Explorer index lag</span><strong>{value(indexStatus?.lag_blocks, '—')} blocks</strong></article>
-        <article className="stat-card"><span>Evidence signature</span><strong>{signedReport?.verified ? 'Verified' : 'Unavailable'}</strong></article>
-      </section>
-      <section className="dashboard-card">
-        <h2>Signed evidence checkpoint</h2>
+      <MetricStrip items={[
+        { label: 'Finalized height', value: value(status?.height), note: 'canonical checkpoint' },
+        { label: 'Validator set', value: value(metrics.validator_count, 0), note: `${percent(metrics.largest_validator_power_share)} largest share` },
+        { label: 'Realized revenue', value: `${value(metrics.realized_protocol_revenue, '0')} LQD`, note: 'no projections' },
+        { label: 'Mainnet blockers', value: blockers.length, note: 'critical evidence gates' },
+      ]} />
+      <section className="investor-detail-grid">
+      <DataSurface title="Signed evidence checkpoint" description="Cryptographic authentication for the displayed protocol state.">
         {signedReport?.verified ? (
           <p>Validator <code>{signedReport.signer}</code> signed state root <code>{signedReport.state_root}</code> at height {signedReport.height}. Payload hash: <code>{signedReport.payload_hash}</code>.</p>
         ) : (
           <p>No validator-signed checkpoint is available. Unsigned figures must not be presented as authenticated protocol evidence.</p>
         )}
+      </DataSurface>
+      <DataSurface title="Economic controls" description="Current observable protocol policy—never projected performance.">
+        <dl className="investor-control-list">
+          <div><dt>Business pilots</dt><dd>{value(metrics.business_pilot_count, 0)}</dd></div>
+          <div><dt>Buyback</dt><dd>{economics?.policy?.buyback_enabled ? 'Enabled' : 'Disabled'}</dd></div>
+          <div><dt>Explorer index lag</dt><dd>{value(indexStatus?.lag_blocks, '—')} blocks</dd></div>
+          <div><dt>Evidence signature</dt><dd>{signedReport?.verified ? 'Verified' : 'Unavailable'}</dd></div>
+        </dl>
+      </DataSurface>
       </section>
-      <section className="dashboard-card">
-        <h2>Realized revenue history</h2>
-        <p>Daily custody-backed ledger totals. Zero-revenue dates are preserved by the API; this is historical evidence, not a forecast.</p>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <DataSurface title="Realized revenue history" description="Daily custody-backed ledger totals. Zero-revenue dates are preserved; this is historical evidence, not a forecast.">
+        <div className="premium-table-scroll">
+          <table className="table">
             <thead><tr><th>Date (UTC)</th><th>Realized LQD</th><th>Sources</th><th>Insurance allocation</th></tr></thead>
-            <tbody>{activeHistory.length === 0 ? <tr><td colSpan="4">No realized revenue has been recorded.</td></tr> : activeHistory.map((point) => (
+            <tbody>{activeHistory.length === 0 ? <tr><td colSpan="4" className="tracker-empty">No realized revenue has been recorded.</td></tr> : activeHistory.map((point) => (
               <tr key={point.date}><td>{point.date}</td><td>{value(point.revenue, '0')}</td><td>{Object.keys(point.by_source || {}).join(', ') || '—'}</td><td>{value(point.allocations?.insurance_reserve, '0')}</td></tr>
             ))}</tbody>
           </table>
         </div>
-      </section>
-      <section className="dashboard-card">
-        <h2>Mainnet evidence gate</h2>
+      </DataSurface>
+      <section className="investor-detail-grid">
+      <DataSurface title="Mainnet evidence gate" description="Launch requires every critical protocol check to pass.">
         <p><strong>{blockers.length}</strong> required blocker(s) remain. Launch is allowed only when the node reports every required check passing.</p>
-        <ul>{blockers.map((check) => <li key={check.name}><strong>{check.name}</strong>: {check.message}</li>)}</ul>
-      </section>
-      <section className="dashboard-card">
-        <h2>Disclosure</h2>
+        <ul className="investor-blocker-list">{blockers.map((check) => <li key={check.name}><strong>{check.name}</strong><span>{check.message}</span></li>)}</ul>
+      </DataSurface>
+      <DataSurface title="Disclosure" description="Material limitations shown alongside the evidence.">
         <p>These metrics are unaudited until an independent audit is published. LP withdrawals return a proportional basket or market-value output; original fiat value is not guaranteed.</p>
+      </DataSurface>
       </section>
     </main>
   );

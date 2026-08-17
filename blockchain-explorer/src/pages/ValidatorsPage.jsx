@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import ValidatorList from '../components/ValidatorList';
+import { DataSurface, ExplorerPageHero, MetricStrip } from '../components/ExplorerPage';
 import { fetchJSON, mergeArrayResults } from '../utils/api';
 
 const ValidatorsPage = () => {
@@ -42,15 +43,46 @@ const ValidatorsPage = () => {
     }
   };
 
+  const sortedValidators = useMemo(() => {
+    const keyBySort = {
+      liquidityPower: 'liquidity_power',
+      stake: 'stake',
+      blocksProposed: 'blocks_proposed',
+    };
+    const key = keyBySort[sortBy] || 'liquidity_power';
+    return [...validators].sort((left, right) => {
+      const delta = Number(left[key] || 0) - Number(right[key] || 0);
+      return sortOrder === 'asc' ? delta : -delta;
+    });
+  }, [sortBy, sortOrder, validators]);
+
+  const totalStake = validators.reduce((sum, validator) => sum + Number(validator.stake || 0), 0);
+  const totalPower = validators.reduce((sum, validator) => sum + Number(validator.liquidity_power || 0), 0);
+  const healthy = validators.filter((validator) => Number(validator.penalty_score || 0) < 1).length;
+
   if (loading) return <div className="loading">Loading validators...</div>;
 
   return (
-    <div className="validators-page">
-      <h2>Validators</h2>
-      
-      <div className="validators-controls">
-        <div className="sort-options">
-          <span>Sort by: </span>
+    <main className="validators-page premium-route-page">
+      <ExplorerPageHero
+        eyebrow="Consensus operators"
+        title="Validator power, made accountable."
+        description="Compare hybrid liquidity power, native stake, block participation and penalty posture across the active validator set."
+        metaLabel="Consensus view"
+        metaValue="Deterministic validator index"
+      />
+
+      <MetricStrip items={[
+        { label: 'Validator set', value: validators.length.toLocaleString(), note: 'indexed operators' },
+        { label: 'Aggregate stake', value: totalStake.toLocaleString(undefined, { maximumFractionDigits: 2 }), note: 'LQD bonded' },
+        { label: 'Hybrid power', value: totalPower.toLocaleString(undefined, { maximumFractionDigits: 2 }), note: 'network total' },
+        { label: 'Healthy records', value: `${healthy}/${validators.length}`, note: 'below penalty threshold' },
+      ]} />
+
+      <DataSurface
+        title="Validator registry"
+        description="Rank and inspect the operators securing PoDL consensus."
+        action={<div className="validators-controls"><div className="sort-options"><span>Sort</span>
           <button 
             className={sortBy === 'liquidityPower' ? 'active' : ''}
             onClick={() => handleSort('liquidityPower')}
@@ -69,11 +101,11 @@ const ValidatorsPage = () => {
           >
             Blocks Proposed {sortBy === 'blocksProposed' && (sortOrder === 'asc' ? '↑' : '↓')}
           </button>
-        </div>
-      </div>
-
-      <ValidatorList validators={validators} />
-    </div>
+        </div></div>}
+      >
+        <ValidatorList validators={sortedValidators} premium />
+      </DataSurface>
+    </main>
   );
 };
 

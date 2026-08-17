@@ -1,4 +1,5 @@
 import React, { useCallback, useState, useEffect } from 'react';
+import { ExplorerPageHero, MetricStrip } from '../components/ExplorerPage';
 import { fetchJSON, API_BASE } from '../utils/api';
 
 const BridgePage = () => {
@@ -191,9 +192,22 @@ const BridgePage = () => {
   };
 
   return (
-    <div className="page">
-      <h2>Bridge (LQD ↔ BSC Testnet)</h2>
-      <div className="card">
+    <main className="bridge-page premium-route-page">
+      <ExplorerPageHero
+        eyebrow="Cross-chain operations"
+        title="Move value across verified network boundaries."
+        description="Operate public or private testnet bridge flows, inspect token mappings and trace every cross-chain request."
+        metaLabel="Connected networks"
+        metaValue="PoDL ↔ BSC testnet"
+      />
+      <MetricStrip items={[
+        { label: 'Bridge mode', value: bridgeMode, note: 'active execution path' },
+        { label: 'Token mappings', value: tokenMappings.length.toLocaleString(), note: 'registered assets' },
+        { label: 'Visible requests', value: requests.length.toLocaleString(), note: 'filtered operations' },
+        { label: 'Environment', value: 'Testnet', note: 'experimental software' },
+      ]} />
+      <div className="bridge-workbench">
+      <div className="card bridge-mode-card">
         <h3>Bridge Mode</h3>
         <div className="template-wrap">
           <button className={bridgeMode === 'public' ? 'chip active' : 'chip'} onClick={() => setBridgeMode('public')}>Public</button>
@@ -201,7 +215,7 @@ const BridgePage = () => {
         </div>
         <div className="notice">Current mode: {bridgeMode}</div>
       </div>
-      <div className="card">
+      <div className="card bridge-action-card">
         <h3>Lock BEP20 on BSC → Mint on LQD</h3>
         <div className="form-row">
           <label>BSC Token</label>
@@ -234,7 +248,7 @@ const BridgePage = () => {
         {bscStatus && <div className="notice">{bscStatus}</div>}
       </div>
 
-      <div className="card">
+      <div className="card bridge-action-card">
         <h3>Burn LQD Token → Release on BSC</h3>
         <div className="form-row">
           <label>LQD Token Contract</label>
@@ -268,7 +282,7 @@ const BridgePage = () => {
         {lqdStatus && <div className="notice">{lqdStatus}</div>}
       </div>
 
-      <div className="card">
+      <div className="card bridge-action-card">
         <h3>Lock LQD → Mint on BSC</h3>
         <div className="form-row">
           <label>From (LQD address)</label>
@@ -295,7 +309,7 @@ const BridgePage = () => {
         {status && <div className="notice">{status}</div>}
       </div>
 
-      <div className="card">
+      <div className="card bridge-request-card">
         <h3>Bridge Requests</h3>
         <button className="btn-secondary" onClick={loadRequests}>Refresh</button>
         <table className="table">
@@ -332,7 +346,7 @@ const BridgePage = () => {
         </table>
       </div>
 
-      <div className="card">
+      <div className="card bridge-action-card">
         <h3>Burn on BSC → Unlock on LQD</h3>
         <div className="form-row">
           <label>BSC Private Key</label>
@@ -350,7 +364,8 @@ const BridgePage = () => {
         <button className="btn-primary" onClick={submitBurn}>Burn on BSC</button>
         {burnStatus && <div className="notice">{burnStatus}</div>}
       </div>
-    </div>
+      </div>
+    </main>
   );
 };
 

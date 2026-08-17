@@ -1,6 +1,7 @@
 /* global BigInt */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ExplorerPageHero } from '../components/ExplorerPage';
 import { CHAIN_BASE, fetchJSON, firstNodeResult, mergeArrayResults } from '../utils/api';
 import { buildSignedClaimPayload, connectExtensionWallet, shortWalletAddress } from '../utils/claimWallet';
 import { formatLQD } from '../utils/lqdUnits';
@@ -197,17 +198,13 @@ export default function RewardsPage() {
 
   return (
     <div className="rewards-page">
-      <div className="tracker-header reward-hero">
-        <p className="section-title">Rewards Analytics</p>
-        <h2 className="page-title">
-          Reward Center
-          {latest?.block_number && <span>latest block #{latest.block_number}</span>}
-        </h2>
-        <p>
-          Validator, LP, and participant rewards are separated here so users can
-          understand who earned what and why.
-        </p>
-      </div>
+      <ExplorerPageHero
+        eyebrow="Reward accounting"
+        title="Every reward bucket, fully separated."
+        description="Trace validator, liquidity-provider, participant and treasury rewards so every allocation remains explainable."
+        metaLabel="Latest reward block"
+        metaValue={latest?.block_number ? `#${latest.block_number}` : 'Waiting for data'}
+      />
 
       {error && <div className="error">{error}</div>}
 
