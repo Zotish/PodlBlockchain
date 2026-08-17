@@ -14,6 +14,19 @@ RESTORE_ON_FAIL="${RESTORE_ON_FAIL:-false}"
 RUN_LIVE_E2E_SMOKE="${RUN_LIVE_E2E_SMOKE:-false}"
 IMAGE_NAME="${LQD_IMAGE:-podl-blockchain:local}"
 ROLLBACK_IMAGE="${IMAGE_NAME}-rollback"
+SIGNER_ENABLED="${ENABLE_VALIDATOR_SIGNER:-}"
+
+if [ -z "$SIGNER_ENABLED" ] && [ -f "$PODL_ROOT/.env" ]; then
+  SIGNER_ENABLED="$(sed -n 's/^ENABLE_VALIDATOR_SIGNER=//p' "$PODL_ROOT/.env" | tail -1 | tr '[:upper:]' '[:lower:]')"
+fi
+
+compose_run() {
+  if [ "$SIGNER_ENABLED" = "true" ]; then
+    $COMPOSE --profile signer "$@"
+  else
+    $COMPOSE "$@"
+  fi
+}
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
@@ -47,7 +60,7 @@ rollback_deploy() {
   if [ "$RESTORE_ON_FAIL" = "true" ]; then
     PODL_ROOT="$PODL_ROOT" sh "$SCRIPT_DIR/podl_restore.sh" "$backup_file" || true
   elif [ -n "$previous_image" ]; then
-    $COMPOSE up -d --force-recreate --remove-orphans >/dev/null 2>&1 || true
+    compose_run up -d --force-recreate --remove-orphans >/dev/null 2>&1 || true
   fi
   exit 1
 }
@@ -64,23 +77,42 @@ cd "$PODL_ROOT"
 if ! docker build -t "$IMAGE_NAME" "$APP_ROOT" >/dev/null; then
   rollback_deploy "image build failed"
 fi
-if ! $COMPOSE up -d --no-deps dex-api wallet aggregator >/dev/null; then
+if [ "$SIGNER_ENABLED" = "true" ]; then
+  if ! compose_run up -d --no-deps signer >/dev/null; then
+    rollback_deploy "validator signer failed to start"
+  fi
+  signer_ready=false
+  signer_attempt=1
+  while [ "$signer_attempt" -le 30 ]; do
+    signer_container="$(compose_run ps -q signer 2>/dev/null || true)"
+    if [ -n "$signer_container" ] && [ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$signer_container" 2>/dev/null || true)" = "healthy" ]; then
+      signer_ready=true
+      break
+    fi
+    sleep 2
+    signer_attempt=$((signer_attempt + 1))
+  done
+  if [ "$signer_ready" != "true" ]; then
+    rollback_deploy "validator signer health did not recover"
+  fi
+fi
+if ! compose_run up -d --no-deps dex-api wallet aggregator >/dev/null; then
   rollback_deploy "supporting services failed to start"
 fi
-if ! $COMPOSE up -d --no-deps chain >/dev/null; then
+if ! compose_run up -d --no-deps chain >/dev/null; then
   rollback_deploy "chain failed to start"
 fi
-if ! $COMPOSE up -d --remove-orphans >/dev/null; then
+if ! compose_run up -d --remove-orphans >/dev/null; then
   rollback_deploy "stack reconciliation failed"
 fi
 
 enable_caddy="$(sed -n 's/^ENABLE_CADDY=//p' "$PODL_ROOT/.env" | tail -1 | tr '[:upper:]' '[:lower:]')"
 if [ "$enable_caddy" = "true" ]; then
-  if ! $COMPOSE --profile proxy up -d caddy >/dev/null; then
+  if ! compose_run --profile proxy up -d caddy >/dev/null; then
     rollback_deploy "Caddy failed to start"
   fi
 else
-  $COMPOSE rm -sf caddy >/dev/null 2>&1 || true
+  compose_run rm -sf caddy >/dev/null 2>&1 || true
 fi
 
 ready=false

@@ -31,8 +31,31 @@ if [ -n "${REMOTE_NODE:-}" ]; then
   set -- "$@" -remote_node "$REMOTE_NODE"
 fi
 
-if [ -n "${VALIDATOR_PRIVATE_KEY:-}" ]; then
+if [ -z "${LQD_VALIDATOR_SIGNER_URL:-}" ] && [ -z "${LQD_VALIDATOR_KEY_FILE:-}" ] && [ -n "${VALIDATOR_PRIVATE_KEY:-}" ]; then
   set -- "$@" -validator_private_key "$VALIDATOR_PRIVATE_KEY"
+fi
+
+if [ -n "${LQD_VALIDATOR_VRF_PRIVATE_KEY:-}" ]; then
+  set -- "$@" -validator_vrf_private_key "$LQD_VALIDATOR_VRF_PRIVATE_KEY"
+fi
+
+if [ -n "${LQD_VALIDATOR_KEY_FILE:-}" ]; then
+  set -- "$@" -validator_key_file "$LQD_VALIDATOR_KEY_FILE"
+fi
+
+if [ -n "${LQD_VALIDATOR_SIGNER_URL:-}" ]; then
+  set -- "$@" \
+    -validator_signer_url "$LQD_VALIDATOR_SIGNER_URL" \
+    -validator_signer_ca "${LQD_VALIDATOR_SIGNER_CA:?LQD_VALIDATOR_SIGNER_CA is required}" \
+    -validator_signer_cert "${LQD_VALIDATOR_SIGNER_CERT:?LQD_VALIDATOR_SIGNER_CERT is required}" \
+    -validator_signer_key "${LQD_VALIDATOR_SIGNER_KEY:?LQD_VALIDATOR_SIGNER_KEY is required}"
+  if [ -n "${LQD_VALIDATOR_SIGNER_NAME:-}" ]; then
+    set -- "$@" -validator_signer_name "$LQD_VALIDATOR_SIGNER_NAME"
+  fi
+fi
+
+if [ -n "${LQD_VALIDATOR_SLASHING_DB:-}" ]; then
+  set -- "$@" -validator_slashing_db "$LQD_VALIDATOR_SLASHING_DB"
 fi
 
 DEX_ADDRESS_TO_USE="${DEX_ADDRESS:-${VALIDATOR_DEX_ADDRESS:-}}"

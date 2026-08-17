@@ -1,6 +1,7 @@
 package blockchaincomponent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -61,9 +62,8 @@ func (bc *Blockchain_struct) SignInvestorEvidenceReport(reportedAt int64) (Inves
 	if bc == nil || bc.Network == nil || reportedAt <= 0 {
 		return InvestorEvidenceReport{}, fmt.Errorf("validator signing identity and timestamp required")
 	}
-	signer, privateKeyHex := bc.Network.ValidatorIdentitySnapshot()
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
-	if err != nil || !strings.EqualFold(crypto.PubkeyToAddress(key.PublicKey).Hex(), signer) {
+	signer, validatorSigner := bc.Network.ValidatorSignerSnapshot()
+	if validatorSigner == nil || !strings.EqualFold(validatorSigner.Address(), signer) {
 		return InvestorEvidenceReport{}, fmt.Errorf("validator signing identity mismatch")
 	}
 	height := bc.LatestBlockNumber()
@@ -83,12 +83,12 @@ func (bc *Blockchain_struct) SignInvestorEvidenceReport(reportedAt int64) (Inves
 	if err != nil {
 		return InvestorEvidenceReport{}, err
 	}
-	signature, err := crypto.Sign(accounts.TextHash(raw), key)
+	signature, err := validatorSigner.SignMessage(context.Background(), SignerDomainInvestorEvidence, raw, "")
 	if err != nil {
 		return InvestorEvidenceReport{}, err
 	}
 	report.PayloadHash = payloadHash
-	report.Signature = "0x" + hex.EncodeToString(signature)
+	report.Signature = signature
 	report.Verified = VerifyInvestorEvidenceReport(report)
 	if !report.Verified {
 		return InvestorEvidenceReport{}, fmt.Errorf("self-verification of investor evidence failed")

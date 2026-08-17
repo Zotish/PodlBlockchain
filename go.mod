@@ -7,6 +7,7 @@ require (
 	github.com/consensys/gnark-crypto v0.19.0
 	github.com/ethereum/go-ethereum v1.16.8
 	github.com/gorilla/mux v1.8.1
+	github.com/miekg/pkcs11 v1.1.1
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7
 	github.com/tyler-smith/go-bip32 v1.0.0
 	github.com/tyler-smith/go-bip39 v1.1.0

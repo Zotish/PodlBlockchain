@@ -1643,6 +1643,13 @@ func (bc *Blockchain_struct) VerifySingleBlock(block *Block) bool {
 	if block.ProposerProof == nil || !bc.VerifyProposerCertificate(*block.ProposerProof) || !strings.EqualFold(block.ProposerProof.Proposer, block.RewardBreakdown.Validator) {
 		return false
 	}
+	if block.NextVRFProof == nil {
+		if !bc.ChainSpec.AllowLegacyFinality {
+			return false
+		}
+	} else if !bc.VerifyBlockVRFContribution(block) {
+		return false
+	}
 
 	expectedBaseFee := bc.CalculateBaseFee()
 	if block.BaseFee != expectedBaseFee {

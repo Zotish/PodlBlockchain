@@ -2,6 +2,7 @@ package blockchaincomponent
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -65,6 +66,7 @@ type NetworkService struct {
 	HTTPPort            int                `json:"-"`
 	ValidatorAddress    string             `json:"-"`
 	ValidatorPrivateKey string             `json:"-"`
+	ValidatorSigner     ValidatorSigner    `json:"-"`
 	Mutex               sync.Mutex         `json:"-"`
 	PeerEvents          chan PeerEvent     `json:"-"`
 	Wg                  sync.WaitGroup     `json:"-"`
@@ -162,10 +164,50 @@ func recordPeerFailure(peer *Peer, reason string) {
 }
 
 func (ns *NetworkService) SetValidatorIdentity(address, privateKey string) {
+	address = strings.TrimSpace(address)
+	privateKey = strings.TrimSpace(privateKey)
+	var signer ValidatorSigner
+	if privateKey != "" {
+		local, err := NewLocalValidatorSigner(privateKey, "", "")
+		if err != nil {
+			log.Printf("validator signer configuration rejected: %v", err)
+		} else if address != "" && !strings.EqualFold(address, local.Address()) {
+			log.Printf("validator signer configuration rejected: key does not match %s", address)
+			_ = local.Close()
+		} else {
+			signer = local
+			address = local.Address()
+		}
+	}
 	ns.Mutex.Lock()
 	defer ns.Mutex.Unlock()
-	ns.ValidatorAddress = strings.TrimSpace(address)
-	ns.ValidatorPrivateKey = strings.TrimSpace(privateKey)
+	ns.ValidatorAddress = address
+	// Private keys are no longer retained by NetworkService. This field remains
+	// for state/ABI compatibility and is deliberately cleared.
+	ns.ValidatorPrivateKey = ""
+	ns.ValidatorSigner = signer
+}
+
+func (ns *NetworkService) SetValidatorSigner(address string, signer ValidatorSigner) error {
+	if ns == nil || signer == nil || !ValidateAddress(signer.Address()) {
+		return fmt.Errorf("healthy validator signer required")
+	}
+	if strings.TrimSpace(address) != "" && !strings.EqualFold(address, signer.Address()) {
+		return fmt.Errorf("validator signer address %s does not match configured address %s", signer.Address(), address)
+	}
+	status := signer.Status(context.Background())
+	if !status.Healthy {
+		return fmt.Errorf("validator signer is unhealthy: %s", status.Detail)
+	}
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+	if ns.ValidatorSigner != nil && ns.ValidatorSigner != signer {
+		_ = ns.ValidatorSigner.Close()
+	}
+	ns.ValidatorAddress = strings.ToLower(signer.Address())
+	ns.ValidatorPrivateKey = ""
+	ns.ValidatorSigner = signer
+	return nil
 }
 
 func (ns *NetworkService) ValidatorIdentitySnapshot() (string, string) {
@@ -175,6 +217,15 @@ func (ns *NetworkService) ValidatorIdentitySnapshot() (string, string) {
 	ns.Mutex.Lock()
 	defer ns.Mutex.Unlock()
 	return strings.TrimSpace(ns.ValidatorAddress), strings.TrimSpace(ns.ValidatorPrivateKey)
+}
+
+func (ns *NetworkService) ValidatorSignerSnapshot() (string, ValidatorSigner) {
+	if ns == nil {
+		return "", nil
+	}
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+	return strings.TrimSpace(ns.ValidatorAddress), ns.ValidatorSigner
 }
 
 func (ns *NetworkService) syncWithPeer(peer *Peer, ourHeight int) error {
@@ -357,17 +408,14 @@ func (ns *NetworkService) buildVersionPayload() map[string]interface{} {
 		"chain_spec_hash": ns.Blockchain.ChainSpec.Hash(),
 	}
 
-	ns.Mutex.Lock()
-	validatorAddress := strings.TrimSpace(ns.ValidatorAddress)
-	privateKey := strings.TrimSpace(ns.ValidatorPrivateKey)
-	ns.Mutex.Unlock()
+	validatorAddress, signer := ns.ValidatorSignerSnapshot()
 
 	if validatorAddress != "" {
 		message := validatorHandshakeMessage(validatorAddress, toIntPort(ns.ListenPort), ns.HTTPPort, now)
 		payload["validator_address"] = validatorAddress
 		payload["validator_message"] = message
-		if privateKey != "" {
-			signature, err := signValidatorHandshake(privateKey, message)
+		if signer != nil {
+			signature, err := signer.SignMessage(context.Background(), SignerDomainP2PHandshake, []byte(message), "")
 			if err != nil {
 				log.Printf("validator handshake signing failed: %v", err)
 			} else {

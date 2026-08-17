@@ -1,13 +1,15 @@
 package blockchaincomponent
 
 import (
-	"fmt"
 	"math/big"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 func buildReplayFixture(t *testing.T) (*Blockchain_struct, *Block) {
@@ -73,13 +75,33 @@ func TestIncomingBlockReplayRejectsForgedStateRootAndReward(t *testing.T) {
 }
 
 func TestLocalProposalDoesNotCommitSpeculativeStateBeforeQC(t *testing.T) {
-	bc := newTestBlockchain()
-	for i := 1; i <= 4; i++ {
-		bc.Validators = append(bc.Validators, &Validator{Address: fmt.Sprintf("0x%040x", i), NativeBond: 1e12, LPStakeAmount: 1e12, LockTime: time.Now().Add(time.Hour)})
-	}
-	bc.EnsureRuntimeState()
+	bc, keys := consensusFixture(t, 4)
 	bc.ChainSpec.AllowLegacyFinality = false
-	bc.PrepareValidatorSetTransition(1)
+	proposer, err := bc.SelectBlockProposer(1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposerKey string
+	for _, keyHex := range keys {
+		key, keyErr := crypto.HexToECDSA(keyHex)
+		if keyErr == nil && strings.EqualFold(crypto.PubkeyToAddress(key.PublicKey).Hex(), proposer.Address) {
+			proposerKey = keyHex
+			break
+		}
+	}
+	if proposerKey == "" {
+		t.Fatal("selected proposer key missing")
+	}
+	signer, err := NewLocalValidatorSigner(proposerKey, testP256VRFSecret, filepath.Join(t.TempDir(), "slashing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signer.Close()
+	bc.Network = NewNetworkService(bc)
+	if err := bc.Network.SetValidatorSigner(proposer.Address, signer); err != nil {
+		t.Fatal(err)
+	}
+	bc.LocalValidator = proposer.Address
 	beforeRoot := bc.ComputeDeterministicStateRootAt(0)
 	beforeEmission := CopyAmount(bc.CumulativeEmission)
 	if block := bc.MineNewBlock(); block != nil {

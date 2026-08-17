@@ -39,6 +39,7 @@ type Block struct {
 	ConsensusRound  uint32               `json:"consensus_round,omitempty"`
 	QuorumHash      string               `json:"quorum_hash,omitempty"`
 	ProposerProof   *ProposerCertificate `json:"proposer_proof,omitempty"`
+	NextVRFProof    *ConsensusVRFProof   `json:"next_vrf_proof,omitempty"`
 }
 
 func NewBlock(blockNumber uint64, prevHash string) Block {
@@ -195,6 +196,18 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	if referenceRoot == "" || referenceRoot != candidate.StateRoot {
 		log.Printf("MineNewBlock: independent reference root mismatch: production=%s reference=%s", candidate.StateRoot, referenceRoot)
 		return nil
+	}
+	// The elected proposer commits a standards-based VRF output for the next
+	// height inside this block. It is generated only after state execution and
+	// before hashing, so every receiver verifies the same canonical commitment.
+	if err := bc.AttachNextProposerVRF(candidate); err != nil {
+		if !bc.ChainSpec.AllowLegacyFinality {
+			log.Printf("MineNewBlock: strict finality requires next-height ECVRF proof: %v", err)
+			return nil
+		}
+		log.Printf("MineNewBlock: optional next-height ECVRF proof unavailable: %v", err)
+	} else {
+		candidate.CurrentHash = CalculateHash(candidate)
 	}
 	transition := captureReplayTransition(candidate.CurrentHash, candidate.StateRoot, shadow, overlay)
 	transition.ReferenceStateRoot = referenceRoot

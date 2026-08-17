@@ -183,7 +183,7 @@ Launch a restricted testnet next:
 - Go-plugin VM sandbox/deterministic gas hardening.
 - External vault/AMM/bridge audits and bug bounty.
 - Distributed bridge security or light-client proofs.
-- Hardware/mobile secure signing and phishing simulation review.
+- Physical-HSM vendor certification, mobile secure signing and phishing simulation review.
 - Real customers, revenue/retention and jurisdiction-specific compliance.
 
 ## Main implementation locations
