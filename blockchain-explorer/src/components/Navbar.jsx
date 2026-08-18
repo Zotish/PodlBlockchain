@@ -45,27 +45,42 @@ const formatHeight = (value) => {
   return Number.isFinite(number) ? number.toLocaleString() : "—";
 };
 
+const formatBlockAge = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds < 0) return "waiting for block time";
+  if (seconds < 60) return `${Math.floor(seconds)}s since finality`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m since finality`;
+  return `${Math.floor(seconds / 3600)}h since finality`;
+};
+
 const Navbar = () => {
   const location = useLocation();
   const [open, setOpen] = useState(false);
-  const [network, setNetwork] = useState({ status: "checking", height: null, baseFee: null });
+  const [network, setNetwork] = useState({ status: "checking", height: null, baseFee: null, blockAge: null });
 
   useEffect(() => {
     let active = true;
 
     const loadNetwork = async () => {
-      const [healthResult, feeResult] = await Promise.allSettled([
+      const [healthResult, feeResult, blockResult] = await Promise.allSettled([
         fetchChainJSON("/health", { cacheTtlMs: 3500, timeoutMs: 6000 }),
         fetchChainJSON("/basefee", { cacheTtlMs: 3500, timeoutMs: 6000 }),
+        fetchChainJSON("/fetch_last_n_block?page=1&size=1", { cacheTtlMs: 3500, timeoutMs: 6000 }),
       ]);
       if (!active) return;
 
       const health = healthResult.status === "fulfilled" ? healthResult.value : null;
       const fee = feeResult.status === "fulfilled" ? feeResult.value : null;
+      const latestBlock = blockResult.status === "fulfilled" ? blockResult.value?.blocks?.[0] : null;
+      const blockTimestamp = Number(latestBlock?.timestamp);
+      const blockAge = Number.isFinite(blockTimestamp)
+        ? Math.max(0, Math.floor(Date.now() / 1000) - blockTimestamp)
+        : null;
+      const finalityLive = Number.isFinite(blockAge) && blockAge <= 90;
       setNetwork({
-        status: health?.status === "ok" ? "live" : "degraded",
+        status: health?.status === "ok" && finalityLive ? "live" : "degraded",
         height: health?.height ?? null,
         baseFee: fee?.base_fee ?? null,
+        blockAge,
       });
     };
 
@@ -89,10 +104,11 @@ const Navbar = () => {
           <div className="ribbon-status">
             <span className={`live-indicator ${network.status}`} aria-hidden="true" />
             <span>PoDL public testnet</span>
-            <strong>{network.status === "live" ? "Operational" : "Connecting"}</strong>
+            <strong>{network.status === "live" ? "Operational" : "Block production stalled"}</strong>
           </div>
           <div className="ribbon-metrics">
             <span>Height <strong>#{formatHeight(network.height)}</strong></span>
+            <span className="ribbon-finality">Finality <strong>{formatBlockAge(network.blockAge)}</strong></span>
             <span>Base fee <strong>{network.baseFee ?? "—"}</strong></span>
             <span>Protocol <strong>PoDL v2</strong></span>
           </div>

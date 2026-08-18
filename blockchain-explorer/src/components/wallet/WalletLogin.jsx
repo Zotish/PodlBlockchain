@@ -184,7 +184,7 @@ const WalletLogin = ({ onWalletCreate, onWalletImport }) => {
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                placeholder="10+ characters with mixed character types"
+                placeholder="At least 10 characters"
                 autoComplete="new-password"
               />
               <button type="button" onClick={() => setShowPassword((visible) => !visible)}>

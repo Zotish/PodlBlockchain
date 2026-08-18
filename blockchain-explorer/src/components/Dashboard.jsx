@@ -187,6 +187,10 @@ const Dashboard = () => {
 
   const readinessScore = Number(data.readiness?.completion_score_percent);
   const latestBlock = data.blocks[0] || null;
+  const latestBlockAge = latestBlock?.timestamp
+    ? Math.max(0, Math.floor(Date.now() / 1000) - Number(latestBlock.timestamp))
+    : Number.POSITIVE_INFINITY;
+  const finalityLive = data.health?.status === "ok" && latestBlockAge <= 90;
   const chainHeight = data.health?.height ?? data.readiness?.height ?? latestBlock?.block_number;
   const protocolVersion = latestBlock?.protocol_version ?? "—";
   const bftObserved = securityChecks.find((check) => check.name === "signed_bft_finality_observed")?.ok;
@@ -240,8 +244,8 @@ const Dashboard = () => {
       <section className="intelligence-hero">
         <div className="hero-copy">
           <div className="hero-eyebrow">
-            <span className="live-indicator live" />
-            Live public network intelligence
+            <span className={`live-indicator ${finalityLive ? "live" : "degraded"}`} />
+            {finalityLive ? "Live public network intelligence" : "Public network finality alert"}
           </div>
           <h1>Every PoDL block.<br />One transparent view.</h1>
           <p>
@@ -310,6 +314,11 @@ const Dashboard = () => {
         </aside>
       </section>
 
+      {!finalityLive && latestBlock && (
+        <div className="premium-alert critical" role="alert">
+          Block production is delayed: the latest finalized block is {timeAgo(latestBlock.timestamp)}. Node HTTP availability is not treated as consensus health.
+        </div>
+      )}
       {error && <div className="premium-alert" role="status">{error}</div>}
 
       <section className="network-stat-grid" aria-label="Live network metrics">
@@ -459,7 +468,7 @@ const Dashboard = () => {
       </section>
 
       <div className="dashboard-refresh-note">
-        <span className={`live-indicator ${data.health?.status === "ok" ? "live" : "degraded"}`} />
+        <span className={`live-indicator ${finalityLive ? "live" : "degraded"}`} />
         Public data refreshes every 7 seconds
         {lastUpdated && <time dateTime={lastUpdated.toISOString()}> · updated {lastUpdated.toLocaleTimeString()}</time>}
       </div>

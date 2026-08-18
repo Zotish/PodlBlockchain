@@ -87,6 +87,62 @@ func TestSetCORSHeadersAllowsWildcardEnvOrigin(t *testing.T) {
 	}
 }
 
+func TestHealthCheckReportsFinalityStallInsteadOfFalseOperational(t *testing.T) {
+	now := uint64(time.Now().Unix())
+	bc := &blockchaincomponent.Blockchain_struct{
+		Blocks: []*blockchaincomponent.Block{{
+			BlockNumber: 42,
+			CurrentHash: "0xstalled",
+			TimeStamp:   now - 600,
+		}},
+		ChainSpec: blockchaincomponent.ChainSpec{BlockTimeMS: 2000},
+	}
+	server := NewBlockchainServer(6500, bc)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+
+	server.HealthCheck(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected health endpoint to remain observable, got %d", rr.Code)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("health response is not JSON: %v", err)
+	}
+	if body["status"] != "stalled" {
+		t.Fatalf("expected stalled finality status, got %#v", body)
+	}
+	if lag, _ := body["finality_lag_seconds"].(float64); lag < 590 {
+		t.Fatalf("expected finality lag evidence, got %#v", body)
+	}
+}
+
+func TestHealthCheckReportsFreshFinalityAsOperational(t *testing.T) {
+	now := uint64(time.Now().Unix())
+	bc := &blockchaincomponent.Blockchain_struct{
+		Blocks: []*blockchaincomponent.Block{{
+			BlockNumber: 43,
+			CurrentHash: "0xfresh",
+			TimeStamp:   now - 2,
+		}},
+		ChainSpec: blockchaincomponent.ChainSpec{BlockTimeMS: 2000},
+	}
+	server := NewBlockchainServer(6500, bc)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+
+	server.HealthCheck(rr, req)
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("health response is not JSON: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Fatalf("expected fresh finality to be operational, got %#v", body)
+	}
+}
+
 func TestGetAccountNonceReportsConfirmedAndPending(t *testing.T) {
 	addr := "0x1111111111111111111111111111111111111111"
 	bc := &blockchaincomponent.Blockchain_struct{

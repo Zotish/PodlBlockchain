@@ -14,6 +14,11 @@ RUN go mod download
 
 COPY . .
 
+RUN test -x scripts/railway/start-chain.sh \
+  && test -x scripts/railway/start-signer.sh \
+  && test -x scripts/railway/start-wallet.sh \
+  && test -x scripts/railway/start-aggregator.sh
+
 RUN sh scripts/railway/build.sh
 
 EXPOSE 6500 6100 8080 9000

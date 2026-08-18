@@ -12,6 +12,7 @@ COMPOSE="${COMPOSE:-docker compose}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-45}"
 RESTORE_ON_FAIL="${RESTORE_ON_FAIL:-false}"
 RUN_LIVE_E2E_SMOKE="${RUN_LIVE_E2E_SMOKE:-false}"
+VERIFY_HEIGHT_ADVANCE="${VERIFY_HEIGHT_ADVANCE:-true}"
 IMAGE_NAME="${LQD_IMAGE:-podl-blockchain:local}"
 ROLLBACK_IMAGE="${IMAGE_NAME}-rollback"
 SIGNER_ENABLED="${ENABLE_VALIDATOR_SIGNER:-}"
@@ -77,6 +78,13 @@ cd "$PODL_ROOT"
 if ! docker build -t "$IMAGE_NAME" "$APP_ROOT" >/dev/null; then
   rollback_deploy "image build failed"
 fi
+required_scripts="/app/scripts/railway/start-chain.sh"
+if [ "$SIGNER_ENABLED" = "true" ]; then
+  required_scripts="$required_scripts /app/scripts/railway/start-signer.sh"
+fi
+if ! docker run --rm --entrypoint sh "$IMAGE_NAME" -c "for file in $required_scripts; do test -x \"\$file\" || exit 1; done"; then
+  rollback_deploy "runtime image is missing an executable chain/signer startup script"
+fi
 if [ "$SIGNER_ENABLED" = "true" ]; then
   if ! compose_run up -d --no-deps signer >/dev/null; then
     rollback_deploy "validator signer failed to start"
@@ -136,6 +144,19 @@ fi
 post_height="$(must_height)"
 if [ "$post_height" -lt "$pre_height" ]; then
   rollback_deploy "chain height regressed from $pre_height to $post_height"
+fi
+mining_enabled="$(sed -n 's/^MINING_ENABLED=//p' "$PODL_ROOT/.env" | tail -1 | tr '[:upper:]' '[:lower:]')"
+if [ -z "$mining_enabled" ]; then mining_enabled=true; fi
+if [ "$VERIFY_HEIGHT_ADVANCE" = "true" ] && [ "$mining_enabled" = "true" ]; then
+  advance_attempt=1
+  while [ "$advance_attempt" -le 15 ] && [ "$post_height" -le "$pre_height" ]; do
+    sleep 2
+    post_height="$(must_height)"
+    advance_attempt=$((advance_attempt + 1))
+  done
+  if [ "$post_height" -le "$pre_height" ]; then
+    rollback_deploy "chain process is healthy but finality did not advance beyond $pre_height"
+  fi
 fi
 
 readiness="$(curl -fsS "$CHAIN_URL/readiness/mainnet" 2>/dev/null || true)"

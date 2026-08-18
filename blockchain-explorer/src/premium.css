@@ -816,8 +816,8 @@ select:focus-visible {
 .premium-field small { color: #576a83; font-size: .58rem; font-weight: 450; }
 
 .secret-field { display: flex; align-items: center; position: relative; }
-.secret-field input { padding-right: 55px; }
-.secret-field button { position: absolute; right: 8px; min-height: 28px; padding: 0 7px; border: 0; background: transparent; color: #7187a4; font-size: .59rem; cursor: pointer; }
+.secret-field input { padding-right: 72px; }
+.secret-field button { position: absolute; right: 7px; min-width: 52px; min-height: 36px; padding: 0 8px; border: 0; border-radius: 6px; background: #060e1b; color: #7187a4; font-size: .59rem; cursor: pointer; }
 
 .password-meter { display: grid; gap: 7px; }
 .password-meter > div { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
@@ -1594,4 +1594,280 @@ select:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+/* Production typography and information-density pass.
+   Manrope carries product headings; Inter remains the highly legible UI face;
+   IBM Plex Mono is reserved for chain identifiers and numeric evidence. */
+body {
+  color: #eef4fd;
+  font-size: 15px;
+  line-height: 1.55;
+  letter-spacing: -0.006em;
+}
+
+h1, h2, h3, h4,
+.premium-brand-copy strong,
+.network-stat.premium-stat > strong,
+.pulse-height strong,
+.explorer-metric-strip strong,
+.reward-metric-card strong,
+.wallet-trust-panel > h1,
+.wallet-header-copy h1,
+.premium-wallet-content .balance-amount {
+  font-family: var(--font-display);
+}
+
+.network-ribbon { min-height: 38px; }
+.network-ribbon-inner {
+  min-height: 38px;
+  font-size: .78rem;
+  letter-spacing: 0;
+}
+.ribbon-status strong { font-weight: 700; }
+.ribbon-status:has(.live-indicator.degraded) strong { color: var(--premium-red); }
+.ribbon-finality strong { font-family: var(--font-mono); font-size: .75rem; }
+.premium-navbar { height: 78px; }
+.premium-brand-copy strong { font-size: 1.13rem; font-weight: 800; letter-spacing: -.015em; }
+.premium-brand-copy small { font-size: .69rem; letter-spacing: .11em; }
+.premium-nav-links > a,
+.explore-trigger { min-height: 42px; padding-inline: 14px; font-size: .9rem; font-weight: 600; }
+.explore-panel section > p { font-size: .72rem; }
+.explore-panel section a { gap: 4px; padding: 12px; }
+.explore-panel section a strong { font-size: .88rem; }
+.explore-panel section a small { font-size: .78rem; line-height: 1.45; }
+
+.hero-eyebrow,
+.explorer-page-eyebrow { font-size: .78rem; }
+.hero-copy h1,
+.explorer-page-copy h1 { font-family: var(--font-display); font-weight: 700; letter-spacing: -.052em; }
+.hero-copy > p,
+.explorer-page-copy > p { color: #9aabc1; font-size: 1rem; line-height: 1.7; }
+.premium-search input { font-size: .94rem; }
+.premium-search button,
+.wallet-primary-action { font-size: .88rem; }
+.hero-evidence-row { font-size: .78rem; }
+.pulse-card-header span,
+.pulse-height span { font-size: .76rem; }
+.pulse-card-header strong { font-size: .88rem; }
+.pulse-height small,
+.pulse-footer { font-size: .74rem; }
+.network-stat.premium-stat > strong { font-size: 1.52rem; font-weight: 700; }
+.network-stat.premium-stat p { font-size: .78rem; line-height: 1.45; }
+.premium-stat-topline span,
+.premium-stat-topline small,
+.panel-kicker { font-size: .72rem; }
+.panel-heading h2 { font-size: 1.1rem; }
+.panel-heading > a,
+.panel-footer-link { font-size: .78rem; }
+
+.explorer-page-hero { min-height: 330px; }
+.explorer-page-copy h1 { margin-block: 20px 16px; font-size: clamp(2.75rem, 4.4vw, 4.35rem); line-height: 1.01; }
+.explorer-page-signal { padding: 42px; }
+.explorer-page-signal small { font-size: .72rem; }
+.explorer-page-signal strong { font-size: .94rem; line-height: 1.4; }
+.page-signal-live { font-size: .75rem; }
+
+.explorer-metric-strip article { min-height: 126px; padding: 24px 28px; }
+.explorer-metric-strip span { font-size: .72rem; letter-spacing: .08em; }
+.explorer-metric-strip strong { margin-top: 9px; font-size: 1.38rem; font-weight: 700; }
+.explorer-metric-strip small { margin-top: 6px; color: #6b809c; font-size: .75rem; }
+.explorer-surface-head { min-height: 100px; padding: 24px 28px; }
+.explorer-surface-head h2 { font-family: var(--font-display); font-size: 1.18rem; font-weight: 700; }
+.explorer-surface-head p { margin-top: 7px; font-size: .84rem; line-height: 1.5; }
+.premium-pagination { min-height: 68px; padding-inline: 24px; }
+.premium-pagination p,
+.premium-pagination button { font-size: .78rem; }
+.premium-pagination button { min-width: 36px; min-height: 36px; }
+.premium-ledger-table th,
+.explorer-data-surface .table th,
+.explorer-data-surface .tracker-table th { height: 50px; font-size: .7rem; letter-spacing: .065em; }
+.premium-ledger-table td,
+.explorer-data-surface .table td,
+.explorer-data-surface .tracker-table td { height: 64px; color: #a4b4c8; font-size: .82rem; }
+.transaction-item { min-height: 118px; padding: 22px 26px; }
+.transaction-item .tx-hash { font-size: .82rem; }
+.transaction-item .tx-details { font-size: .76rem; }
+.transaction-item .tx-details strong { font-size: .66rem; }
+
+.sort-options > span { font-size: .7rem; }
+.sort-options button { min-height: 36px; padding-inline: 13px; font-size: .75rem; font-weight: 600; cursor: pointer; }
+.premium-validator-row { min-height: 88px; padding: 15px 24px; }
+.validator-rank { font-size: .7rem; }
+.validator-identity > a { font-size: .8rem; }
+.validator-online,
+.validator-offline { font-size: .72rem; font-weight: 600; }
+.validator-offline { color: #d78a96; }
+.validator-stake span,
+.validator-power span,
+.validator-blocks span,
+.validator-penalty span { font-size: .65rem; }
+.validator-stake strong,
+.validator-power strong,
+.validator-blocks strong,
+.validator-penalty strong { font-size: .76rem; }
+.validator-penalty strong.warning { color: var(--premium-amber); }
+.validator-penalty strong.critical { color: var(--premium-red); }
+.validator-penalty-meter {
+  width: 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(144, 174, 216, .1);
+}
+.validator-penalty-meter i { display: block; height: 100%; border-radius: inherit; background: var(--premium-amber); }
+.validator-penalty strong.critical + .validator-penalty-meter i { background: var(--premium-red); }
+.premium-alert { font-size: .84rem; line-height: 1.5; }
+.premium-alert.critical { border-left-color: var(--premium-red); background: rgba(255,119,137,.08); color: #e6a4af; }
+
+.tracker-info-card span,
+.reward-metric-card span,
+.pool-registry-grid span { font-size: .7rem; }
+.tracker-info-card strong,
+.pool-registry-grid strong { font-size: .9rem; }
+.tracker-info-card code,
+.pool-registry-grid small,
+.reward-metric-card small { font-size: .73rem; }
+.reward-metric-card strong { font-size: 1.25rem; }
+.tracker-warning,
+.investor-detail-grid .explorer-data-surface > p,
+.investor-detail-grid .explorer-data-surface > ul,
+.investor-detail-grid .explorer-data-surface > dl { font-size: .82rem; }
+.bridge-workbench .card h3 { font-family: var(--font-display); font-size: 1.05rem; }
+.bridge-workbench .form-row label { font-size: .78rem; }
+.bridge-workbench input,
+.bridge-workbench select { min-height: 48px; font-size: .88rem; }
+.bridge-workbench .form-row small,
+.bridge-workbench .notice { font-size: .74rem; }
+
+.wallet-onboarding,
+.wallet-unlock-layout { min-height: 760px; }
+.wallet-trust-panel,
+.unlock-visual { padding: clamp(46px, 5vw, 76px); }
+.wallet-access-card,
+.wallet-unlock-card { padding: clamp(42px, 4.2vw, 66px); }
+.wallet-product-badge,
+.wallet-access-heading > span,
+.wallet-network-label { font-size: .72rem; }
+.wallet-trust-panel > h1 { margin-block: 28px 19px; font-size: clamp(3rem, 4.5vw, 4.35rem); font-weight: 700; }
+.wallet-trust-panel > p { font-size: 1rem; line-height: 1.7; }
+.wallet-trust-list > div { min-height: 72px; }
+.wallet-trust-list > div > span { font-size: .72rem; }
+.wallet-trust-list > div > strong { font-size: .86rem; }
+.wallet-trust-list > div > small { font-size: .76rem; }
+.wallet-local-note strong { font-size: .82rem; }
+.wallet-local-note small { font-size: .72rem; }
+.wallet-access-heading h2 { font-family: var(--font-display); font-size: 1.9rem; font-weight: 700; }
+.wallet-access-heading p { font-size: .84rem; line-height: 1.55; }
+.wallet-mode-switch button { min-height: 46px; font-size: .8rem; font-weight: 600; }
+.wallet-method-intro { min-height: 76px; padding: 17px; }
+.method-index { font-size: .72rem; }
+.wallet-method-intro strong { font-size: .84rem; }
+.wallet-method-intro p { font-size: .75rem; line-height: 1.5; }
+.premium-field { gap: 9px; font-size: .82rem; }
+.premium-field input,
+.premium-field textarea,
+.premium-wallet-content .form-group input,
+.premium-wallet-content .form-group textarea,
+.premium-wallet-content select,
+.premium-wallet-content .contract-card > input,
+.premium-wallet-content .contract-card > select,
+.premium-wallet-content .lp-form-group input { min-height: 50px; padding: 12px 14px; font-size: .9rem; }
+.premium-field small,
+.password-meter small { font-size: .72rem; }
+.secret-field button { font-size: .72rem; }
+.wallet-primary-action { min-height: 50px; }
+.wallet-consent-copy,
+.wallet-form-alert,
+.wallet-text-action { font-size: .74rem; }
+
+.wallet-portfolio-header { padding: 34px 38px; }
+.wallet-header-copy h1 { font-size: clamp(2.25rem, 3vw, 3.15rem); font-weight: 700; }
+.wallet-header-copy p { font-size: .9rem; }
+.wallet-account-card { min-width: 370px; min-height: 88px; }
+.wallet-account-card small,
+.wallet-account-card button { font-size: .7rem; }
+.wallet-account-card strong { font-size: .82rem; }
+.wallet-security-strip { min-height: 66px; padding-inline: 20px; }
+.wallet-security-strip strong { font-size: .8rem; }
+.wallet-security-strip small,
+.wallet-header-actions button { font-size: .7rem; }
+.wallet-header-actions button { min-height: 36px; padding-inline: 13px; }
+.wallet-workspace { grid-template-columns: 260px minmax(0, 1fr); gap: 16px; }
+.wallet-sidebar { padding: 17px 12px 13px; }
+.wallet-sidebar-heading { font-size: .68rem; }
+.wallet-sidebar > button { min-height: 64px; padding: 9px 11px; }
+.wallet-sidebar > button > span,
+.wallet-sidebar > button small,
+.wallet-sidebar > button > i { font-size: .68rem; }
+.wallet-sidebar > button strong { font-size: .8rem; }
+.wallet-sidebar-footer span { font-size: .72rem; }
+.wallet-sidebar-footer p { font-size: .68rem; }
+.premium-wallet-content.wallet-content { min-height: 720px; padding: 34px; }
+.wallet-section-heading { min-height: 70px; margin-bottom: 26px; padding-bottom: 20px; }
+.wallet-section-heading span,
+.wallet-section-heading > small { font-size: .7rem; }
+.wallet-section-heading h2 { font-family: var(--font-display); font-size: 1.45rem; font-weight: 700; }
+.premium-wallet-content h3 { font-family: var(--font-display); font-size: 1.15rem; }
+.premium-wallet-content h4 { font-size: .92rem; }
+.premium-wallet-content p,
+.premium-wallet-content li { font-size: .84rem; line-height: 1.65; }
+.premium-wallet-content .balance-card,
+.premium-wallet-content .wallet-info,
+.premium-wallet-content .gas-settings,
+.premium-wallet-content .receive-instructions,
+.premium-wallet-content .contract-card,
+.premium-wallet-content .liquidity-dashboard,
+.premium-wallet-content .lp-card { padding: 27px !important; }
+.premium-wallet-content .balance-item { min-height: 35px; font-size: .8rem; }
+.premium-wallet-content .balance-item span:last-child { font-size: .76rem; }
+.premium-wallet-content .btn-primary,
+.premium-wallet-content .btn-secondary,
+.premium-wallet-content .btn-copy,
+.premium-wallet-content .btn-disconnect { min-height: 42px; padding-inline: 17px; font-size: .78rem; }
+.premium-wallet-content .wallet-tabs .tab,
+.premium-wallet-content .qr-toggle .tab,
+.premium-wallet-content .template-wrap .chip { min-height: 37px; padding-inline: 14px; font-size: .74rem; }
+.premium-wallet-content .form-group label,
+.premium-wallet-content .contract-card > label,
+.premium-wallet-content .lp-form-group label { font-size: .78rem; }
+.premium-wallet-content .address-box code,
+.premium-wallet-content .tx-hash,
+.premium-wallet-content .tx-details,
+.premium-wallet-content .info-item { font-size: .78rem; }
+.premium-wallet-content .tx-status { font-size: .67rem; }
+.premium-wallet-content .warning,
+.premium-wallet-content .error-message,
+.premium-wallet-content .success-message { font-size: .76rem; line-height: 1.55; }
+.premium-wallet-content table th { font-size: .68rem; }
+.premium-wallet-content table td { font-size: .78rem; }
+.wallet-detail-list span { font-size: .74rem; }
+.wallet-detail-list strong { font-size: .72rem; }
+
+@media (max-width: 1180px) {
+  .ribbon-finality { display: none !important; }
+  .premium-nav-links > a,
+  .explore-trigger { padding-inline: 10px; font-size: .82rem; }
+}
+
+@media (max-width: 780px) {
+  .wallet-workspace { grid-template-columns: 1fr; }
+  .premium-wallet-content.wallet-content { padding: 24px 20px; }
+}
+
+@media (max-width: 560px) {
+  body { font-size: 14px; }
+  .explorer-page-copy h1 { font-size: 2.45rem; }
+  .explorer-page-copy > p { font-size: .92rem; }
+  .wallet-access-card,
+  .wallet-unlock-card { padding: 34px 22px; }
+  .wallet-trust-panel,
+  .unlock-visual { padding: 36px 24px; }
+  .wallet-trust-panel > h1 { font-size: 2.65rem; }
+}
+
+@media (max-width: 680px) {
+  .ribbon-metrics > span:not(:first-child) { display: none !important; }
+  .ribbon-status strong { max-width: 128px; font-size: .73rem; line-height: 1.25; }
+  .network-ribbon-inner { gap: 10px; }
 }
