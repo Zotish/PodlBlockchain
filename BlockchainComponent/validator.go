@@ -808,7 +808,7 @@ func (bc *Blockchain_struct) recordValidatorBlockIncluded(address string, timest
 		validator.BlocksIncluded++
 		validator.LastActive = time.Unix(int64(timestamp), 0)
 		validator.MissedRounds = 0
-		if validator.SlashReason == "validator node offline or not synced" {
+		if validator.PenaltyScore <= 0 && validator.SlashReason == "validator node offline or not synced" {
 			validator.SlashReason = ""
 		}
 		return
