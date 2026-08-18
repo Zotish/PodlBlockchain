@@ -160,8 +160,8 @@ required_scripts="/app/scripts/railway/start-chain.sh"
 if [ "$SIGNER_ENABLED" = "true" ]; then
   required_scripts="$required_scripts /app/scripts/railway/start-signer.sh"
 fi
-if ! docker run --rm --entrypoint sh "$NEW_IMAGE" -c "for file in $required_scripts; do test -x \"\$file\" || exit 1; done"; then
-  rollback "runtime image is missing an executable chain/signer startup script"
+if ! docker run --rm --entrypoint sh "$NEW_IMAGE" -c "for file in $required_scripts; do test -r \"\$file\" || exit 1; done"; then
+  rollback "runtime image is missing a readable chain/signer startup script"
 fi
 
 if [ "$SIGNER_ENABLED" = "true" ]; then

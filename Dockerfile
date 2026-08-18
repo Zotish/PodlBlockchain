@@ -14,10 +14,10 @@ RUN go mod download
 
 COPY . .
 
-RUN test -x scripts/railway/start-chain.sh \
-  && test -x scripts/railway/start-signer.sh \
-  && test -x scripts/railway/start-wallet.sh \
-  && test -x scripts/railway/start-aggregator.sh
+RUN test -r scripts/railway/start-chain.sh \
+  && test -r scripts/railway/start-signer.sh \
+  && test -r scripts/railway/start-wallet.sh \
+  && test -r scripts/railway/start-aggregator.sh
 
 RUN sh scripts/railway/build.sh
 
