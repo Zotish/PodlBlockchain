@@ -18,6 +18,10 @@ const (
 	DoubleSigningPenalty    = 0.2
 	PerformancePenaltyScale = 0.05
 	MinPerformanceThreshold = 0.5
+	// CleanUptimePenaltyRecovery is the deterministic liveness-penalty credit
+	// earned by a validator for each successfully finalized block. Safety and
+	// economic slash reasons never recover through this path.
+	CleanUptimePenaltyRecovery = 0.01
 )
 
 type Validator struct {
@@ -809,6 +813,42 @@ func (bc *Blockchain_struct) recordValidatorBlockIncluded(address string, timest
 		}
 		return
 	}
+}
+
+func isRecoverableLivenessPenalty(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	return reason == "inactivity" ||
+		reason == "validator node offline or not synced" ||
+		strings.HasPrefix(reason, "poor performance") ||
+		strings.HasPrefix(reason, "high miss rate")
+}
+
+// applyValidatorCleanUptimeRecovery is a consensus-state transition. It must
+// run on both proposal and replay shadows before the block state root is
+// calculated. A successful finalized block proves the validator is live, so a
+// liveness-only penalty declines gradually. Equivocation, expired locks and
+// other safety/economic penalties require the slashing adjudication path.
+func (bc *Blockchain_struct) applyValidatorCleanUptimeRecovery(address string) bool {
+	if bc == nil || strings.TrimSpace(address) == "" {
+		return false
+	}
+	for _, validator := range bc.Validators {
+		if validator == nil || !strings.EqualFold(validator.Address, address) ||
+			validator.PenaltyScore <= 0 || !isRecoverableLivenessPenalty(validator.SlashReason) {
+			continue
+		}
+		validator.PenaltyScore -= CleanUptimePenaltyRecovery
+		if validator.PenaltyScore < 0.000000001 {
+			validator.PenaltyScore = 0
+			validator.SlashReason = ""
+		}
+		// Producing a signed, finalized block is sufficient evidence to release a
+		// liveness jail. The remaining score still reduces voting/reward power.
+		validator.JailedUntil = time.Time{}
+		validator.MissedRounds = 0
+		return true
+	}
+	return false
 }
 
 func (bc *Blockchain_struct) validatorSelectableOnThisNode(v *Validator, localValidator string) bool {

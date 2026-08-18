@@ -487,6 +487,10 @@ func (bc *Blockchain_struct) mineNewBlockCandidate(candidateOnly bool) *Block {
 
 	newBlock.Transactions = append(newBlock.Transactions, rewardTx)
 	bc.RecordRecentTx(rewardTx)
+	// A signed successful proposal earns deterministic recovery from liveness-
+	// only penalties. Replay applies the identical transition before checking
+	// the committed state root.
+	bc.applyValidatorCleanUptimeRecovery(validator.Address)
 	// Epoch transitions are consensus state. Apply them before committing the
 	// block root, using the block timestamp so every node replays the same
 	// routing, congestion and arbitrage decision.

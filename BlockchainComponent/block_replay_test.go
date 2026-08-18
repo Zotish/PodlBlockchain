@@ -1,6 +1,7 @@
 package blockchaincomponent
 
 import (
+	"math"
 	"math/big"
 	"path/filepath"
 	"reflect"
@@ -12,10 +13,10 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-func buildReplayFixture(t *testing.T) (*Blockchain_struct, *Block) {
+func buildReplayFixtureWithPenalty(t *testing.T, penalty float64, reason string) (*Blockchain_struct, *Block) {
 	t.Helper()
 	bc := newTestBlockchain()
-	validator := &Validator{Address: "0x1111111111111111111111111111111111111111", NativeBond: 1e12, LPStakeAmount: 1e12, LockTime: time.Now().Add(time.Hour)}
+	validator := &Validator{Address: "0x1111111111111111111111111111111111111111", NativeBond: 1e12, LPStakeAmount: 1e12, LockTime: time.Now().Add(time.Hour), PenaltyScore: penalty, SlashReason: reason}
 	bc.Validators = append(bc.Validators, validator)
 	bc.EnsureRuntimeState()
 	parent := bc.Blocks[0]
@@ -36,9 +37,15 @@ func buildReplayFixture(t *testing.T) (*Blockchain_struct, *Block) {
 	reward := &Transaction{From: "0x0000000000000000000000000000000000000000", To: validator.Address, Value: NewAmountFromStringOrZero(block.RewardBreakdown.ValidatorReward), Type: "reward", IsSystem: true, Status: constantset.StatusSuccess, Timestamp: block.TimeStamp, GasPrice: 0}
 	reward.TxHash = CalculateTransactionHash(*reward)
 	block.Transactions = []*Transaction{reward}
+	shadow.applyValidatorCleanUptimeRecovery(validator.Address)
 	block.StateRoot = shadow.ComputeDeterministicStateRootAt(block.BlockNumber)
 	block.CurrentHash = CalculateHash(&block)
 	return bc, &block
+}
+
+func buildReplayFixture(t *testing.T) (*Blockchain_struct, *Block) {
+	t.Helper()
+	return buildReplayFixtureWithPenalty(t, 0, "")
 }
 
 func TestIncomingBlockReplayMatchesAndStagesPostState(t *testing.T) {
@@ -52,6 +59,32 @@ func TestIncomingBlockReplayMatchesAndStagesPostState(t *testing.T) {
 	}
 	if transition.ReferenceStateRoot == "" || transition.ReferenceStateRoot != transition.PostStateRoot {
 		t.Fatal("independent reference replay was not compared before staging")
+	}
+}
+
+func TestIncomingBlockReplayRecoversOnlyLivenessPenalty(t *testing.T) {
+	bc, block := buildReplayFixtureWithPenalty(t, 0.95, "inactivity")
+	if !bc.VerifySingleBlock(block) {
+		t.Fatal("valid liveness-recovery block rejected")
+	}
+	transition := bc.PendingReplayTransitions[block.CurrentHash]
+	if transition == nil || len(transition.Validators) != 1 {
+		t.Fatal("liveness-recovery transition was not staged")
+	}
+	if got, want := transition.Validators[0].PenaltyScore, 0.94; math.Abs(got-want) > 0.000000001 {
+		t.Fatalf("unexpected recovered penalty: got %.8f want %.8f", got, want)
+	}
+	if !transition.Validators[0].JailedUntil.IsZero() {
+		t.Fatal("successful finalized participation did not release liveness jail")
+	}
+
+	bc, block = buildReplayFixtureWithPenalty(t, 0.2, "double signing")
+	if !bc.VerifySingleBlock(block) {
+		t.Fatal("valid safety-penalty block rejected")
+	}
+	transition = bc.PendingReplayTransitions[block.CurrentHash]
+	if got := transition.Validators[0].PenaltyScore; got != 0.2 {
+		t.Fatalf("safety penalty was incorrectly recovered: got %.8f", got)
 	}
 }
 
