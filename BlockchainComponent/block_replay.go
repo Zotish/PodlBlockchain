@@ -289,6 +289,7 @@ func (bc *Blockchain_struct) ReplayIncomingBlock(block *Block) (*BlockReplayTran
 	if !rewardBreakdownEqual(expectedRewards, block.RewardBreakdown) {
 		return nil, fmt.Errorf("reward breakdown mismatch")
 	}
+	shadow.applyValidatorCleanUptimeRecovery(block.RewardBreakdown.Validator)
 	shadow.DLEngine.RunEpochAt(shadow, block.BlockNumber, int64(block.TimeStamp))
 	if err := shadow.ReconcileDEXProtocolFees(block.BlockNumber, int64(block.TimeStamp)); err != nil {
 		return nil, err

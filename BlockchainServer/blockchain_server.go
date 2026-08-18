@@ -1386,11 +1386,19 @@ func (bcs *BlockchainServer) GetValidators(w http.ResponseWriter, r *http.Reques
 		heightLag := 0
 		votingEligible := false
 		peerVerified := false
+		onboarding := bcs.BlockchainPtr.ValidatorOnboardingReport(v.Address)
 		if localValidator != "" && strings.EqualFold(v.Address, localValidator) {
-			nodeStatus = "voting"
 			syncStatus = "active"
-			votingEligible = true
+			votingEligible = onboarding.VotingEligible
 			peerVerified = true
+			switch {
+			case votingEligible:
+				nodeStatus = "voting"
+			case onboarding.JailedUntil > time.Now().Unix() || !onboarding.Requirements["penalty_below_max"]:
+				nodeStatus = "jailed"
+			default:
+				nodeStatus = "active"
+			}
 		}
 		if peer, ok := peerByValidator[strings.ToLower(strings.TrimSpace(v.Address))]; ok {
 			if value, ok := peer["sync_status"].(string); ok {
@@ -1442,6 +1450,8 @@ func (bcs *BlockchainServer) GetValidators(w http.ResponseWriter, r *http.Reques
 			"height_lag":           heightLag,
 			"voting_eligible":      votingEligible,
 			"peer_verified":        peerVerified,
+			"jailed_until":         onboarding.JailedUntil,
+			"slash_reason":         onboarding.SlashReason,
 		}
 	}
 
