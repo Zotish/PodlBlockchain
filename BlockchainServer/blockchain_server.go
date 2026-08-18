@@ -4759,19 +4759,45 @@ func (b *BlockchainServer) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	setCORSHeaders(w, r)
 	height, latestHash := b.currentChainTip()
+	now := time.Now().Unix()
 	b.BlockchainPtr.Mutex.Lock()
 	peers := 0
+	latestBlockTime := int64(0)
+	blockTimeMS := b.BlockchainPtr.ChainSpec.BlockTimeMS
 	if b.BlockchainPtr.Network != nil {
 		peers = len(b.BlockchainPtr.Network.Peers)
 	}
+	if count := len(b.BlockchainPtr.Blocks); count > 0 && b.BlockchainPtr.Blocks[count-1] != nil {
+		latestBlockTime = int64(b.BlockchainPtr.Blocks[count-1].TimeStamp)
+	}
 	b.BlockchainPtr.Mutex.Unlock()
+	if latestBlockTime == 0 && height > 0 {
+		if block, err := blockchaincomponent.GetBlockFromDB(height); err == nil && block != nil {
+			latestBlockTime = int64(block.TimeStamp)
+		}
+	}
+	finalityLag := int64(0)
+	if latestBlockTime > 0 && now > latestBlockTime {
+		finalityLag = now - latestBlockTime
+	}
+	staleAfter := int64(60)
+	if derived := int64(blockTimeMS/1000) * 10; derived > staleAfter {
+		staleAfter = derived
+	}
+	status := "ok"
+	if height > 0 && latestBlockTime > 0 && finalityLag > staleAfter {
+		status = "stalled"
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":            "ok",
-		"height":            height,
-		"peers":             peers,
-		"latest_block_hash": latestHash,
-		"version":           "1.0.0",
-		"timestamp":         time.Now().Unix(),
+		"status":                       status,
+		"height":                       height,
+		"peers":                        peers,
+		"latest_block_hash":            latestHash,
+		"latest_block_time":            latestBlockTime,
+		"finality_lag_seconds":         finalityLag,
+		"finality_stale_after_seconds": staleAfter,
+		"version":                      "1.0.0",
+		"timestamp":                    now,
 	})
 }
 

@@ -8,6 +8,7 @@ AGG_URL="${AGG_URL:-http://127.0.0.1:9000}"
 DEX_API_URL="${DEX_API_URL:-http://127.0.0.1:9100}"
 COMPOSE="${COMPOSE:-docker compose}"
 WAIT_ATTEMPTS="${WAIT_ATTEMPTS:-60}"
+VERIFY_HEIGHT_ADVANCE="${VERIFY_HEIGHT_ADVANCE:-true}"
 NEW_IMAGE="${LQD_IMAGE:?LQD_IMAGE is required}"
 SKIP_IMAGE_PULL="${SKIP_IMAGE_PULL:-false}"
 SNAPSHOT_SCRIPT="${SNAPSHOT_SCRIPT:-$PODL_ROOT/podl_snapshot.sh}"
@@ -155,6 +156,13 @@ if [ "$SKIP_IMAGE_PULL" = "true" ]; then
 else
   if ! compose_run pull; then rollback "image pull failed"; fi
 fi
+required_scripts="/app/scripts/railway/start-chain.sh"
+if [ "$SIGNER_ENABLED" = "true" ]; then
+  required_scripts="$required_scripts /app/scripts/railway/start-signer.sh"
+fi
+if ! docker run --rm --entrypoint sh "$NEW_IMAGE" -c "for file in $required_scripts; do test -x \"\$file\" || exit 1; done"; then
+  rollback "runtime image is missing an executable chain/signer startup script"
+fi
 
 if [ "$SIGNER_ENABLED" = "true" ]; then
   if ! compose_run up -d --no-deps signer; then rollback "signer failed to start"; fi
@@ -195,6 +203,19 @@ if [ "$ready" != "true" ]; then rollback "service health checks did not recover"
 post_height="$(height || true)"
 if [ -z "$post_height" ]; then rollback "chain height is unavailable after deploy"; fi
 if [ "$post_height" -lt "$pre_height" ]; then rollback "chain height regressed from $pre_height to $post_height"; fi
+mining_enabled="$(env_value MINING_ENABLED "$ENV_FILE" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+if [ -z "$mining_enabled" ]; then mining_enabled=true; fi
+if [ "$VERIFY_HEIGHT_ADVANCE" = "true" ] && [ "$mining_enabled" = "true" ]; then
+  advance_attempt=1
+  while [ "$advance_attempt" -le 15 ] && [ "$post_height" -le "$pre_height" ]; do
+    sleep 2
+    post_height="$(height || true)"
+    advance_attempt=$((advance_attempt + 1))
+  done
+  if [ -z "$post_height" ] || [ "$post_height" -le "$pre_height" ]; then
+    rollback "chain process is healthy but finality did not advance beyond $pre_height"
+  fi
+fi
 
 readiness="$(curl -fsS "$CHAIN_URL/readiness/mainnet" 2>/dev/null || true)"
 deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

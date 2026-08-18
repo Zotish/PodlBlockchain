@@ -22,6 +22,11 @@ const ValidatorsPage = () => {
           blocks_included: v.blocks_included ?? v.BlocksIncluded ?? 0,
           last_active: v.last_active ?? v.LastActive ?? '',
           lock_time: v.lock_time ?? v.LockTime ?? '',
+          voting_eligible: v.voting_eligible ?? v.VotingEligible ?? false,
+          node_status: v.node_status ?? v.NodeStatus ?? 'unknown',
+          sync_status: v.sync_status ?? v.SyncStatus ?? 'unknown',
+          jailed_until: v.jailed_until ?? v.JailedUntil ?? '',
+          slash_reason: v.slash_reason ?? v.SlashReason ?? '',
         }));
         setValidators(merged);
       } catch (err) {
@@ -32,7 +37,9 @@ const ValidatorsPage = () => {
     };
 
     fetchValidators();
-  }, [sortBy, sortOrder]);
+    const timer = window.setInterval(fetchValidators, 10000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const handleSort = (field) => {
     if (sortBy === field) {
@@ -58,7 +65,11 @@ const ValidatorsPage = () => {
 
   const totalStake = validators.reduce((sum, validator) => sum + Number(validator.stake || 0), 0);
   const totalPower = validators.reduce((sum, validator) => sum + Number(validator.liquidity_power || 0), 0);
-  const healthy = validators.filter((validator) => Number(validator.penalty_score || 0) < 1).length;
+  const healthy = validators.filter((validator) => {
+    const lastActive = Date.parse(validator.last_active || '');
+    const fresh = Number.isFinite(lastActive) && Date.now() - lastActive <= 120000;
+    return validator.voting_eligible && fresh && Number(validator.penalty_score || 0) < 0.95;
+  }).length;
 
   if (loading) return <div className="loading">Loading validators...</div>;
 
@@ -76,7 +87,7 @@ const ValidatorsPage = () => {
         { label: 'Validator set', value: validators.length.toLocaleString(), note: 'indexed operators' },
         { label: 'Aggregate stake', value: totalStake.toLocaleString(undefined, { maximumFractionDigits: 2 }), note: 'LQD bonded' },
         { label: 'Hybrid power', value: totalPower.toLocaleString(undefined, { maximumFractionDigits: 2 }), note: 'network total' },
-        { label: 'Healthy records', value: `${healthy}/${validators.length}`, note: 'below penalty threshold' },
+        { label: 'Healthy & producing', value: `${healthy}/${validators.length}`, note: 'eligible, fresh and below max penalty' },
       ]} />
 
       <DataSurface

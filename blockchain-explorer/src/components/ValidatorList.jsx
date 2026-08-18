@@ -18,7 +18,12 @@ const ValidatorList = ({ validators, premium = false }) => {
       <div className="premium-validator-list">
         {validators.map((validator, index) => {
           const address = validator.address || '';
-          const voting = validator.voting_eligible !== false && validator.node_status !== 'jailed';
+          const penalty = Math.max(0, Math.min(1, Number(validator.penalty_score || 0)));
+          const lastActive = Date.parse(validator.last_active || '');
+          const stale = !Number.isFinite(lastActive) || Date.now() - lastActive > 120000;
+          const jailed = validator.node_status === 'jailed' || Boolean(validator.jailed_until && Date.parse(validator.jailed_until) > Date.now());
+          const voting = validator.voting_eligible !== false && !jailed && !stale;
+          const status = jailed ? 'Jailed' : stale ? 'Stalled' : voting ? 'Voting' : 'Unavailable';
           return (
             <div className="premium-validator-row" key={address || index}>
               <span className="validator-rank">{String(index + 1).padStart(2, '0')}</span>
@@ -27,7 +32,7 @@ const ValidatorList = ({ validators, premium = false }) => {
                   {address ? `${address.slice(0, 11)}…${address.slice(-7)}` : 'Unknown validator'}
                 </Link>
                 <span className={voting ? 'validator-online' : 'validator-offline'}>
-                  <i /> {voting ? 'Voting' : 'Unavailable'}
+                  <i /> {status}
                 </span>
               </div>
               <div className="validator-stake">
@@ -43,8 +48,9 @@ const ValidatorList = ({ validators, premium = false }) => {
                 <strong>{compactNumber(validator.blocks_proposed, 0)} / {compactNumber(validator.blocks_included, 0)}</strong>
               </div>
               <div className="validator-penalty">
-                <span>Penalty</span>
-                <strong>{compactNumber(Number(validator.penalty_score || 0) * 100, 1)}%</strong>
+                <span>Penalty score</span>
+                <strong className={penalty >= 0.95 ? 'critical' : penalty >= 0.5 ? 'warning' : ''}>{compactNumber(penalty * 100, 1)}%</strong>
+                <span className="validator-penalty-meter" aria-hidden="true"><i style={{ width: `${penalty * 100}%` }} /></span>
               </div>
               <Link className="validator-row-link" to={address ? `/validator/${address}` : '/validators'} aria-label="Open validator">→</Link>
             </div>

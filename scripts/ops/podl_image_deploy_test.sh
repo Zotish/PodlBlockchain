@@ -29,7 +29,14 @@ printf '%s\n' \
   'url=""' \
   'for arg in "$@"; do url="$arg"; done' \
   'case "$url" in' \
-  '  */getheight) echo "{\"height\":110908}" ;;' \
+  '  */getheight)' \
+  '    if [ "${MOCK_ADVANCE_HEIGHT:-false}" = "true" ]; then' \
+  '      marker="${MOCK_HEIGHT_MARKER:?MOCK_HEIGHT_MARKER is required}"' \
+  '      if [ -f "$marker" ]; then echo "{\"height\":110909}"; else touch "$marker"; echo "{\"height\":110908}"; fi' \
+  '    else' \
+  '      echo "{\"height\":110908}"' \
+  '    fi' \
+  '    ;;' \
   '  */readiness/mainnet) echo "{\"status\":\"action_required\"}" ;;' \
   '  *) echo "{\"ok\":true}" ;;' \
   'esac' > "$MOCK_BIN/curl"
@@ -44,13 +51,19 @@ chmod 700 "$MOCK_BIN/docker" "$MOCK_BIN/curl" "$PODL_ROOT/podl_snapshot.sh"
 printf '%s\n' 'ENABLE_VALIDATOR_SIGNER=false' 'ENABLE_CADDY=false' > "$PODL_ROOT/.env"
 printf '%s\n' 'services: {}' > "$PODL_ROOT/docker-compose.yml"
 
-PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" SKIP_IMAGE_PULL=true \
+PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" SKIP_IMAGE_PULL=true VERIFY_HEIGHT_ADVANCE=false \
   sh "$REPO_ROOT/scripts/ops/podl_image_deploy.sh" >/dev/null
 
 test -s "$PODL_ROOT/last-deploy.env"
 grep -q '^LQD_IMAGE=registry.example/podl:test$' "$PODL_ROOT/last-deploy.env"
 grep -q '^PRE_HEIGHT=110908$' "$PODL_ROOT/last-deploy.env"
 grep -q '^POST_HEIGHT=110908$' "$PODL_ROOT/last-deploy.env"
+
+PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:advancing" SKIP_IMAGE_PULL=true \
+  MOCK_ADVANCE_HEIGHT=true MOCK_HEIGHT_MARKER="$TEST_ROOT/advance-height-seen" \
+  sh "$REPO_ROOT/scripts/ops/podl_image_deploy.sh" >/dev/null
+grep -q '^PRE_HEIGHT=110908$' "$PODL_ROOT/last-deploy.env"
+grep -q '^POST_HEIGHT=110909$' "$PODL_ROOT/last-deploy.env"
 
 mkdir -p "$PODL_ROOT/signer-secrets" "$PODL_ROOT/signer-ca-backup"
 for signer_file in ca.crt signer.crt signer.key chain-client.crt chain-client.key validator-key.json; do
@@ -70,7 +83,7 @@ printf '%s\n' \
   "ENV_BACKUP=$PODL_ROOT/signer-ca-backup/env-before-signer.enc" \
   "NEXT_ENV=$PODL_ROOT/signer-migration.next.env" > "$PODL_ROOT/signer-migration.pending"
 
-PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:signed" \
+PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:signed" VERIFY_HEIGHT_ADVANCE=false \
   sh "$REPO_ROOT/scripts/ops/podl_image_deploy.sh" >/dev/null
 
 grep -q '^ENABLE_VALIDATOR_SIGNER=true$' "$PODL_ROOT/.env"
@@ -97,7 +110,7 @@ printf '%s\n' \
   "ENV_BACKUP=$PODL_ROOT/signer-ca-backup/env-before-failed-signer.enc" \
   "NEXT_ENV=$PODL_ROOT/signer-migration.next.env" > "$PODL_ROOT/signer-migration.pending"
 
-if PATH="$MOCK_BIN:$PATH" MOCK_PULL_FAIL=true PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:broken" \
+if PATH="$MOCK_BIN:$PATH" MOCK_PULL_FAIL=true PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:broken" VERIFY_HEIGHT_ADVANCE=false \
   sh "$REPO_ROOT/scripts/ops/podl_image_deploy.sh" >/dev/null 2>&1; then
   echo "Broken image pull should have triggered rollback" >&2
   exit 1
@@ -107,10 +120,10 @@ grep -q '^VALIDATOR_PRIVATE_KEY=' "$PODL_ROOT/.env"
 test ! -e "$PODL_ROOT/signer-migration.pending"
 
 printf '%s\n' 'ENABLE_VALIDATOR_SIGNER=true' 'LQD_REQUIRE_SIGNED_BFT=false' 'ENABLE_CADDY=false' > "$PODL_ROOT/.env"
-if PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" \
+if PATH="$MOCK_BIN:$PATH" PODL_ROOT="$PODL_ROOT" LQD_IMAGE="registry.example/podl:test" VERIFY_HEIGHT_ADVANCE=false \
   sh "$REPO_ROOT/scripts/ops/podl_image_deploy.sh" >/dev/null 2>&1; then
   echo "Signer preflight should fail when signed BFT is disabled" >&2
   exit 1
 fi
 
-echo "PASS image deploy health/height marker, atomic signer activation/rollback and fail-closed preflight"
+echo "PASS image deploy health/height advance, atomic signer activation/rollback and fail-closed preflight"
