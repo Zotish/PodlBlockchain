@@ -246,7 +246,15 @@ func main() {
 
 					nextHeight := bc.LatestBlockNumber() + 1
 					round := bc.CurrentConsensusRound(nextHeight)
-					if advancedRound, advanced := bc.AdvanceConsensusRound(nextHeight, time.Now().Unix()); advanced {
+					nowUnix := time.Now().Unix()
+					if bc.ConsensusRoundTimedOut(nextHeight, nowUnix) {
+						if tc, timeoutErr := bc.CastLocalConsensusTimeout(nextHeight, round); timeoutErr != nil {
+							log.Printf("Consensus timeout vote unavailable: height=%d round=%d err=%v", nextHeight, round, timeoutErr)
+						} else if tc != nil {
+							log.Printf("Consensus timeout certificate ready: height=%d round=%d hash=%s", nextHeight, round, tc.Hash)
+						}
+					}
+					if advancedRound, advanced := bc.AdvanceConsensusRound(nextHeight, nowUnix); advanced {
 						round = advancedRound
 						log.Printf("Consensus view change: height=%d round=%d", nextHeight, round)
 					}

@@ -149,6 +149,16 @@ func TestLocalProposalDoesNotCommitSpeculativeStateBeforeQC(t *testing.T) {
 	if len(bc.PendingBlocks) != 1 || len(bc.PendingReplayTransitions) != 1 {
 		t.Fatal("isolated proposal or staged state was not retained for later QC")
 	}
+	var retainedHash string
+	for hash := range bc.PendingBlocks {
+		retainedHash = hash
+	}
+	if block := bc.MineNewBlock(); block != nil {
+		t.Fatal("retained proposal finalized without signed quorum")
+	}
+	if len(bc.PendingBlocks) != 1 || bc.PendingBlocks[retainedHash] == nil {
+		t.Fatal("retry rebuilt or discarded the retained height/round proposal")
+	}
 }
 
 func TestBlockReplayReusesProcessGlobalPluginVM(t *testing.T) {
