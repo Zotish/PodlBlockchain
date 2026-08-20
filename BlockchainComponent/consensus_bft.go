@@ -217,6 +217,25 @@ func (bc *Blockchain_struct) AdvanceConsensusRound(height uint64, nowUnix int64)
 	return s.CurrentRounds[height], true
 }
 
+// ConsensusRoundTimedOut reports whether the current round has reached its
+// configured timeout. Callers use it to collect a signed timeout certificate
+// before AdvanceConsensusRound is allowed to change proposer/round.
+func (bc *Blockchain_struct) ConsensusRoundTimedOut(height uint64, nowUnix int64) bool {
+	if bc == nil || height == 0 {
+		return false
+	}
+	bc.EnsureRuntimeState()
+	s := bc.ConsensusV2
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensure()
+	if nowUnix <= 0 {
+		nowUnix = time.Now().Unix()
+	}
+	started := s.RoundStartedAt[height]
+	return started > 0 && nowUnix-started >= s.RoundTimeoutSeconds
+}
+
 func (bc *Blockchain_struct) pruneConsensusRounds(finalizedHeight uint64) {
 	if bc == nil || bc.ConsensusV2 == nil {
 		return
@@ -610,6 +629,18 @@ func (bc *Blockchain_struct) hasConsensusVote(height uint64, round uint32, step 
 	defer s.mu.Unlock()
 	key := fmt.Sprintf("%d/%d/%s", height, round, step)
 	_, ok := s.Votes[key][strings.ToLower(strings.TrimSpace(validator))]
+	return ok
+}
+
+func (bc *Blockchain_struct) hasConsensusTimeoutVote(height uint64, round uint32, validator string) bool {
+	if bc == nil || bc.ConsensusV2 == nil {
+		return false
+	}
+	s := bc.ConsensusV2
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := timeoutVoteKey(height, round)
+	_, ok := s.TimeoutVotes[key][strings.ToLower(strings.TrimSpace(validator))]
 	return ok
 }
 

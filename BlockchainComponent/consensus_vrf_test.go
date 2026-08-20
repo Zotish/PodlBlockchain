@@ -102,6 +102,27 @@ func TestCanonicalBlockVRFDrivesNextProposerEntropy(t *testing.T) {
 	}
 }
 
+func TestParentProposalVRFSlotRejectsSameRoundConflictAndAllowsViewChange(t *testing.T) {
+	_, keys := consensusFixture(t, 1)
+	signer, err := NewLocalValidatorSigner(keys[0], testP256VRFSecret, filepath.Join(t.TempDir(), "slashing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signer.Close()
+
+	first := ConsensusVRFProof{Height: 12, Round: 0, SpecHash: "0xspec", Seed: "0xseed-a"}
+	if err := signConsensusVRFProofWithSignerAtSlot(t.Context(), &first, signer, "parent/11/0"); err != nil {
+		t.Fatal(err)
+	}
+	conflict := ConsensusVRFProof{Height: 12, Round: 0, SpecHash: "0xspec", Seed: "0xseed-b"}
+	if err := signConsensusVRFProofWithSignerAtSlot(t.Context(), &conflict, signer, "parent/11/0"); err == nil {
+		t.Fatal("conflicting VRF for the same parent proposal slot was accepted")
+	}
+	if err := signConsensusVRFProofWithSignerAtSlot(t.Context(), &conflict, signer, "parent/11/1"); err != nil {
+		t.Fatalf("certified parent view change could not obtain a fresh VRF slot: %v", err)
+	}
+}
+
 func TestVRFProofRejectsTamperWrongSeedAndConflict(t *testing.T) {
 	bc, keys := consensusFixture(t, 4)
 	seed := ConsensusVRFSeed(bc.ChainSpec.Hash(), bc.proposerParentEntropy(2), 2, 0)

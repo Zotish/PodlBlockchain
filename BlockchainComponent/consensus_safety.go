@@ -121,6 +121,39 @@ func (bc *Blockchain_struct) AddConsensusTimeoutVote(vote ConsensusTimeoutVote) 
 	return tc, nil
 }
 
+// CastLocalConsensusTimeout signs and gossips the local validator's timeout
+// vote. This is the production path that turns the existing timeout-certificate
+// safety rule into a live view-change mechanism.
+func (bc *Blockchain_struct) CastLocalConsensusTimeout(height uint64, round uint32) (*TimeoutCertificate, error) {
+	if bc == nil || bc.Network == nil || height == 0 {
+		return nil, fmt.Errorf("consensus network and height are required")
+	}
+	address, signer := bc.Network.ValidatorSignerSnapshot()
+	if address == "" || signer == nil {
+		return nil, fmt.Errorf("validator signing identity is not configured")
+	}
+	if bc.hasConsensusTimeoutVote(height, round, address) {
+		return nil, nil
+	}
+	vote := ConsensusTimeoutVote{Height: height, Round: round}
+	if err := SignConsensusTimeoutVoteWithSigner(context.Background(), &vote, signer); err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(vote.Validator, address) || (bc.LocalValidator != "" && !strings.EqualFold(vote.Validator, bc.LocalValidator)) {
+		return nil, fmt.Errorf("validator private key does not match configured address")
+	}
+	tc, err := bc.AddConsensusTimeoutVote(vote)
+	if err != nil {
+		return nil, err
+	}
+	bc.Network.BroadcastConsensusTimeoutVote(vote)
+	return tc, nil
+}
+
+func (bc *Blockchain_struct) ProcessConsensusTimeoutVote(vote ConsensusTimeoutVote) (*TimeoutCertificate, error) {
+	return bc.AddConsensusTimeoutVote(vote)
+}
+
 func validatorPowerSetHash(set []ValidatorPower) string {
 	copySet := cloneValidatorPowerSet(set)
 	sort.Slice(copySet, func(i, j int) bool { return copySet[i].Address < copySet[j].Address })

@@ -2,6 +2,7 @@ package blockchaincomponent
 
 import (
 	"encoding/hex"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -158,5 +159,40 @@ func TestConsensusViewChangeRetainsLock(t *testing.T) {
 	}
 	if bc.ConsensusV2.LockedHash != "0xlocked" {
 		t.Fatal("view change discarded consensus lock")
+	}
+}
+
+func TestLocalTimeoutVoteFormsCertificateAndAdvancesRound(t *testing.T) {
+	bc, keys := consensusFixture(t, 1)
+	key, err := crypto.HexToECDSA(keys[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := crypto.PubkeyToAddress(key.PublicKey).Hex()
+	signer, err := NewLocalValidatorSigner(keys[0], testP256VRFSecret, filepath.Join(t.TempDir(), "slashing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signer.Close()
+	bc.Network = NewNetworkService(bc)
+	bc.LocalValidator = address
+	if err := bc.Network.SetValidatorSigner(address, signer); err != nil {
+		t.Fatal(err)
+	}
+	const height = uint64(2)
+	if round := bc.CurrentConsensusRound(height); round != 0 {
+		t.Fatalf("unexpected initial round %d", round)
+	}
+	started := bc.ConsensusV2.RoundStartedAt[height]
+	now := started + bc.ConsensusV2.RoundTimeoutSeconds
+	if !bc.ConsensusRoundTimedOut(height, now) {
+		t.Fatal("round timeout was not detected")
+	}
+	tc, err := bc.CastLocalConsensusTimeout(height, 0)
+	if err != nil || tc == nil {
+		t.Fatalf("local timeout certificate unavailable: tc=%#v err=%v", tc, err)
+	}
+	if round, changed := bc.AdvanceConsensusRound(height, now); !changed || round != 1 {
+		t.Fatalf("certified local view change failed: round=%d changed=%v", round, changed)
 	}
 }

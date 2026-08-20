@@ -177,11 +177,76 @@ func cloneTransactionPool(pool []*Transaction) []*Transaction {
 	return out
 }
 
+func (bc *Blockchain_struct) pendingLocalProposal(height uint64, round uint32) *Block {
+	if bc == nil || height == 0 {
+		return nil
+	}
+	var selected *Block
+	selectedSeenAt := int64(0)
+	for hash, block := range bc.PendingBlocks {
+		if block == nil || block.BlockNumber != height || block.ConsensusRound != round ||
+			!strings.EqualFold(block.RewardBreakdown.Validator, bc.LocalValidator) {
+			continue
+		}
+		bc.ReplayMu.Lock()
+		transition := bc.PendingReplayTransitions[hash]
+		bc.ReplayMu.Unlock()
+		if transition == nil || transition.PostStateRoot != block.StateRoot {
+			continue
+		}
+		seenAt := bc.PendingBlockSeenAt[hash]
+		if selected == nil || (seenAt > 0 && (selectedSeenAt == 0 || seenAt < selectedSeenAt)) ||
+			(seenAt == selectedSeenAt && block.CurrentHash < selected.CurrentHash) {
+			selected = block
+			selectedSeenAt = seenAt
+		}
+	}
+	return selected
+}
+
+// retryPendingLocalProposal preserves one proposal per height/round. Rebuilding
+// the same slot with a new timestamp or wall-clock validator state can change
+// its VRF seed, which a correct durable signer must reject as equivocation.
+func (bc *Blockchain_struct) retryPendingLocalProposal() (*Block, bool) {
+	if bc == nil || len(bc.Blocks) == 0 {
+		return nil, false
+	}
+	height := bc.LatestBlockNumber() + 1
+	round := bc.CurrentConsensusRound(height)
+	block := bc.pendingLocalProposal(height, round)
+	if block == nil {
+		return nil, false
+	}
+	address := ""
+	if bc.Network != nil {
+		address, _ = bc.Network.ValidatorSignerSnapshot()
+	}
+	if address != "" && !bc.hasConsensusVote(height, round, StepPrevote, address) {
+		if _, err := bc.CastLocalConsensusStep(block, StepPrevote); err != nil {
+			log.Printf("Pending proposal vote retry failed: height=%d round=%d err=%v", height, round, err)
+		}
+	}
+	if !bc.HasPrecommitQC(height, block.CurrentHash) {
+		return nil, true
+	}
+	if !bc.TryFinalizePending(block.CurrentHash, 0.67) {
+		return nil, true
+	}
+	return block, true
+}
+
 // MineNewBlock builds against an isolated copy-on-write state. The proposer
 // therefore never exposes speculative account/contract mutations while a
 // signed QC is still pending.
 func (bc *Blockchain_struct) MineNewBlock() *Block {
 	started := time.Now()
+	if pending, handled := bc.retryPendingLocalProposal(); handled {
+		bc.LastBlockMiningTime = time.Since(started)
+		if pending != nil {
+			log.Printf("⛏ Finalized retained proposal #%d | time=%s", pending.BlockNumber, bc.LastBlockMiningTime)
+		}
+		return pending
+	}
 	shadow, overlay, err := bc.cloneForBlockReplay()
 	if err != nil {
 		log.Printf("MineNewBlock: failed to isolate candidate state: %v", err)
@@ -220,6 +285,10 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 		} else if qc != nil {
 			log.Printf("Signed BFT quorum certificate ready: %s", shortHash(qc.Hash))
 		}
+		// Peers must receive the proposal before they can produce signed
+		// prevotes. Broadcasting again after finalization is harmless and helps
+		// late peers.
+		_ = bc.Network.BroadcastBlock(candidate)
 	}
 	finalized := bc.TryFinalizePending(candidate.CurrentHash, 0.67)
 	bc.LastBlockMiningTime = time.Since(started)

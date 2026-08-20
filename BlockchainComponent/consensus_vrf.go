@@ -79,13 +79,23 @@ func SignConsensusVRFProof(proof *ConsensusVRFProof, privateKeyHex string) error
 }
 
 func SignConsensusVRFProofWithSigner(ctx context.Context, proof *ConsensusVRFProof, signer ValidatorSigner) error {
+	if proof == nil {
+		return fmt.Errorf("complete VRF request required")
+	}
+	return signConsensusVRFProofWithSignerAtSlot(ctx, proof, signer, consensusVRFKey(proof.Height, proof.Round))
+}
+
+func signConsensusVRFProofWithSignerAtSlot(ctx context.Context, proof *ConsensusVRFProof, signer ValidatorSigner, slot string) error {
 	if proof == nil || proof.Height == 0 || strings.TrimSpace(proof.SpecHash) == "" || strings.TrimSpace(proof.Seed) == "" {
 		return fmt.Errorf("complete VRF request required")
 	}
 	if signer == nil || !ValidateAddress(signer.Address()) {
 		return fmt.Errorf("validator signer is required")
 	}
-	result, err := signer.ProveVRF(ctx, []byte(consensusVRFMessage(*proof)), consensusVRFKey(proof.Height, proof.Round))
+	if strings.TrimSpace(slot) == "" {
+		return fmt.Errorf("VRF signing slot is required")
+	}
+	result, err := signer.ProveVRF(ctx, []byte(consensusVRFMessage(*proof)), slot)
 	if err != nil {
 		return err
 	}
@@ -124,7 +134,13 @@ func (bc *Blockchain_struct) AttachNextProposerVRF(block *Block) error {
 		SpecHash: bc.ChainSpec.Hash(),
 		Seed:     ConsensusBlockVRFSeed(bc.ChainSpec.Hash(), block.BlockNumber, block.PreviousHash, block.StateRoot, block.BlockNumber+1),
 	}
-	if err := SignConsensusVRFProofWithSigner(context.Background(), proof, signer); err != nil {
+	// Slashing protection is keyed by the parent proposal slot, not by the
+	// following height. A validator may legitimately propose a different parent
+	// after a certified view change, while conflicting VRFs for the same parent
+	// height/round remain forbidden. The distinct prefix also migrates safely
+	// from the former next-height slot scheme without deleting signer history.
+	parentSlot := fmt.Sprintf("parent/%d/%d", block.BlockNumber, block.ConsensusRound)
+	if err := signConsensusVRFProofWithSignerAtSlot(context.Background(), proof, signer, parentSlot); err != nil {
 		return err
 	}
 	if !strings.EqualFold(proof.Validator, block.RewardBreakdown.Validator) {

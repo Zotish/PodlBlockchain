@@ -1088,20 +1088,30 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 			return
 		}
 
-		// Add to pending; non-proposer validators cast a vote and broadcast it
+		// Add to pending; non-proposer validators cast a signed BFT vote. Legacy
+		// hash-only votes are used only when the chain spec explicitly permits
+		// legacy finality.
 		ns.Blockchain.Mutex.Lock()
 		ns.Blockchain.AddPendingBlock(&block)
 		localVal := ns.Blockchain.LocalValidator
 		isProposer := strings.EqualFold(localVal, block.RewardBreakdown.Validator)
-		if localVal != "" && !isProposer {
-			ns.Blockchain.AddBlockVote(block.CurrentHash, localVal)
-		}
-		finalized := ns.Blockchain.TryFinalizePending(block.CurrentHash, 0.67)
 		ns.Blockchain.Mutex.Unlock()
 
 		if localVal != "" && !isProposer {
-			ns.BroadcastVote(block.CurrentHash, localVal)
+			if _, voteErr := ns.Blockchain.CastLocalConsensusStep(&block, StepPrevote); voteErr != nil {
+				if ns.Blockchain.ChainSpec.AllowLegacyFinality {
+					ns.Blockchain.Mutex.Lock()
+					ns.Blockchain.AddBlockVote(block.CurrentHash, localVal)
+					ns.Blockchain.Mutex.Unlock()
+					ns.BroadcastVote(block.CurrentHash, localVal)
+				} else {
+					log.Printf("Signed vote unavailable for peer block #%d: %v", block.BlockNumber, voteErr)
+				}
+			}
 		}
+		ns.Blockchain.Mutex.Lock()
+		finalized := ns.Blockchain.TryFinalizePending(block.CurrentHash, 0.67)
+		ns.Blockchain.Mutex.Unlock()
 		if finalized {
 			log.Printf("✅ Block #%d finalized on receipt (peer block)", block.BlockNumber)
 		}
@@ -1250,6 +1260,39 @@ func (ns *NetworkService) handleMessage(peer *Peer, msg map[string]interface{}) 
 		}
 		if finalized {
 			log.Printf("✅ Block #%d finalized with signed precommit QC", vote.Height)
+		}
+
+	case "consensus_timeout_vote":
+		voteData, ok := msg["data"].(map[string]interface{})
+		if !ok {
+			recordPeerFailure(peer, "invalid consensus timeout payload")
+			return
+		}
+		raw, err := json.Marshal(voteData)
+		if err != nil {
+			return
+		}
+		var vote ConsensusTimeoutVote
+		if err := json.Unmarshal(raw, &vote); err != nil {
+			recordPeerFailure(peer, "invalid consensus timeout encoding")
+			return
+		}
+		if peer != nil && peer.ValidatorVerified && !strings.EqualFold(peer.ValidatorAddress, vote.Validator) {
+			recordPeerFailure(peer, "consensus timeout identity mismatch")
+			return
+		}
+		alreadySeen := ns.Blockchain.hasConsensusTimeoutVote(vote.Height, vote.Round, vote.Validator)
+		tc, err := ns.Blockchain.ProcessConsensusTimeoutVote(vote)
+		if err != nil {
+			recordPeerFailure(peer, "rejected consensus timeout vote")
+			log.Printf("Rejected signed consensus timeout vote: %v", err)
+			return
+		}
+		if !alreadySeen {
+			ns.BroadcastConsensusTimeoutVote(vote)
+		}
+		if tc != nil {
+			log.Printf("Consensus timeout certificate formed: height=%d round=%d", tc.Height, tc.Round)
 		}
 
 	case "peers":
@@ -1470,6 +1513,24 @@ func (ns *NetworkService) BroadcastConsensusVote(vote ConsensusVote) {
 		return
 	}
 	data, err := json.Marshal(map[string]interface{}{"type": "consensus_vote", "data": vote})
+	if err != nil {
+		return
+	}
+	ns.Mutex.Lock()
+	defer ns.Mutex.Unlock()
+	for _, peer := range ns.Peers {
+		if peer == nil || ns.isSelfPeer(peer) {
+			continue
+		}
+		go ns.sendData(peer, data)
+	}
+}
+
+func (ns *NetworkService) BroadcastConsensusTimeoutVote(vote ConsensusTimeoutVote) {
+	if ns == nil || !VerifyConsensusTimeoutVote(vote) {
+		return
+	}
+	data, err := json.Marshal(map[string]interface{}{"type": "consensus_timeout_vote", "data": vote})
 	if err != nil {
 		return
 	}
