@@ -193,6 +193,13 @@ fi
 if ! docker run --rm --entrypoint sh "$NEW_IMAGE" -c "for file in $required_scripts; do test -r \"\$file\" || exit 1; done"; then
   rollback "runtime image is missing a readable chain/signer startup script"
 fi
+# Switch Compose's durable source of truth only after the image passes
+# availability/preflight, but before containers are reconciled. This closes the
+# window where a concurrent systemd monitor or snapshot could restore the old
+# .env image during deployment.
+if ! persist_env_value LQD_IMAGE "$NEW_IMAGE" "$ENV_FILE"; then
+  rollback "unable to persist the deployed image in $ENV_FILE"
+fi
 
 if [ "$SIGNER_ENABLED" = "true" ]; then
   if ! compose_run up -d --no-deps signer; then rollback "signer failed to start"; fi
@@ -248,9 +255,6 @@ if [ "$VERIFY_HEIGHT_ADVANCE" = "true" ] && [ "$mining_enabled" = "true" ]; then
 fi
 
 readiness="$(curl -fsS "$CHAIN_URL/readiness/mainnet" 2>/dev/null || true)"
-if ! persist_env_value LQD_IMAGE "$NEW_IMAGE" "$ENV_FILE"; then
-  rollback "unable to persist the deployed image in $ENV_FILE"
-fi
 deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 umask 077
 {
