@@ -153,8 +153,8 @@ export default function LiquidityPage() {
     <div className="liquidity-page">
       <ExplorerPageHero
         eyebrow="Liquidity provider intelligence"
-        title="Capital positions, rewards and risk in one view."
-        description="Track user liquidity, LP reward accrual, estimated APR/APY and signed claim status across the live protocol."
+        title="Liquidity providers"
+        description="Provider positions, reward accrual and claim status."
         metaLabel="Indexed providers"
         metaValue={providers.length.toLocaleString()}
       />

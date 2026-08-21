@@ -43,8 +43,8 @@ export default function PoolsPage() {
     <main className="pools-page premium-route-page">
       <ExplorerPageHero
         eyebrow="Dynamic liquidity fabric"
-        title="Liquidity, routed by measurable demand."
-        description="Inspect pool reserves, registry policy and capital still available for allocation across the PoDL liquidity network."
+        title="Liquidity pools"
+        description="Pool reserves, routing weight and registry status."
         metaLabel="Routing model"
         metaValue="Dynamic pool allocation"
       />

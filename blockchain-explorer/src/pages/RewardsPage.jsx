@@ -200,8 +200,8 @@ export default function RewardsPage() {
     <div className="rewards-page">
       <ExplorerPageHero
         eyebrow="Reward accounting"
-        title="Every reward bucket, fully separated."
-        description="Trace validator, liquidity-provider, participant and treasury rewards so every allocation remains explainable."
+        title="Rewards"
+        description="Validator, liquidity-provider, participant and treasury allocations."
         metaLabel="Latest reward block"
         metaValue={latest?.block_number ? `#${latest.block_number}` : 'Waiting for data'}
       />

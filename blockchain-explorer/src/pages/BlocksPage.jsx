@@ -72,9 +72,9 @@ const BlocksPage = () => {
   return (
     <main className="blocks-page premium-route-page">
       <ExplorerPageHero
-        eyebrow="Consensus ledger"
-        title="Finalized blocks, without the noise."
-        description="Inspect canonical PoDL blocks, proposer output and reward distribution from one continuously refreshed ledger view."
+        eyebrow="Ledger"
+        title="Blocks"
+        description="Canonical blocks finalized by PoDL consensus."
         metaLabel="Index cadence"
         metaValue="Refreshes every 5 seconds"
       />

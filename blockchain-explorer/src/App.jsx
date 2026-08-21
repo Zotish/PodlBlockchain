@@ -5,6 +5,7 @@ import Footer from "./components/Footer";
 import HomePage from "./pages/HomePage";
 import "./styles.css";
 import "./premium.css";
+import "./explorer-clean.css";
 
 const BlocksPage = lazy(() => import("./pages/BlocksPage"));
 const TransactionsPage = lazy(() => import("./pages/TransactionsPage"));
@@ -21,6 +22,7 @@ const InvestorPage = lazy(() => import("./pages/InvestorPage"));
 const LiquidityPage = lazy(() => import("./pages/LiquidityPage"));
 const PoolsPage = lazy(() => import("./pages/PoolsPage"));
 const BridgePage = lazy(() => import("./pages/BridgePage"));
+const ApiDocsPage = lazy(() => import("./pages/ApiDocsPage"));
 
 const loadTracker = (name) =>
   lazy(() => import("./pages/ExplorerTrackers").then((module) => ({ default: module[name] })));
@@ -38,7 +40,6 @@ const NFTActivityPage = loadTracker("NFTActivityPage");
 const BridgeTransactionsPage = loadTracker("BridgeTransactionsPage");
 const TopAccountsPage = loadTracker("TopAccountsPage");
 const ChartsStatsPage = loadTracker("ChartsStatsPage");
-const ApiDocsPage = loadTracker("ApiDocsPage");
 const BroadcastTransactionPage = loadTracker("BroadcastTransactionPage");
 const DeveloperContractToolsPage = loadTracker("DeveloperContractToolsPage");
 
