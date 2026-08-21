@@ -32,6 +32,31 @@ env_value() {
   sed -n "s/^$setting=//p" "$source_file" | tail -1
 }
 
+# Persist the selected runtime image in Compose's source of truth. Without this,
+# a later systemd restart or scheduled snapshot reads the stale image from .env
+# and silently rolls a successful deployment back.
+persist_env_value() {
+  setting="$1"
+  value="$2"
+  target_file="${3:-$ENV_FILE}"
+  temp_file="$(mktemp "$PODL_ROOT/.env.tmp.XXXXXX")"
+  if ! awk -v setting="$setting" -v value="$value" '
+    BEGIN { written = 0 }
+    index($0, setting "=") == 1 {
+      if (!written) print setting "=" value
+      written = 1
+      next
+    }
+    { print }
+    END { if (!written) print setting "=" value }
+  ' "$target_file" > "$temp_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  chmod 600 "$temp_file"
+  mv "$temp_file" "$target_file"
+}
+
 configure_profiles() {
   profile_env="$1"
   SIGNER_ENABLED="$(env_value ENABLE_VALIDATOR_SIGNER "$profile_env" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
@@ -62,6 +87,10 @@ if [ -s "$PENDING_FILE" ]; then
   MIGRATION_PENDING=true
 fi
 configure_profiles "$TARGET_ENV"
+previous_configured_image="$(env_value LQD_IMAGE "$ENV_FILE")"
+if [ -z "$previous_configured_image" ]; then
+  previous_configured_image="podl-blockchain:local"
+fi
 
 compose_run() {
   $COMPOSE -f docker-compose.yml "$@"
@@ -132,6 +161,7 @@ rollback() {
     rm -f "$PENDING_FILE"
     configure_profiles "$ENV_FILE"
   fi
+  persist_env_value LQD_IMAGE "$previous_configured_image" "$ENV_FILE" || true
   export LQD_IMAGE="$previous_image"
   if [ "$SIGNER_ENABLED" = "true" ]; then
     compose_run up -d --no-deps signer >/dev/null 2>&1 || true
@@ -218,6 +248,9 @@ if [ "$VERIFY_HEIGHT_ADVANCE" = "true" ] && [ "$mining_enabled" = "true" ]; then
 fi
 
 readiness="$(curl -fsS "$CHAIN_URL/readiness/mainnet" 2>/dev/null || true)"
+if ! persist_env_value LQD_IMAGE "$NEW_IMAGE" "$ENV_FILE"; then
+  rollback "unable to persist the deployed image in $ENV_FILE"
+fi
 deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 umask 077
 {
