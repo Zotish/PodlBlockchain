@@ -57,9 +57,9 @@ const TransactionsPage = () => {
   return (
     <main className="transactions-page premium-route-page">
       <ExplorerPageHero
-        eyebrow="Transaction intelligence"
-        title="Every state change, clearly resolved."
-        description="Follow transfers, contract calls, fees and settlement status across the live PoDL public ledger."
+        eyebrow="Ledger"
+        title="Transactions"
+        description="Finalized transfers, contract calls, fees and execution status."
         metaLabel="Index cadence"
         metaValue="Refreshes every 15 seconds"
       />

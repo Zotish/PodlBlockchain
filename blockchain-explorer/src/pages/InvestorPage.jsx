@@ -42,8 +42,8 @@ export default function InvestorPage() {
     <main className="investor-page premium-route-page">
       <ExplorerPageHero
         eyebrow="Institutional evidence room"
-        title="Protocol claims, backed by live evidence."
-        description="A diligence-first view of PoDL consensus, realized economics, concentration and launch readiness—without forecasts or guaranteed returns."
+        title="Protocol evidence"
+        description="Live consensus, economics, concentration and launch-readiness evidence."
         metaLabel="Evidence posture"
         metaValue={signedReport?.verified ? 'Validator-signed' : 'Verification pending'}
       />

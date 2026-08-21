@@ -1,7 +1,7 @@
 import React from "react";
 
 export const ExplorerPageHero = ({
-  eyebrow = "PoDL network intelligence",
+  eyebrow = "PoDL explorer",
   title,
   description,
   metaLabel = "Public testnet",
@@ -10,19 +10,15 @@ export const ExplorerPageHero = ({
 }) => (
   <header className="explorer-page-hero">
     <div className="explorer-page-copy">
-      <span className="explorer-page-eyebrow"><i />{eyebrow}</span>
+      <span className="explorer-page-eyebrow">{eyebrow}</span>
       <h1>{title}</h1>
       <p>{description}</p>
       {children && <div className="explorer-page-actions">{children}</div>}
     </div>
-    <aside className="explorer-page-signal" aria-label={`${metaLabel}: ${metaValue}`}>
-      <span className="page-signal-orbit" aria-hidden="true"><i /></span>
-      <div>
-        <small>{metaLabel}</small>
-        <strong>{metaValue}</strong>
-      </div>
-      <span className="page-signal-live"><i />Synced</span>
-    </aside>
+    <div className="explorer-page-meta" aria-label={`${metaLabel}: ${metaValue}`}>
+      <small>{metaLabel}</small>
+      <strong>{metaValue}</strong>
+    </div>
   </header>
 );
 

@@ -195,8 +195,8 @@ const BridgePage = () => {
     <main className="bridge-page premium-route-page">
       <ExplorerPageHero
         eyebrow="Cross-chain operations"
-        title="Move value across verified network boundaries."
-        description="Operate public or private testnet bridge flows, inspect token mappings and trace every cross-chain request."
+        title="Bridge"
+        description="Supported chains, token mappings and public cross-chain requests."
         metaLabel="Connected networks"
         metaValue="PoDL ↔ BSC testnet"
       />

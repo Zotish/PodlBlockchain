@@ -76,9 +76,9 @@ const ValidatorsPage = () => {
   return (
     <main className="validators-page premium-route-page">
       <ExplorerPageHero
-        eyebrow="Consensus operators"
-        title="Validator power, made accountable."
-        description="Compare hybrid liquidity power, native stake, block participation and penalty posture across the active validator set."
+        eyebrow="Consensus"
+        title="Validators"
+        description="Stake, liquidity power, participation and penalty status for every validator."
         metaLabel="Consensus view"
         metaValue="Deterministic validator index"
       />
