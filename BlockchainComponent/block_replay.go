@@ -149,10 +149,28 @@ func (bc *Blockchain_struct) cloneForBlockReplay() (*Blockchain_struct, *Contrac
 	if bc == nil {
 		return nil, nil, fmt.Errorf("nil blockchain")
 	}
+	// Only consensus/runtime state belongs in a speculative execution copy.
+	// Blocks are persisted individually and the reward/recent-transaction
+	// ledgers are explorer caches; serializing hundreds of thousands of those
+	// rows before every block made production time increase with chain age.
+	// Keep the recent block window needed by nonce/base-fee checks, while the
+	// JSON boundary below still provides a complete deep copy of consensus
+	// state without pointer aliasing.
+	snapshot := *bc
+	snapshot.Blocks = replayBlockWindow(bc.Blocks)
+	snapshot.Transaction_pool = nil
+	snapshot.RewardHistory = nil
+	snapshot.RewardLedger = nil
+	snapshot.RecentTxs = nil
+	snapshot.RecentTxCounter = 0
+	snapshot.BlockVotes = nil
+	snapshot.PendingBlocks = nil
+	snapshot.PendingBlockSeenAt = nil
+	snapshot.LastBlockMiningTime = 0
 	// A JSON round-trip is the canonical deep-copy boundary for consensus
 	// state. It avoids copying live mutex values and prevents maps/pointers in
 	// the speculative execution state from aliasing finalized state.
-	rawState, err := json.Marshal(bc)
+	rawState, err := json.Marshal(&snapshot)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode replay snapshot: %w", err)
 	}
@@ -187,6 +205,15 @@ func (bc *Blockchain_struct) cloneForBlockReplay() (*Blockchain_struct, *Contrac
 	registry.Blockchain = &shadow
 	shadow.ContractEngine = &LQDContractEngine{DB: overlay, EventDB: bc.ContractEngine.EventDB, Registry: registry, Pipeline: NewExecutionPipeline(registry)}
 	return &shadow, overlay, nil
+}
+
+const replayRecentBlockWindow = 5
+
+func replayBlockWindow(blocks []*Block) []*Block {
+	if len(blocks) <= replayRecentBlockWindow {
+		return append([]*Block(nil), blocks...)
+	}
+	return append([]*Block(nil), blocks[len(blocks)-replayRecentBlockWindow:]...)
 }
 
 func rewardBreakdownEqual(a, b BlockRewardBreakdown) bool {

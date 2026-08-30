@@ -28,6 +28,29 @@ func init() {
 
 const canonicalGenesisTimestamp = uint64(1700000000)
 
+const defaultBlockProductionInterval = 2 * time.Second
+
+func configuredBlockProductionInterval(bc *blockchaincomponent.Blockchain_struct) time.Duration {
+	if bc == nil || bc.ChainSpec.BlockTimeMS == 0 {
+		return defaultBlockProductionInterval
+	}
+	return time.Duration(bc.ChainSpec.BlockTimeMS) * time.Millisecond
+}
+
+// remainingBlockProductionDelay keeps the configured interval measured from
+// the start of a production attempt. Sleeping a fixed interval after mining
+// makes the actual block interval equal to work time + target time and causes
+// block time to grow as state execution becomes more expensive.
+func remainingBlockProductionDelay(target, elapsed time.Duration) time.Duration {
+	if target <= 0 {
+		target = defaultBlockProductionInterval
+	}
+	if elapsed >= target {
+		return 0
+	}
+	return target - elapsed
+}
+
 func main() {
 	loadEnvFile(".env")
 	chainCmdSet := flag.NewFlagSet("chain", flag.ExitOnError)
@@ -218,9 +241,13 @@ func main() {
 			lastValidatorsSync := time.Time{}
 			stalledFinalizeRounds := 0
 			for {
+				productionAttemptStarted := time.Now()
 				bc.CleanStaleTransactions()
 
-				if len(bc.Blocks)%100 == 0 {
+				// Startup/recovery hydrates a larger DB tail. Bound it immediately;
+				// checking only exact multiples allowed 1,000+ blocks to remain in
+				// memory and made every speculative replay progressively slower.
+				if len(bc.Blocks) > 100 {
 					bc.TrimInMemoryBlocks(100)
 				}
 
@@ -302,10 +329,13 @@ func main() {
 					bc.MonitorValidators()
 				}
 
-				// Target block time: 2 seconds
-				// High mempool pressure uses same interval (consensus bound)
-				interval := 2 * time.Second
-				time.Sleep(interval)
+				// Target cadence is defined by ChainSpec. Account for time already
+				// spent syncing, executing and finalizing instead of adding another
+				// fixed sleep after that work.
+				target := configuredBlockProductionInterval(bc)
+				if delay := remainingBlockProductionDelay(target, time.Since(productionAttemptStarted)); delay > 0 {
+					time.Sleep(delay)
+				}
 			}
 		}
 
