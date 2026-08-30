@@ -21,6 +21,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 	"golang.org/x/crypto/scrypt"
 )
 
@@ -176,7 +178,14 @@ type signerSlashingState struct {
 type DurableSlashingProtector struct {
 	mu      sync.Mutex
 	path    string
+	db      *leveldb.DB
 	records map[string]signerSlashingRecord
+}
+
+const signerSlashingMigrationKey = "meta/legacy-json-v1-imported"
+
+func signerSlashingRecordKey(slot string) []byte {
+	return []byte("record/" + strings.TrimSpace(slot))
 }
 
 func NewDurableSlashingProtector(path string) (*DurableSlashingProtector, error) {
@@ -184,23 +193,60 @@ func NewDurableSlashingProtector(path string) (*DurableSlashingProtector, error)
 	if p.path == "" {
 		return p, nil
 	}
+	dir := filepath.Dir(p.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create signer slashing directory: %w", err)
+	}
+	databasePath := p.path + ".leveldb"
+	if err := os.MkdirAll(databasePath, 0o700); err != nil {
+		return nil, fmt.Errorf("create signer slashing leveldb directory: %w", err)
+	}
+	if err := os.Chmod(databasePath, 0o700); err != nil {
+		return nil, fmt.Errorf("secure signer slashing leveldb directory: %w", err)
+	}
+	database, err := leveldb.OpenFile(databasePath, &opt.Options{ErrorIfMissing: false})
+	if err != nil {
+		return nil, fmt.Errorf("open signer slashing leveldb: %w", err)
+	}
+	p.db = database
+	if _, err := p.db.Get([]byte(signerSlashingMigrationKey), nil); err == nil {
+		return p, nil
+	} else if err != leveldb.ErrNotFound {
+		_ = p.db.Close()
+		return nil, fmt.Errorf("read signer slashing migration state: %w", err)
+	}
 	raw, err := os.ReadFile(p.path)
 	if err != nil && !os.IsNotExist(err) {
+		_ = p.db.Close()
 		return nil, fmt.Errorf("read signer slashing database: %w", err)
 	}
 	if len(raw) > 0 {
 		state := signerSlashingState{}
 		if err := json.Unmarshal(raw, &state); err != nil || state.Version != 1 || state.Records == nil {
+			_ = p.db.Close()
 			return nil, fmt.Errorf("signer slashing database is corrupt or unsupported")
 		}
 		p.records = state.Records
 	}
+	if os.IsNotExist(err) {
+		if err := p.persistSnapshotLocked(); err != nil {
+			_ = p.db.Close()
+			return nil, fmt.Errorf("initialize signer slashing database: %w", err)
+		}
+	}
+	if err := p.migrateLegacyRecords(); err != nil {
+		_ = p.db.Close()
+		return nil, err
+	}
+	p.records = nil
 	return p, nil
 }
 
 func (p *DurableSlashingProtector) enabled() bool { return p != nil && p.path != "" }
 
-func (p *DurableSlashingProtector) persistLocked() error {
+// persistSnapshotLocked creates the legacy version-1 baseline used by older
+// deployments. It is never rewritten after the LevelDB migration completes.
+func (p *DurableSlashingProtector) persistSnapshotLocked() error {
 	if !p.enabled() {
 		return nil
 	}
@@ -241,6 +287,76 @@ func (p *DurableSlashingProtector) persistLocked() error {
 	return nil
 }
 
+// migrateLegacyRecords performs a restart-safe one-time import. Chunks may be
+// replayed after a crash; the synced completion marker is written only after
+// every legacy intent is durable.
+func (p *DurableSlashingProtector) migrateLegacyRecords() error {
+	if p == nil || p.db == nil {
+		return nil
+	}
+	batch := new(leveldb.Batch)
+	flush := func(sync bool) error {
+		if batch.Len() == 0 {
+			return nil
+		}
+		if err := p.db.Write(batch, &opt.WriteOptions{Sync: sync}); err != nil {
+			return err
+		}
+		batch.Reset()
+		return nil
+	}
+	for slot, record := range p.records {
+		raw, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("encode legacy signer intent: %w", err)
+		}
+		batch.Put(signerSlashingRecordKey(slot), raw)
+		if batch.Len() >= 5000 {
+			if err := flush(false); err != nil {
+				return fmt.Errorf("migrate legacy signer intents: %w", err)
+			}
+		}
+	}
+	if err := flush(false); err != nil {
+		return fmt.Errorf("migrate legacy signer intents: %w", err)
+	}
+	if err := p.db.Put([]byte(signerSlashingMigrationKey), []byte("1"), &opt.WriteOptions{Sync: true}); err != nil {
+		return fmt.Errorf("commit signer slashing migration: %w", err)
+	}
+	return nil
+}
+
+func (p *DurableSlashingProtector) lookupLocked(slot string) (signerSlashingRecord, bool, error) {
+	if p.db == nil {
+		record, exists := p.records[slot]
+		return record, exists, nil
+	}
+	raw, err := p.db.Get(signerSlashingRecordKey(slot), nil)
+	if err == leveldb.ErrNotFound {
+		return signerSlashingRecord{}, false, nil
+	}
+	if err != nil {
+		return signerSlashingRecord{}, false, err
+	}
+	record := signerSlashingRecord{}
+	if err := json.Unmarshal(raw, &record); err != nil || strings.TrimSpace(record.Digest) == "" {
+		return signerSlashingRecord{}, false, fmt.Errorf("stored signer intent is corrupt")
+	}
+	return record, true, nil
+}
+
+func (p *DurableSlashingProtector) storeLocked(slot string, record signerSlashingRecord) error {
+	if p.db == nil {
+		p.records[slot] = record
+		return nil
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return p.db.Put(signerSlashingRecordKey(slot), raw, &opt.WriteOptions{Sync: true})
+}
+
 func (p *DurableSlashingProtector) prepare(slot string, digest []byte) (string, error) {
 	if p == nil || strings.TrimSpace(slot) == "" {
 		return "", nil
@@ -249,15 +365,18 @@ func (p *DurableSlashingProtector) prepare(slot string, digest []byte) (string, 
 	defer p.mu.Unlock()
 	key := strings.TrimSpace(slot)
 	digestHex := "0x" + hex.EncodeToString(digest)
-	if record, exists := p.records[key]; exists {
+	record, exists, err := p.lookupLocked(key)
+	if err != nil {
+		return "", fmt.Errorf("read signer intent: %w", err)
+	}
+	if exists {
 		if !strings.EqualFold(record.Digest, digestHex) {
 			return "", fmt.Errorf("slashing protection rejected conflicting signature for slot %s", key)
 		}
 		return record.Signature, nil
 	}
-	p.records[key] = signerSlashingRecord{Digest: digestHex, Prepared: time.Now().Unix()}
-	if err := p.persistLocked(); err != nil {
-		delete(p.records, key)
+	record = signerSlashingRecord{Digest: digestHex, Prepared: time.Now().Unix()}
+	if err := p.storeLocked(key, record); err != nil {
 		return "", fmt.Errorf("persist signer intent: %w", err)
 	}
 	return "", nil
@@ -270,13 +389,32 @@ func (p *DurableSlashingProtector) commit(slot string, digest []byte, signature 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	key := strings.TrimSpace(slot)
-	record, exists := p.records[key]
+	record, exists, err := p.lookupLocked(key)
+	if err != nil {
+		return fmt.Errorf("read signer intent: %w", err)
+	}
 	if !exists || !strings.EqualFold(record.Digest, "0x"+hex.EncodeToString(digest)) {
 		return fmt.Errorf("signer intent disappeared before commit")
 	}
 	record.Signature = signature
-	p.records[key] = record
-	return p.persistLocked()
+	if err := p.storeLocked(key, record); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *DurableSlashingProtector) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.db == nil {
+		return nil
+	}
+	database := p.db
+	p.db = nil
+	return database.Close()
 }
 
 type ProtectedValidatorSigner struct {
@@ -432,10 +570,17 @@ func (s *ProtectedValidatorSigner) Close() error {
 	if closer, ok := s.vrf.(interface{ Close() }); ok {
 		closer.Close()
 	}
-	if s.backend == nil {
-		return nil
+	var protectorErr error
+	if s.protector != nil {
+		protectorErr = s.protector.Close()
 	}
-	return s.backend.Close()
+	if s.backend == nil {
+		return protectorErr
+	}
+	if backendErr := s.backend.Close(); backendErr != nil {
+		return backendErr
+	}
+	return protectorErr
 }
 
 type encryptedValidatorKeyFile struct {
