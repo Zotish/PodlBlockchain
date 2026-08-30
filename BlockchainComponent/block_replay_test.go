@@ -1,6 +1,7 @@
 package blockchaincomponent
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"path/filepath"
@@ -12,6 +13,85 @@ import (
 	constantset "github.com/Zotish/Proof-Of-Dynamic-Liquidity---A-new-Innovative-Era-of-Blockchain/ConstantSet"
 	"github.com/ethereum/go-ethereum/crypto"
 )
+
+func largeReplayHistoryFixture() *Blockchain_struct {
+	bc := newTestBlockchain()
+	bc.EnsureRuntimeState()
+	for i := 1; i <= 1024; i++ {
+		block := &Block{
+			BlockNumber:  uint64(i),
+			PreviousHash: bc.Blocks[len(bc.Blocks)-1].CurrentHash,
+			CurrentHash:  "0x" + strings.Repeat("a", 63) + string(rune('a'+i%26)),
+			TimeStamp:    bc.Blocks[len(bc.Blocks)-1].TimeStamp + 2,
+			Transactions: []*Transaction{},
+		}
+		bc.Blocks = append(bc.Blocks, block)
+	}
+	bc.RewardHistory = make([]RewardSnapshot, 10000)
+	bc.RewardLedger = make([]RewardLedgerEntry, 100000)
+	bc.RecentTxs = make([]*Transaction, 50000)
+	for i := range bc.RewardLedger {
+		bc.RewardLedger[i] = RewardLedgerEntry{ID: "ledger-" + string(rune(i%127)), Address: "0x1111111111111111111111111111111111111111", Amount: "1"}
+	}
+	for i := range bc.RecentTxs {
+		bc.RecentTxs[i] = &Transaction{TxHash: "tx-" + string(rune(i%127)), Type: "transfer"}
+	}
+	return bc
+}
+
+func TestCloneForBlockReplayBoundsOperationalHistory(t *testing.T) {
+	bc := largeReplayHistoryFixture()
+	beforeRoot := bc.ComputeDeterministicStateRootAt(bc.LatestBlockNumber())
+	beforeBlocks := len(bc.Blocks)
+	beforeLedger := len(bc.RewardLedger)
+
+	shadow, _, err := bc.cloneForBlockReplay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shadow.Blocks) != replayRecentBlockWindow {
+		t.Fatalf("replay blocks = %d, want %d", len(shadow.Blocks), replayRecentBlockWindow)
+	}
+	if shadow.LatestBlockNumber() != bc.LatestBlockNumber() {
+		t.Fatalf("replay tip = %d, want %d", shadow.LatestBlockNumber(), bc.LatestBlockNumber())
+	}
+	if len(shadow.RewardHistory) != 0 || len(shadow.RewardLedger) != 0 || len(shadow.RecentTxs) != 0 {
+		t.Fatalf("operational history leaked into replay: history=%d ledger=%d recent=%d", len(shadow.RewardHistory), len(shadow.RewardLedger), len(shadow.RecentTxs))
+	}
+	if len(shadow.BlockVotes) != 0 || len(shadow.PendingBlocks) != 0 || len(shadow.PendingBlockSeenAt) != 0 {
+		t.Fatal("local pending consensus caches leaked into replay")
+	}
+	if got := shadow.ComputeDeterministicStateRootAt(shadow.LatestBlockNumber()); got != beforeRoot {
+		t.Fatalf("bounded replay changed consensus root: got %s want %s", got, beforeRoot)
+	}
+	if len(bc.Blocks) != beforeBlocks || len(bc.RewardLedger) != beforeLedger {
+		t.Fatal("building replay snapshot mutated canonical history")
+	}
+}
+
+func BenchmarkReplayCloneLargeOperationalHistory(b *testing.B) {
+	bc := largeReplayHistoryFixture()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := bc.cloneForBlockReplay(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// This benchmark models the pre-fix full-struct JSON replay boundary so the
+// age-independent clone can be compared against the former behavior.
+func BenchmarkLegacyFullReplayMarshalLargeOperationalHistory(b *testing.B) {
+	bc := largeReplayHistoryFixture()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := json.Marshal(bc); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
 
 func buildReplayFixtureWithPenalty(t *testing.T, penalty float64, reason string) (*Blockchain_struct, *Block) {
 	t.Helper()

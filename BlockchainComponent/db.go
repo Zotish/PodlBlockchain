@@ -33,6 +33,14 @@ const (
 	chainDBMigrationKey  = "chain_migrations"
 	chainDBSchemaVersion = 3
 	chainDBSnapshotFmt   = "podl-leveldb-jsonl-v1"
+
+	// Full blocks already live under block_<height>. These limits bound only
+	// the restart/explorer caches embedded in the current-state snapshot, so a
+	// state write does not become slower simply because the chain is older.
+	persistedBlockWindow         = 2
+	persistedRewardHistoryWindow = 1000
+	persistedRewardLedgerWindow  = 20000
+	persistedRecentTxWindow      = 10000
 )
 
 type ChainDBMetadata struct {
@@ -891,13 +899,66 @@ func PutIntoDB(bs *Blockchain_struct) error {
 	}
 
 	batch := new(leveldb.Batch)
-	data, err := json.Marshal(bs)
+	data, err := marshalPersistentBlockchainState(bs)
 	if err != nil {
 		return err
 	}
 
 	batch.Put([]byte(constantset.BLOCKCHAIN_KEY), data)
 	return db.Write(batch, &opt.WriteOptions{Sync: true})
+}
+
+func marshalPersistentBlockchainState(bs *Blockchain_struct) ([]byte, error) {
+	if bs == nil {
+		return nil, fmt.Errorf("nil blockchain state")
+	}
+	snapshot := *bs
+	snapshot.Blocks = tailBlocks(bs.Blocks, persistedBlockWindow)
+	snapshot.RewardHistory = tailRewardHistory(bs.RewardHistory, persistedRewardHistoryWindow)
+	snapshot.RewardLedger = tailRewardLedger(bs.RewardLedger, persistedRewardLedgerWindow)
+	// RecentTxs is newest-first, unlike the append-only histories above.
+	snapshot.RecentTxs = headTransactions(bs.RecentTxs, persistedRecentTxWindow)
+	return json.Marshal(&snapshot)
+}
+
+func tailBlocks(values []*Block, limit int) []*Block {
+	if limit <= 0 || len(values) == 0 {
+		return []*Block{}
+	}
+	if len(values) > limit {
+		values = values[len(values)-limit:]
+	}
+	return append([]*Block(nil), values...)
+}
+
+func tailRewardHistory(values []RewardSnapshot, limit int) []RewardSnapshot {
+	if limit <= 0 || len(values) == 0 {
+		return []RewardSnapshot{}
+	}
+	if len(values) > limit {
+		values = values[len(values)-limit:]
+	}
+	return append([]RewardSnapshot(nil), values...)
+}
+
+func tailRewardLedger(values []RewardLedgerEntry, limit int) []RewardLedgerEntry {
+	if limit <= 0 || len(values) == 0 {
+		return []RewardLedgerEntry{}
+	}
+	if len(values) > limit {
+		values = values[len(values)-limit:]
+	}
+	return append([]RewardLedgerEntry(nil), values...)
+}
+
+func headTransactions(values []*Transaction, limit int) []*Transaction {
+	if limit <= 0 || len(values) == 0 {
+		return []*Transaction{}
+	}
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return append([]*Transaction(nil), values...)
 }
 
 func GetBlockchain() (*Blockchain_struct, error) {

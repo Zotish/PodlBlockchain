@@ -73,6 +73,38 @@ func TestSetCORSHeadersAllowsProductionPreviewOrigins(t *testing.T) {
 	}
 }
 
+func TestBlockTimeLatestReportsMeasuredIntervalAndTarget(t *testing.T) {
+	bc := &blockchaincomponent.Blockchain_struct{
+		Blocks: []*blockchaincomponent.Block{
+			{BlockNumber: 10, TimeStamp: 100},
+			{BlockNumber: 11, TimeStamp: 103},
+		},
+		LastBlockMiningTime: 750 * time.Millisecond,
+	}
+	bc.ChainSpec.BlockTimeMS = 2000
+	server := &BlockchainServer{BlockchainPtr: bc}
+	req := httptest.NewRequest(http.MethodGet, "/blocktime/latest", nil)
+	rr := httptest.NewRecorder()
+
+	server.BlockTimeLatest(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := body["interval_time_ms"]; got != float64(3000) {
+		t.Fatalf("interval_time_ms = %v, want 3000", got)
+	}
+	if got := body["target_time_ms"]; got != float64(2000) {
+		t.Fatalf("target_time_ms = %v, want 2000", got)
+	}
+	if got := body["schedule_lag_ms"]; got != float64(1000) {
+		t.Fatalf("schedule_lag_ms = %v, want 1000", got)
+	}
+}
+
 func TestSetCORSHeadersAllowsWildcardEnvOrigin(t *testing.T) {
 	t.Setenv("LQD_ALLOWED_ORIGINS", "*")
 	origin := "https://custom-explorer.example.com"

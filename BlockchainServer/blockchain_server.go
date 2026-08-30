@@ -3312,16 +3312,30 @@ func (bcs *BlockchainServer) BlockTimeLatest(w http.ResponseWriter, r *http.Requ
 	// optional: also keep interval between block timestamps for comparison
 	var interval time.Duration
 	if len(bc.Blocks) >= 2 {
-		//prev := bc.Blocks[len(bc.Blocks)-2]
-		//interval = last.Timestamp.Sub(prev.Timestamp)
+		prev := bc.Blocks[len(bc.Blocks)-2]
+		if prev != nil && last != nil && last.TimeStamp >= prev.TimeStamp {
+			interval = time.Duration(last.TimeStamp-prev.TimeStamp) * time.Second
+		}
+	}
+	targetMS := bc.ChainSpec.BlockTimeMS
+	if targetMS == 0 {
+		targetMS = 2000
+	}
+	target := time.Duration(targetMS) * time.Millisecond
+	scheduleLag := interval - target
+	if scheduleLag < 0 {
+		scheduleLag = 0
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"block_number":      last.BlockNumber,
+		"target_time_ms":    target.Milliseconds(),
+		"target_time_sec":   target.Seconds(),
 		"mining_time_ms":    mining.Milliseconds(),
 		"mining_time_sec":   mining.Seconds(),
 		"interval_time_ms":  interval.Milliseconds(),
 		"interval_time_sec": interval.Seconds(),
+		"schedule_lag_ms":   scheduleLag.Milliseconds(),
 	})
 }
 
