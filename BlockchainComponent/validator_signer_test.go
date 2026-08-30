@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/asn1"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -57,6 +59,9 @@ func TestValidatorSignerDurableSlashingProtection(t *testing.T) {
 		t.Fatalf("conflicting vote was not rejected: %v", err)
 	}
 
+	if err := signer.Close(); err != nil {
+		t.Fatal(err)
+	}
 	restarted, err := NewLocalValidatorSigner(privateHex, testP256VRFSecret, database)
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +77,99 @@ func TestValidatorSignerDurableSlashingProtection(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("slashing database permissions = %o, want 600", info.Mode().Perm())
+	}
+	databaseInfo, err := os.Stat(database + ".leveldb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if databaseInfo.Mode().Perm() != 0o700 || !databaseInfo.IsDir() {
+		t.Fatalf("slashing LevelDB mode=%o is_dir=%t", databaseInfo.Mode().Perm(), databaseInfo.IsDir())
+	}
+}
+
+func TestDurableSlashingProtectorMigratesLegacySnapshotToLevelDB(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slashing.json")
+	digest := strings.Repeat("ab", 32)
+	legacy := signerSlashingState{Version: 1, Records: map[string]signerSlashingRecord{
+		"vote/9/0/prevote": {Digest: "0x" + digest, Signature: "0xlegacy", Prepared: 10},
+	}}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	protector, err := NewDurableSlashingProtector(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedDigest, _ := hex.DecodeString(digest)
+	if cached, err := protector.prepare("vote/9/0/prevote", decodedDigest); err != nil || cached != "0xlegacy" {
+		t.Fatalf("legacy record was not loaded: cached=%q err=%v", cached, err)
+	}
+	newDigest := make([]byte, 32)
+	newDigest[31] = 1
+	if _, err := protector.prepare("vote/10/0/prevote", newDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := protector.commit("vote/10/0/prevote", newDigest, "0xnew"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(raw) {
+		t.Fatal("legacy snapshot was rewritten while appending a new signing record")
+	}
+	if err := protector.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewDurableSlashingProtector(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached, err := restarted.prepare("vote/10/0/prevote", newDigest); err != nil || cached != "0xnew" {
+		t.Fatalf("LevelDB record was not recovered: cached=%q err=%v", cached, err)
+	}
+	conflict := make([]byte, 32)
+	conflict[31] = 2
+	if _, err := restarted.prepare("vote/10/0/prevote", conflict); err == nil {
+		t.Fatal("LevelDB-backed protector accepted a conflicting digest")
+	}
+	if err := restarted.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func BenchmarkDurableSlashingProtectorLevelDBLargeHistory(b *testing.B) {
+	path := filepath.Join(b.TempDir(), "slashing.json")
+	records := make(map[string]signerSlashingRecord, 100_000)
+	for i := 0; i < 100_000; i++ {
+		records[fmt.Sprintf("vote/%d/0/prevote", i)] = signerSlashingRecord{Digest: "0x" + strings.Repeat("01", 32), Prepared: 1}
+	}
+	raw, err := json.Marshal(signerSlashingState{Version: 1, Records: records})
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		b.Fatal(err)
+	}
+	protector, err := NewDurableSlashingProtector(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = protector.Close() })
+	digest := make([]byte, 32)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		digest[24] = byte(i >> 8)
+		digest[25] = byte(i)
+		if _, err := protector.prepare(fmt.Sprintf("vote/new/%d/prevote", i), digest); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
