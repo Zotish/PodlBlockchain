@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -236,6 +237,17 @@ func (bc *Blockchain_struct) ConsensusRoundTimedOut(height uint64, nowUnix int64
 	return started > 0 && nowUnix-started >= s.RoundTimeoutSeconds
 }
 
+const consensusHistoryRetentionHeights uint64 = 128
+
+func consensusHistoryHeight(key string) (uint64, bool) {
+	heightPart, _, found := strings.Cut(strings.TrimSpace(key), "/")
+	if !found || heightPart == "" {
+		return 0, false
+	}
+	height, err := strconv.ParseUint(heightPart, 10, 64)
+	return height, err == nil
+}
+
 func (bc *Blockchain_struct) pruneConsensusRounds(finalizedHeight uint64) {
 	if bc == nil || bc.ConsensusV2 == nil {
 		return
@@ -246,7 +258,35 @@ func (bc *Blockchain_struct) pruneConsensusRounds(finalizedHeight uint64) {
 	for height := range s.CurrentRounds {
 		if height <= finalizedHeight {
 			delete(s.CurrentRounds, height)
+		}
+	}
+	for height := range s.RoundStartedAt {
+		if height <= finalizedHeight {
 			delete(s.RoundStartedAt, height)
+		}
+	}
+	// Votes and VRF/timeout contributions are working-set data, not the
+	// canonical ledger. Keeping them forever made every speculative state copy
+	// grow linearly with chain height. Retain a bounded recent audit/recovery
+	// window while LastQC, LastTimeoutCertificate, LastVRFBeacon, equivocation
+	// evidence, slashing cases and finalized block commitments remain durable.
+	if finalizedHeight <= consensusHistoryRetentionHeights {
+		return
+	}
+	pruneThrough := finalizedHeight - consensusHistoryRetentionHeights
+	for key := range s.Votes {
+		if height, ok := consensusHistoryHeight(key); ok && height <= pruneThrough {
+			delete(s.Votes, key)
+		}
+	}
+	for key := range s.TimeoutVotes {
+		if height, ok := consensusHistoryHeight(key); ok && height <= pruneThrough {
+			delete(s.TimeoutVotes, key)
+		}
+	}
+	for key := range s.VRFProofs {
+		if height, ok := consensusHistoryHeight(key); ok && height <= pruneThrough {
+			delete(s.VRFProofs, key)
 		}
 	}
 }

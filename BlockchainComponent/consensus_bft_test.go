@@ -2,6 +2,7 @@ package blockchaincomponent
 
 import (
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -194,5 +195,78 @@ func TestLocalTimeoutVoteFormsCertificateAndAdvancesRound(t *testing.T) {
 	}
 	if round, changed := bc.AdvanceConsensusRound(height, now); !changed || round != 1 {
 		t.Fatalf("certified local view change failed: round=%d changed=%v", round, changed)
+	}
+}
+
+func TestPruneConsensusRoundsBoundsFinalizedWorkingHistory(t *testing.T) {
+	bc := newTestBlockchain()
+	bc.EnsureRuntimeState()
+	s := bc.ConsensusV2
+	const finalized = uint64(1000)
+	cutoff := finalized - consensusHistoryRetentionHeights
+	oldKey := fmt.Sprintf("%d/0/prevote", cutoff)
+	recentKey := fmt.Sprintf("%d/0/prevote", cutoff+1)
+	futureKey := fmt.Sprintf("%d/0/prevote", finalized+1)
+	s.Votes[oldKey] = map[string]ConsensusVote{"validator": {Height: cutoff}}
+	s.Votes[recentKey] = map[string]ConsensusVote{"validator": {Height: cutoff + 1}}
+	s.Votes[futureKey] = map[string]ConsensusVote{"validator": {Height: finalized + 1}}
+	s.Votes["malformed"] = map[string]ConsensusVote{}
+	s.TimeoutVotes[fmt.Sprintf("%d/0", cutoff)] = map[string]ConsensusTimeoutVote{}
+	s.TimeoutVotes[fmt.Sprintf("%d/0", cutoff+1)] = map[string]ConsensusTimeoutVote{}
+	s.VRFProofs[fmt.Sprintf("%d/0", cutoff)] = map[string]ConsensusVRFProof{}
+	s.VRFProofs[fmt.Sprintf("%d/0", cutoff+1)] = map[string]ConsensusVRFProof{}
+	s.CurrentRounds[finalized] = 2
+	s.CurrentRounds[finalized+1] = 0
+	s.RoundStartedAt[finalized] = 1
+	s.RoundStartedAt[finalized+1] = 2
+	s.LastQC = &QuorumCertificate{Height: finalized}
+	s.LastVRFBeacon = &ConsensusVRFBeacon{Height: finalized}
+
+	bc.pruneConsensusRounds(finalized)
+
+	if _, exists := s.Votes[oldKey]; exists {
+		t.Fatal("finalized vote history beyond the retention window was not pruned")
+	}
+	for _, key := range []string{recentKey, futureKey, "malformed"} {
+		if _, exists := s.Votes[key]; !exists {
+			t.Fatalf("vote key %q was pruned despite being recent, future, or unparseable", key)
+		}
+	}
+	if _, exists := s.TimeoutVotes[fmt.Sprintf("%d/0", cutoff)]; exists {
+		t.Fatal("old timeout vote history was not pruned")
+	}
+	if _, exists := s.VRFProofs[fmt.Sprintf("%d/0", cutoff)]; exists {
+		t.Fatal("old VRF proof history was not pruned")
+	}
+	if _, exists := s.TimeoutVotes[fmt.Sprintf("%d/0", cutoff+1)]; !exists {
+		t.Fatal("recent timeout vote history was pruned")
+	}
+	if _, exists := s.VRFProofs[fmt.Sprintf("%d/0", cutoff+1)]; !exists {
+		t.Fatal("recent VRF proof history was pruned")
+	}
+	if _, exists := s.CurrentRounds[finalized]; exists {
+		t.Fatal("finalized current round was not pruned")
+	}
+	if _, exists := s.RoundStartedAt[finalized]; exists {
+		t.Fatal("finalized round timer was not pruned")
+	}
+	if _, exists := s.CurrentRounds[finalized+1]; !exists {
+		t.Fatal("future current round was pruned")
+	}
+	if s.LastQC == nil || s.LastQC.Height != finalized || s.LastVRFBeacon == nil || s.LastVRFBeacon.Height != finalized {
+		t.Fatal("canonical consensus certificates were pruned")
+	}
+}
+
+func TestConsensusHistoryHeightParsing(t *testing.T) {
+	for key, want := range map[string]uint64{"9/0": 9, "12/4/prevote": 12} {
+		if got, ok := consensusHistoryHeight(key); !ok || got != want {
+			t.Fatalf("consensusHistoryHeight(%q) = %d, %t; want %d, true", key, got, ok, want)
+		}
+	}
+	for _, key := range []string{"", "9", "bad/0", "/0"} {
+		if _, ok := consensusHistoryHeight(key); ok {
+			t.Fatalf("malformed key %q was accepted", key)
+		}
 	}
 }
