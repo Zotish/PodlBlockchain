@@ -300,6 +300,24 @@ func (bc *Blockchain_struct) MineNewBlock() *Block {
 	return candidate
 }
 
+func committedParentStateRoot(bc *Blockchain_struct, parent *Block) string {
+	if parent == nil {
+		return ""
+	}
+	// A finalized block's state root was independently reproduced before the
+	// block was fsynced and admitted as the canonical tip. Reuse that immutable
+	// commitment for its child instead of scanning the complete state a third
+	// time on every height. Legacy blocks without a root retain the safe
+	// deterministic fallback.
+	if root := strings.TrimSpace(parent.StateRoot); root != "" {
+		return root
+	}
+	if bc == nil {
+		return ""
+	}
+	return bc.ComputeDeterministicStateRootAt(parent.BlockNumber)
+}
+
 // mineNewBlockCandidate executes only inside the isolated shadow when
 // candidateOnly is true. The legacy completion branch is retained for focused
 // tests, but production calls always use the wrapper above.
@@ -329,7 +347,7 @@ func (bc *Blockchain_struct) mineNewBlockCandidate(candidateOnly bool) *Block {
 	newBlock.ConsensusRound = bc.CurrentConsensusRound(newBlock.BlockNumber)
 	newBlock.GasLimit = bc.CalculateNextGasLimit()
 	newBlock.BaseFee = baseFee
-	newBlock.ParentStateRoot = bc.ComputeDeterministicStateRootAt(lastBlock.BlockNumber)
+	newBlock.ParentStateRoot = committedParentStateRoot(bc, lastBlock)
 
 	validator, err := bc.SelectBlockProposer(newBlock.BlockNumber, newBlock.ConsensusRound)
 	if err != nil {
