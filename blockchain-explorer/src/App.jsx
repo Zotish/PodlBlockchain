@@ -6,6 +6,7 @@ import HomePage from "./pages/HomePage";
 import "./styles.css";
 import "./premium.css";
 import "./explorer-clean.css";
+import "./responsive.css";
 
 const BlocksPage = lazy(() => import("./pages/BlocksPage"));
 const TransactionsPage = lazy(() => import("./pages/TransactionsPage"));
