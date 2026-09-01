@@ -78,6 +78,20 @@ const Navbar = () => {
     setMoreOpen(false);
   }, [location.pathname]);
 
+  useEffect(() => {
+    if (!mobileOpen) return undefined;
+
+    const closeMenu = (event) => {
+      if (event.key === "Escape") {
+        setMobileOpen(false);
+        setMoreOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", closeMenu);
+    return () => window.removeEventListener("keydown", closeMenu);
+  }, [mobileOpen]);
+
   const isActive = (to) => to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
 
   const routeSearch = async (event) => {
@@ -136,7 +150,7 @@ const Navbar = () => {
           <kbd>/</kbd>
         </form>
 
-        <div className={`clean-nav-links${mobileOpen ? " open" : ""}`}>
+        <div id="primary-navigation" className={`clean-nav-links${mobileOpen ? " open" : ""}`}>
           {PRIMARY_LINKS.map((item) => (
             <Link key={item.to} to={item.to} className={isActive(item.to) ? "active" : ""}>{item.label}</Link>
           ))}
@@ -158,11 +172,15 @@ const Navbar = () => {
         </div>
 
         <button
-          className="clean-menu-button"
+          className={`clean-menu-button${mobileOpen ? " open" : ""}`}
           type="button"
-          onClick={() => setMobileOpen((value) => !value)}
-          aria-label="Toggle navigation"
+          onClick={() => {
+            setMobileOpen((value) => !value);
+            if (mobileOpen) setMoreOpen(false);
+          }}
+          aria-label={mobileOpen ? "Close navigation" : "Open navigation"}
           aria-expanded={mobileOpen}
+          aria-controls="primary-navigation"
         >
           <span /><span />
         </button>
