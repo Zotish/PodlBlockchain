@@ -1,369 +1,175 @@
-import React, { useCallback, useState, useEffect } from 'react';
-import { ExplorerPageHero, MetricStrip } from '../components/ExplorerPage';
-import { fetchJSON, API_BASE } from '../utils/api';
+import React, { useCallback, useEffect, useState } from "react";
+import { ExplorerPageHero, MetricStrip } from "../components/ExplorerPage";
+import { fetchJSON } from "../utils/api";
+
+const validAddress = (value) => !value || /^0x[0-9a-fA-F]{40}$/.test(value);
+const shortValue = (value, size = 10) => value ? `${String(value).slice(0, size)}…` : "—";
 
 const BridgePage = () => {
-  const [from, setFrom] = useState('');
-  const [privateKey, setPrivateKey] = useState('');
-  const [toBsc, setToBsc] = useState('');
-  const [amount, setAmount] = useState('');
-  const [gasPrice, setGasPrice] = useState('10');
+  const [address, setAddress] = useState("");
+  const [mode, setMode] = useState("public");
   const [requests, setRequests] = useState([]);
-  const [status, setStatus] = useState('');
-  const [burnKey, setBurnKey] = useState('');
-  const [burnAmount, setBurnAmount] = useState('');
-  const [burnToLqd, setBurnToLqd] = useState('');
-  const [burnStatus, setBurnStatus] = useState('');
-  const [bscToken, setBscToken] = useState('');
-  const [bscKey, setBscKey] = useState('');
-  const [bscToLqd, setBscToLqd] = useState('');
-  const [bscAmount, setBscAmount] = useState('');
-  const [bscStatus, setBscStatus] = useState('');
-  const [lqdToken, setLqdToken] = useState('');
-  const [lqdKey, setLqdKey] = useState('');
-  const [lqdToBsc, setLqdToBsc] = useState('');
-  const [lqdAmount, setLqdAmount] = useState('');
-  const [lqdStatus, setLqdStatus] = useState('');
   const [tokenMappings, setTokenMappings] = useState([]);
-  const [bridgeMode, setBridgeMode] = useState('public');
-
-  const defaultTokens = [
-    { symbol: 'USDT', address: '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9' },
-    { symbol: 'USDC', address: '0x64544969ed7EBf5f083679233325356EbE738930' },
-    { symbol: 'BUSD', address: '0xed24fc36d5ee211ea25a80239fb8c4cfd80f12ee' },
-  ];
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   const loadRequests = useCallback(async () => {
+    const normalizedAddress = address.trim();
+    if (!validAddress(normalizedAddress)) {
+      setError("Enter a valid 20-byte public address or leave the filter empty.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
     try {
       const params = [];
-      if (from) params.push(`address=${encodeURIComponent(from)}`);
-      if (bridgeMode) params.push(`mode=${encodeURIComponent(bridgeMode)}`);
-      const q = params.length ? `?${params.join('&')}` : '';
-      const data = await fetchJSON(`/bridge/requests${q}`);
+      if (normalizedAddress) params.push(`address=${encodeURIComponent(normalizedAddress)}`);
+      params.push(`mode=${encodeURIComponent(mode)}`);
+      const data = await fetchJSON(`/bridge/requests?${params.join("&")}`);
       setRequests(Array.isArray(data) ? data : []);
-    } catch (e) {
+    } catch (loadError) {
       setRequests([]);
+      setError(loadError?.message || "Bridge activity is currently unavailable.");
+    } finally {
+      setLoading(false);
     }
-  }, [from, bridgeMode]);
+  }, [address, mode]);
 
   useEffect(() => {
-    if (from) {
-      loadRequests();
-    }
-  }, [from, loadRequests]);
-
-  const loadTokenMappings = async () => {
-    try {
-      const data = await fetchJSON('/bridge/tokens');
-      setTokenMappings(Array.isArray(data) ? data : []);
-    } catch (e) {
-      setTokenMappings([]);
-    }
-  };
-
-  useEffect(() => {
-    loadTokenMappings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let active = true;
+    fetchJSON("/bridge/tokens")
+      .then((data) => {
+        if (active) setTokenMappings(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {
+        if (active) setTokenMappings([]);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const submitBridge = async () => {
-    setStatus('');
-    if (!from || !privateKey || !toBsc || !amount) {
-      setStatus('Please fill all fields');
-      return;
-    }
-    try {
-      const body = {
-        from,
-        private_key: privateKey,
-        to_bsc: toBsc,
-        amount: amount,
-        gas_price: Number(gasPrice || 0),
-        gas: 50000,
-        mode: bridgeMode,
-      };
-      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}lock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-      const json = await res.json();
-      setStatus(`Bridge lock submitted: ${json?.tx_hash || json?.TxHash || 'ok'}`);
-      loadRequests();
-    } catch (e) {
-      setStatus(e.message || 'Bridge lock failed');
-    }
-  };
-
-  const submitBurn = async () => {
-    setBurnStatus('');
-    if (!burnKey || !burnAmount || !burnToLqd) {
-      setBurnStatus('Please fill all fields');
-      return;
-    }
-    try {
-      const body = {
-        private_key: burnKey,
-        amount: burnAmount,
-        to_lqd: burnToLqd,
-        mode: bridgeMode,
-      };
-      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}burn`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-      const json = await res.json();
-      setBurnStatus(`Burn submitted: ${json?.tx_hash || 'ok'}`);
-    } catch (e) {
-      setBurnStatus(e.message || 'Burn failed');
-    }
-  };
-
-  const submitBscLock = async () => {
-    setBscStatus('');
-    if (!bscKey || !bscToken || !bscToLqd || !bscAmount) {
-      setBscStatus('Please fill all fields');
-      return;
-    }
-    try {
-      const body = {
-        private_key: bscKey,
-        token: bscToken,
-        to_lqd: bscToLqd,
-        amount: bscAmount,
-        mode: bridgeMode,
-      };
-      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}lock_bsc_token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-      const json = await res.json();
-      setBscStatus(`BSC lock submitted: ${json?.tx_hash || 'ok'}`);
-      loadRequests();
-      loadTokenMappings();
-    } catch (e) {
-      setBscStatus(e.message || 'Lock failed');
-    }
-  };
-
-  const submitLqdBurn = async () => {
-    setLqdStatus('');
-    if (!lqdKey || !lqdToken || !lqdToBsc || !lqdAmount) {
-      setLqdStatus('Please fill all fields');
-      return;
-    }
-    try {
-      const body = {
-        private_key: lqdKey,
-        token: lqdToken,
-        to_bsc: lqdToBsc,
-        amount: lqdAmount,
-        mode: bridgeMode,
-      };
-      const res = await fetch(`${API_BASE}/wallet/bridge/${bridgeMode === 'private' ? 'private/' : ''}burn_lqd_token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-      const json = await res.json();
-      setLqdStatus(`Burn submitted: ${json?.tx_hash || json?.TxHash || 'ok'}`);
-      loadRequests();
-    } catch (e) {
-      setLqdStatus(e.message || 'Burn failed');
-    }
-  };
+  useEffect(() => {
+    const timer = window.setTimeout(loadRequests, 150);
+    return () => window.clearTimeout(timer);
+  }, [loadRequests]);
 
   return (
     <main className="bridge-page premium-route-page">
       <ExplorerPageHero
-        eyebrow="Cross-chain operations"
-        title="Bridge"
-        description="Supported chains, token mappings and public cross-chain requests."
-        metaLabel="Connected networks"
-        metaValue="PoDL ↔ BSC testnet"
+        eyebrow="Cross-chain evidence"
+        title="Bridge activity"
+        description="Inspect registered mappings and public bridge requests. Transaction signing is intentionally unavailable in the explorer."
+        metaLabel="Security mode"
+        metaValue="Read-only"
       />
       <MetricStrip items={[
-        { label: 'Bridge mode', value: bridgeMode, note: 'active execution path' },
-        { label: 'Token mappings', value: tokenMappings.length.toLocaleString(), note: 'registered assets' },
-        { label: 'Visible requests', value: requests.length.toLocaleString(), note: 'filtered operations' },
-        { label: 'Environment', value: 'Testnet', note: 'experimental software' },
+        { label: "Request class", value: mode, note: "public ledger filter" },
+        { label: "Token mappings", value: tokenMappings.length.toLocaleString(), note: "registered assets" },
+        { label: "Visible requests", value: requests.length.toLocaleString(), note: "matching operations" },
+        { label: "Environment", value: "Testnet", note: "no real funds" },
       ]} />
+
       <div className="bridge-workbench">
-      <div className="card bridge-mode-card">
-        <h3>Bridge Mode</h3>
-        <div className="template-wrap">
-          <button className={bridgeMode === 'public' ? 'chip active' : 'chip'} onClick={() => setBridgeMode('public')}>Public</button>
-          <button className={bridgeMode === 'private' ? 'chip active' : 'chip'} onClick={() => setBridgeMode('private')}>Private</button>
-        </div>
-        <div className="notice">Current mode: {bridgeMode}</div>
-      </div>
-      <div className="card bridge-action-card">
-        <h3>Lock BEP20 on BSC → Mint on LQD</h3>
-        <div className="form-row">
-          <label>BSC Token</label>
-          <select value={bscToken} onChange={(e) => setBscToken(e.target.value)}>
-            <option value="">Select token</option>
-            {defaultTokens.map((t) => (
-              <option key={t.address} value={t.address}>{t.symbol} ({t.address.slice(0, 8)}…)</option>
-            ))}
-          </select>
-          <input
-            value={bscToken}
-            onChange={(e) => setBscToken(e.target.value)}
-            placeholder="Or paste token address"
-          />
-        </div>
-        <div className="form-row">
-          <label>BSC Private Key</label>
-          <input value={bscKey} onChange={(e) => setBscKey(e.target.value)} placeholder="private key" />
-          <small>Raw hex, may include 0x prefix</small>
-        </div>
-        <div className="form-row">
-          <label>To (LQD address)</label>
-          <input value={bscToLqd} onChange={(e) => setBscToLqd(e.target.value)} placeholder="0x..." />
-        </div>
-        <div className="form-row">
-          <label>Amount</label>
-          <input value={bscAmount} onChange={(e) => setBscAmount(e.target.value)} placeholder="1000" />
-        </div>
-        <button className="btn-primary" onClick={submitBscLock}>Bridge Now</button>
-        {bscStatus && <div className="notice">{bscStatus}</div>}
-      </div>
+        <section className="card bridge-mode-card">
+          <div className="section-heading-row">
+            <div>
+              <span className="eyebrow">Public query</span>
+              <h3>Filter bridge ledger</h3>
+            </div>
+            <span className="status-pill">Watch only</span>
+          </div>
+          <div className="template-wrap" role="group" aria-label="Bridge request class">
+            <button type="button" className={mode === "public" ? "chip active" : "chip"} onClick={() => setMode("public")}>Public</button>
+            <button type="button" className={mode === "private" ? "chip active" : "chip"} onClick={() => setMode("private")}>Private class</button>
+          </div>
+          <div className="form-row">
+            <label htmlFor="bridge-address-filter">Public account address</label>
+            <input
+              id="bridge-address-filter"
+              value={address}
+              onChange={(event) => setAddress(event.target.value)}
+              placeholder="Optional: 0x…"
+              autoComplete="off"
+              spellCheck="false"
+            />
+          </div>
+          <button type="button" className="btn-secondary" onClick={loadRequests}>Refresh public data</button>
+          {error && <div className="notice" role="alert">{error}</div>}
+        </section>
 
-      <div className="card bridge-action-card">
-        <h3>Burn LQD Token → Release on BSC</h3>
-        <div className="form-row">
-          <label>LQD Token Contract</label>
-          <select value={lqdToken} onChange={(e) => setLqdToken(e.target.value)}>
-            <option value="">Select token</option>
-            {tokenMappings.map((t) => (
-              <option key={t.lqd_token} value={t.lqd_token}>
-                {t.symbol} ({t.lqd_token.slice(0, 8)}…)
-              </option>
-            ))}
-          </select>
-          <input
-            value={lqdToken}
-            onChange={(e) => setLqdToken(e.target.value)}
-            placeholder="Or paste LQD token address"
-          />
-        </div>
-        <div className="form-row">
-          <label>LQD Private Key</label>
-          <input value={lqdKey} onChange={(e) => setLqdKey(e.target.value)} placeholder="private key" />
-        </div>
-        <div className="form-row">
-          <label>To (BSC address)</label>
-          <input value={lqdToBsc} onChange={(e) => setLqdToBsc(e.target.value)} placeholder="0x..." />
-        </div>
-        <div className="form-row">
-          <label>Amount</label>
-          <input value={lqdAmount} onChange={(e) => setLqdAmount(e.target.value)} placeholder="1000" />
-        </div>
-        <button className="btn-primary" onClick={submitLqdBurn}>Burn on LQD</button>
-        {lqdStatus && <div className="notice">{lqdStatus}</div>}
-      </div>
+        <section className="card bridge-action-card">
+          <span className="eyebrow">Trust boundary</span>
+          <h3>Signing disabled</h3>
+          <p>
+            This public explorer never requests, stores or transmits a private key or recovery
+            phrase. Bridge execution remains unavailable until the relayer, proof path and local
+            signer pass independent security review.
+          </p>
+          <div className="notice">Testnet observation only. Do not send real assets to bridge addresses.</div>
+        </section>
 
-      <div className="card bridge-action-card">
-        <h3>Lock LQD → Mint on BSC</h3>
-        <div className="form-row">
-          <label>From (LQD address)</label>
-          <input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="0x..." />
-        </div>
-        <div className="form-row">
-          <label>Private Key</label>
-          <input value={privateKey} onChange={(e) => setPrivateKey(e.target.value)} placeholder="private key" />
-          <small>Use raw hex (no 0x prefix)</small>
-        </div>
-        <div className="form-row">
-          <label>To (BSC address)</label>
-          <input value={toBsc} onChange={(e) => setToBsc(e.target.value)} placeholder="0x..." />
-        </div>
-        <div className="form-row">
-          <label>Amount (LQD)</label>
-          <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="100" />
-        </div>
-        <div className="form-row">
-          <label>Gas Price</label>
-          <input value={gasPrice} onChange={(e) => setGasPrice(e.target.value)} />
-        </div>
-        <button className="btn-primary" onClick={submitBridge}>Bridge Now</button>
-        {status && <div className="notice">{status}</div>}
-      </div>
+        <section className="card bridge-action-card">
+          <span className="eyebrow">Registered assets</span>
+          <h3>Token mappings</h3>
+          {tokenMappings.length === 0 ? (
+            <p>No bridge token mappings are currently published.</p>
+          ) : (
+            <div className="bridge-mapping-list">
+              {tokenMappings.map((token, index) => (
+                <div key={token.lqd_token || token.external_token || index} className="balance-item">
+                  <span>{token.symbol || "Asset"}</span>
+                  <strong title={token.lqd_token || token.external_token || ""}>
+                    {shortValue(token.lqd_token || token.external_token)}
+                  </strong>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
-      <div className="card bridge-request-card">
-        <h3>Bridge Requests</h3>
-        <button className="btn-secondary" onClick={loadRequests}>Refresh</button>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>From</th>
-              <th>To</th>
-              <th>Amount</th>
-              <th>Status</th>
-              <th>Token</th>
-              <th>LQD Tx</th>
-              <th>BSC Tx</th>
-            </tr>
-          </thead>
-          <tbody>
-            {requests.length === 0 ? (
-              <tr><td colSpan="8">No bridge requests</td></tr>
-            ) : (
-              requests.map((r) => (
-                <tr key={r.id}>
-                  <td>{r.id?.slice(0, 10)}…</td>
-                  <td>{r.from?.slice(0, 10)}…</td>
-                  <td>{r.to?.slice(0, 10)}…</td>
-                  <td>{r.amount}</td>
-                  <td>{r.status}</td>
-                  <td>{r.token ? r.token.slice(0, 10) + '…' : 'LQD'}</td>
-                  <td>{r.lqd_tx_hash?.slice(0, 10)}…</td>
-                  <td>{r.bsc_tx_hash ? `${r.bsc_tx_hash.slice(0, 10)}…` : '—'}</td>
+        <section className="card bridge-request-card">
+          <div className="section-heading-row">
+            <div>
+              <span className="eyebrow">On-chain records</span>
+              <h3>Bridge requests</h3>
+            </div>
+            <span className="status-pill">{loading ? "Loading" : `${requests.length} records`}</span>
+          </div>
+          <div className="table-scroll" tabIndex="0" aria-label="Bridge request table">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Amount</th>
+                  <th>Status</th>
+                  <th>Token</th>
+                  <th>LQD Tx</th>
+                  <th>External Tx</th>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="card bridge-action-card">
-        <h3>Burn on BSC → Unlock on LQD</h3>
-        <div className="form-row">
-          <label>BSC Private Key</label>
-          <input value={burnKey} onChange={(e) => setBurnKey(e.target.value)} placeholder="private key" />
-          <small>Use raw hex (no 0x prefix)</small>
-        </div>
-        <div className="form-row">
-          <label>Amount (LQD)</label>
-          <input value={burnAmount} onChange={(e) => setBurnAmount(e.target.value)} placeholder="100" />
-        </div>
-        <div className="form-row">
-          <label>To (LQD address)</label>
-          <input value={burnToLqd} onChange={(e) => setBurnToLqd(e.target.value)} placeholder="0x..." />
-        </div>
-        <button className="btn-primary" onClick={submitBurn}>Burn on BSC</button>
-        {burnStatus && <div className="notice">{burnStatus}</div>}
-      </div>
+              </thead>
+              <tbody>
+                {!loading && requests.length === 0 ? (
+                  <tr><td colSpan="8">No matching bridge requests.</td></tr>
+                ) : requests.map((request) => (
+                  <tr key={request.id || `${request.lqd_tx_hash}-${request.bsc_tx_hash}`}>
+                    <td title={request.id}>{shortValue(request.id)}</td>
+                    <td title={request.from}>{shortValue(request.from)}</td>
+                    <td title={request.to}>{shortValue(request.to)}</td>
+                    <td>{request.amount ?? "—"}</td>
+                    <td>{request.status || "unknown"}</td>
+                    <td title={request.token}>{request.token ? shortValue(request.token) : "LQD"}</td>
+                    <td title={request.lqd_tx_hash}>{shortValue(request.lqd_tx_hash)}</td>
+                    <td title={request.bsc_tx_hash || request.external_tx_hash}>{shortValue(request.bsc_tx_hash || request.external_tx_hash)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </main>
   );

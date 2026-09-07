@@ -4,7 +4,6 @@ import BridgePage from './BridgePage';
 import { fetchJSON } from '../utils/api';
 
 vi.mock('../utils/api', () => ({
-  API_BASE: 'http://127.0.0.1:9000',
   fetchJSON: vi.fn(),
 }));
 
@@ -14,6 +13,8 @@ beforeEach(() => {
     switch (path) {
       case '/bridge/tokens':
         return [{ symbol: 'USDT', lqd_token: '0xlqdtoken' }];
+      case '/bridge/requests?mode=public':
+        return [];
       case '/bridge/requests?address=0xfeed000000000000000000000000000000000000&mode=private':
         return [{ id: 'req-private', from: '0xfeed', to: '0xbeef', amount: '10', status: 'queued', token: 'LQD' }];
       default:
@@ -22,17 +23,18 @@ beforeEach(() => {
   });
 });
 
-test('loads token mappings and refreshes private-mode requests', async () => {
+test('loads public bridge evidence without accepting signing secrets', async () => {
   render(<BridgePage />);
 
-  expect(await screen.findByText(/Current mode: public/i)).toBeInTheDocument();
-  expect(fetchJSON).toHaveBeenCalledWith('/bridge/tokens');
+  expect(await screen.findByText(/Signing disabled/i)).toBeInTheDocument();
+  expect(screen.queryByLabelText(/^Private Key$/i)).not.toBeInTheDocument();
+  expect(document.querySelector('input[type="password"]')).toBeNull();
+  await waitFor(() => expect(fetchJSON).toHaveBeenCalledWith('/bridge/tokens'));
+  await waitFor(() => expect(fetchJSON).toHaveBeenCalledWith('/bridge/requests?mode=public'));
 
-  await userEvent.click(screen.getByRole('button', { name: 'Private' }));
-  expect(screen.getByText(/Current mode: private/i)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Private class' }));
 
-  const fromLabel = screen.getByText('From (LQD address)');
-  const fromInput = fromLabel.parentElement.querySelector('input');
+  const fromInput = screen.getByLabelText('Public account address');
   fireEvent.change(fromInput, {
     target: { value: '0xfeed000000000000000000000000000000000000' },
   });

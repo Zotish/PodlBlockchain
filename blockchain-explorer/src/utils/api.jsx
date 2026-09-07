@@ -35,11 +35,76 @@ export function apiUrl(base, path) {
 
 const requestCache = new Map();
 const inFlightRequests = new Map();
+const MAX_CACHE_ENTRIES = 128;
+const MAX_CACHE_BYTES = 8 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+let cacheBytes = 0;
+let expiryTimer;
+
+function evictCache(key) {
+  const entry = requestCache.get(key);
+  if (entry) cacheBytes -= entry.bytes;
+  requestCache.delete(key);
+}
+
+function expireCache() {
+  clearTimeout(expiryTimer);
+  const now = Date.now();
+  let next = Infinity;
+  for (const [key, entry] of requestCache) {
+    if (entry.expiresAt <= now) evictCache(key);
+    else next = Math.min(next, entry.expiresAt);
+  }
+  if (Number.isFinite(next)) {
+    expiryTimer = setTimeout(expireCache, Math.max(1, next - now));
+    expiryTimer.unref?.();
+  }
+}
+
+export function clearRequestCache() {
+  clearTimeout(expiryTimer);
+  requestCache.clear();
+  cacheBytes = 0;
+}
+
+export function requestCacheStats() {
+  expireCache();
+  return { entries: requestCache.size, bytes: cacheBytes };
+}
+
+async function responseJSON(response, signal) {
+  const declared = Number(response.headers?.get('content-length'));
+  if (declared > MAX_RESPONSE_BYTES) throw new Error('Response exceeds the explorer safety limit');
+  if (!response.body?.getReader) return response.json();
+  const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener('abort', cancel, { once: true });
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let body = '';
+  try {
+    while (true) {
+      if (signal.aborted) throw signal.reason;
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        cancel();
+        throw new Error('Response exceeds the explorer safety limit');
+      }
+      body += decoder.decode(part.value, { stream: true });
+    }
+    return JSON.parse(body + decoder.decode());
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    reader.releaseLock();
+  }
+}
 
 function requestKey(base, path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
   const body = options.body ? String(options.body) : "";
-  return `${method}:${apiUrl(base, path)}:${body}`;
+  return `${method}:${apiUrl(base, path)}:${body}:${options.timeoutMs || 12000}:${options.cacheTtlMs || 0}`;
 }
 
 export async function fetchJSON(path, options = {}) {
@@ -50,47 +115,60 @@ export async function fetchJSON(path, options = {}) {
     ...fetchOptions
   } = options || {};
   const method = String(fetchOptions.method || "GET").toUpperCase();
-  const key = requestKey(base, path, fetchOptions);
-  const now = Date.now();
+  const key = requestKey(base, path, { ...fetchOptions, timeoutMs, cacheTtlMs });
+  const headers = new Headers(fetchOptions.headers);
+  // Never share authenticated requests or cancellation between independent callers.
+  const shareable = method === 'GET' && !fetchOptions.signal && [...headers].length === 0 && fetchOptions.credentials !== 'include';
+  if (fetchOptions.signal?.aborted) throw fetchOptions.signal.reason || new DOMException('Cancelled', 'AbortError');
+  expireCache();
 
-  if (method === "GET" && cacheTtlMs > 0) {
+  if (shareable && cacheTtlMs > 0) {
     const cached = requestCache.get(key);
-    if (cached && cached.expiresAt > now) return cached.data;
+    if (cached) {
+      requestCache.delete(key);
+      requestCache.set(key, cached);
+      return structuredClone(cached.data);
+    }
   }
 
-  if (method === "GET" && inFlightRequests.has(key)) {
-    return inFlightRequests.get(key);
+  if (shareable && inFlightRequests.has(key)) {
+    return structuredClone(await inFlightRequests.get(key));
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const promise = fetch(apiUrl(base, path), {
-    ...fetchOptions,
-    signal: fetchOptions.signal || controller.signal,
-  }).then(async (res) => {
-    clearTimeout(timer);
-    if (!res.ok) {
-      // Try to read the JSON error body for a friendly message
-      try {
-        const data = await res.json();
-        if (data && data.error) throw new Error(data.error);
-      } catch (inner) {
-        if (inner.message && inner.message !== 'Failed to fetch') throw inner;
+  const cancel = () => controller.abort(fetchOptions.signal.reason || new DOMException('Cancelled', 'AbortError'));
+  fetchOptions.signal?.addEventListener('abort', cancel, { once: true });
+  const deadline = Number.isFinite(timeoutMs) ? Math.max(1, Math.min(60000, timeoutMs)) : 12000;
+  const timer = setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), deadline);
+  let rejectAborted;
+  const aborted = new Promise((_, reject) => { rejectAborted = () => reject(controller.signal.reason); });
+  controller.signal.addEventListener('abort', rejectAborted, { once: true });
+  const work = async () => {
+    const res = await fetch(apiUrl(base, path), { ...fetchOptions, signal: controller.signal });
+    const data = await responseJSON(res, controller.signal);
+    if (controller.signal.aborted) throw controller.signal.reason;
+    if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+    if (shareable && cacheTtlMs > 0) {
+      const bytes = new TextEncoder().encode(JSON.stringify(data)).byteLength;
+      if (bytes <= MAX_RESPONSE_BYTES) {
+        evictCache(key);
+        requestCache.set(key, { data: structuredClone(data), bytes, expiresAt: Date.now() + Math.min(cacheTtlMs, 300000) });
+        cacheBytes += bytes;
+        while (requestCache.size > MAX_CACHE_ENTRIES || cacheBytes > MAX_CACHE_BYTES) evictCache(requestCache.keys().next().value);
+        expireCache();
       }
-      throw new Error(`Request failed (${res.status})`);
-    }
-    const data = await res.json();
-    if (method === "GET" && cacheTtlMs > 0) {
-      requestCache.set(key, { data, expiresAt: Date.now() + cacheTtlMs });
     }
     return data;
-  }).finally(() => {
+  };
+  const promise = Promise.race([work(), aborted]).finally(() => {
     clearTimeout(timer);
-    inFlightRequests.delete(key);
+    fetchOptions.signal?.removeEventListener('abort', cancel);
+    controller.signal.removeEventListener('abort', rejectAborted);
+    if (shareable && inFlightRequests.get(key) === promise) inFlightRequests.delete(key);
   });
 
-  if (method === "GET") inFlightRequests.set(key, promise);
-  return promise;
+  if (shareable) inFlightRequests.set(key, promise);
+  return shareable ? structuredClone(await promise) : promise;
 }
 
 export async function fetchChainJSON(path, options = {}) {

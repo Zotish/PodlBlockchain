@@ -5,7 +5,7 @@ const SERVICES = {
   all: { label: "All services" },
   chain: { label: "Chain API", base: CHAIN_BASE, note: "Ledger, consensus and protocol data" },
   gateway: { label: "Explorer API", base: API_BASE, note: "Public indexed data gateway" },
-  wallet: { label: "Wallet API", base: WALLET_BASE, note: "Wallet transaction gateway" },
+  wallet: { label: "Wallet API", base: WALLET_BASE, note: "Read-only public wallet data" },
   dex: { label: "DEX registry", base: DEX_REGISTRY_BASE, note: "Public token and pool registry" },
 };
 
@@ -23,11 +23,11 @@ const ENDPOINTS = [
   endpoint("chain", "Network", "GET", "/basefee", "Current protocol base fee"),
   endpoint("chain", "Network", "GET", "/blocktime/latest", "Latest block production timing"),
   endpoint("chain", "Network", "GET", "/metrics", "Prometheus-compatible node metrics"),
-  endpoint("chain", "Network", "GET", "/mempool", "Pending transaction pool summary"),
+  endpoint("chain", "Network", "GET", "/mempool?offset={offset}&limit={limit}", "Detached pending-transaction page; at most 200 rows and 2 MiB"),
   endpoint("chain", "Network", "GET", "/treasury", "Public protocol treasury state"),
   endpoint("chain", "Network", "GET", "/chain/summary", "Compact chain summary"),
   endpoint("chain", "Network", "GET", "/chain/global", "Aggregated public chain state"),
-  endpoint("chain", "Network", "GET", "/chain/export", "Canonical chain export", "Large response"),
+  endpoint("chain", "Network", "GET", "/chain/export?offset={offset}&limit={limit}", "Bounded finalized header page; excludes full node state", "Paginated"),
   endpoint("chain", "Index", "GET", "/v2/index/status", "Persistent index height, transaction count and lag"),
   endpoint("chain", "Index", "GET", "/v2/index/search?q={query}", "Search a block, transaction or address"),
   endpoint("chain", "Index", "GET", "/v2/protocol/status", "Protocol and state version status"),
@@ -43,6 +43,8 @@ const ENDPOINTS = [
   endpoint("chain", "Transactions", "GET", "/tx/{hash}", "Transaction receipt and execution details"),
   endpoint("chain", "Transactions", "POST", "/send_tx", "Broadcast one signed transaction", "Signed payload"),
   endpoint("chain", "Transactions", "POST", "/send_tx/batch", "Broadcast a signed transaction batch", "Signed payload"),
+  endpoint("chain", "Transactions", "POST", "/v4/transactions/simulate", "V4 native-transfer admission preflight; no signing, broadcast or inclusion guarantee", "V4 testnet"),
+  endpoint("chain", "Blocks", "GET", "/v3/da/{root}?chunk={index}", "Bounded data-availability chunk; verify the committed root before use"),
   endpoint("chain", "Transactions", "POST", "/rpc", "JSON-RPC compatible request gateway", "Validated input"),
   endpoint("chain", "Transactions", "POST", "/faucet", "Request public-testnet LQD", "Testnet only"),
 
@@ -106,19 +108,8 @@ const ENDPOINTS = [
   endpoint("gateway", "Gateway", "GET", "/", "Gateway service and upstream status"),
 
   endpoint("wallet", "Wallet", "GET", "/health", "Wallet gateway health"),
-  endpoint("wallet", "Wallet", "POST", "/wallet/new", "Create a new testnet wallet", "Sensitive response"),
-  endpoint("wallet", "Wallet", "POST", "/wallet/import/mnemonic", "Restore a wallet from a recovery phrase", "Sensitive input"),
-  endpoint("wallet", "Wallet", "POST", "/wallet/import/private-key", "Restore a wallet from a private key", "Sensitive input"),
   endpoint("wallet", "Wallet", "GET", "/wallet/balance?address={address}", "Wallet balance summary"),
   endpoint("wallet", "Wallet", "GET", "/wallet/token-balance?address={address}&token={token}", "Token balance for a wallet"),
-  endpoint("wallet", "Wallet", "POST", "/wallet/contract-template", "Build a supported contract transaction template", "Validated input"),
-  endpoint("wallet", "Wallet", "POST", "/wallet/send", "Create and broadcast a wallet transfer", "Sensitive input"),
-  endpoint("wallet", "Wallet", "POST", "/wallet/send_batch", "Create and broadcast a transfer batch", "Sensitive input"),
-  endpoint("wallet", "Bridge", "POST", "/wallet/bridge/lock", "Wallet bridge lock transaction", "Sensitive input"),
-  endpoint("wallet", "Bridge", "POST", "/wallet/bridge/burn", "Wallet bridge burn transaction", "Sensitive input"),
-  endpoint("wallet", "Bridge", "POST", "/wallet/bridge/lock_bsc_token", "Build and submit a BSC token lock", "Sensitive input"),
-  endpoint("wallet", "Bridge", "POST", "/wallet/bridge/burn_lqd_token", "Build and submit an LQD bridge burn", "Sensitive input"),
-  endpoint("wallet", "Bridge", "POST", "/wallet/bridge/bsc_lock_tx", "Build a BSC lock transaction", "Sensitive input"),
 
   endpoint("dex", "Registry", "GET", "/health", "DEX registry health"),
   endpoint("dex", "Registry", "GET", "/config", "Public DEX registry configuration"),
@@ -213,7 +204,7 @@ const ApiDocsPage = () => {
           ))}
         </div>
 
-        <div className="clean-api-count"><strong>{filtered.length}</strong> public endpoints</div>
+        <div className="clean-api-count"><strong>{filtered.length}</strong> documented public endpoints</div>
 
         <div className="clean-endpoint-groups">
           {groups.map((group) => (

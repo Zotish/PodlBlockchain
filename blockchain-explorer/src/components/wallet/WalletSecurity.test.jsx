@@ -8,7 +8,7 @@ describe("wallet security boundaries", () => {
   });
 
   it("rejects incomplete local vault passwords", () => {
-    expect(validatePasswordStrength("short")).toMatch(/10 characters/i);
+    expect(validatePasswordStrength("short")).toMatch(/12 characters/i);
     expect(validatePasswordStrength("lowercase-only-password")).toMatch(/uppercase/i);
   });
 

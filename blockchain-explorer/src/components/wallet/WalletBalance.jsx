@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from "react";
 import { formatLQD } from "./lqdUnits";
-import { API_BASE, apiUrl, fetchJSON, firstNodeResult, waitForTx } from "../../utils/api";
+import { API_BASE, apiUrl, fetchJSON, firstNodeResult } from "../../utils/api";
 
 const NODE_URL = API_BASE;
 const TOKENS_STORAGE_KEY = "liquidity_tokens_v1";
@@ -11,104 +11,7 @@ const tokensKeyForAddress = (address) =>
   `${TOKENS_STORAGE_KEY}_${(address || "").toLowerCase()}`;
 
 // Helper component for one token card
-const TokenCard = ({ token, address, privateKey, onRefresh, onRemove }) => {
-  const [to, setTo] = useState("");
-  const [amount, setAmount] = useState("");
-  const [status, setStatus] = useState("");
-
-  // Convert "1.23" -> raw integer string using decimals
-  const toRawTokenAmount = (amountStr, decimals) => {
-    if (!amountStr) return null;
-    const trimmed = amountStr.trim();
-    if (trimmed === "") return null;
-
-    // Overflow guard: max 20 integer digits + decimals
-    const [intPartRaw, fracPartRaw] = trimmed.split(".");
-    if ((intPartRaw || "").replace(/^0+/, "").length > 20) return null;
-    if ((fracPartRaw || "").length > 18) return null;
-
-    const intPart = (intPartRaw || "0").replace(/^0+/, "") || "0";
-    let fracPart = fracPartRaw || "";
-
-    if (fracPart.length > decimals) {
-      fracPart = fracPart.slice(0, decimals);
-    } else {
-      fracPart = fracPart.padEnd(decimals, "0");
-    }
-
-    const full = (intPart + fracPart).replace(/^0+/, "") || "0";
-    if (!/^[0-9]+$/.test(full)) return null;
-    // Final length guard: max 39 digits (safe for uint256)
-    if (full.length > 39) return null;
-    return full;
-  };
-
-  const handleSendToken = async () => {
-    if (!token.contract) {
-      setStatus("No token contract.");
-      return;
-    }
-    if (!to.trim()) {
-      setStatus("Enter recipient address.");
-      return;
-    }
-    if (!amount.trim()) {
-      setStatus("Enter amount.");
-      return;
-    }
-
-    const rawAmount = toRawTokenAmount(amount, token.decimals);
-    if (!rawAmount) {
-      setStatus("Invalid amount.");
-      return;
-    }
-
-    try {
-      setStatus("Sending token...");
-      const body = {
-        address,
-        contract_address: token.contract,
-        function: "Transfer",
-        args: [to.trim(), rawAmount],
-        value: 0,
-        private_key: privateKey || "",
-      };
-
-      const res = await fetch(apiUrl(NODE_URL, "/wallet/contract-template"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const text = await res.text();
-      let data = null;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = null;
-      }
-      if (!res.ok || (data && data.success === false)) {
-        throw new Error(data?.error || data?.output || text || "Token transfer failed");
-      }
-
-      const hash = data?.tx_hash || data?.TxHash || data?.hash || "";
-      if (hash) {
-        await waitForTx(hash, 5000).catch(() => null);
-      }
-
-      setStatus(`Success: sent ${amount} ${token.symbol} to ${to.trim()}`);
-      setAmount("");
-      setTo("");
-      try {
-        window.dispatchEvent(new CustomEvent("lqd:wallet-updated", { detail: { address, token: token.contract } }));
-      } catch {}
-
-      await onRefresh(token.contract);
-    } catch (err) {
-      console.error("token transfer error", err);
-      setStatus(`Error: ${err.message}`);
-    }
-  };
-
+const TokenCard = ({ token, onRefresh, onRemove }) => {
   return (
     <div className="balance-card" style={{ marginTop: 20 }}>
       <div
@@ -174,40 +77,15 @@ const TokenCard = ({ token, address, privateKey, onRefresh, onRemove }) => {
       </div>
 
       {token.type !== "dapp" && (
-        <div style={{ marginTop: 20, textAlign: "left" }}>
-          <h4>Send {token.symbol}</h4>
-          <div className="form-group">
-            <label>Recipient Address</label>
-            <input
-              type="text"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              placeholder="0xRecipient..."
-            />
-          </div>
-          <div className="form-group">
-            <label>Amount ({token.symbol})</label>
-            <input
-              type="number"
-              min="0"
-              step="0.000000000000000001"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="e.g. 10.5"
-            />
-          </div>
-          <button className="btn-primary" onClick={handleSendToken}>
-            Send {token.symbol}
-          </button>
-
-          {status && <div style={{ marginTop: 8 }}>{status}</div>}
+        <div className="notice" style={{ marginTop: 20, textAlign: "left" }}>
+          Watch-only asset. Transfers must be signed by an independently audited local wallet.
         </div>
       )}
     </div>
   );
 };
 
-const WalletBalance = ({ address, privateKey }) => {
+const WalletBalance = ({ address }) => {
   const [balance, setBalance] = useState("0");
   const [confirmedBalance, setConfirmedBalance] = useState("0");
   const [pendingChange, setPendingChange] = useState("0");
@@ -505,35 +383,6 @@ const WalletBalance = ({ address, privateKey }) => {
     });
   };
 
-  const handleFaucet = async () => {
-    try {
-      setLoading(true);
-      setError("");
-
-      const response = await fetch(apiUrl(NODE_URL, "/faucet"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          result.error || result.message || "Faucet request failed"
-        );
-      }
-
-      await fetchBalance();
-
-      alert(`Received ${formatLQD(result.credited || "0")} LQD from faucet!`);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   // On mount / when address changes: load saved tokens for this address and fetch their balances
   useEffect(() => {
     const key = tokensKeyForAddress(address);
@@ -760,13 +609,6 @@ const WalletBalance = ({ address, privateKey }) => {
         </div>
 
         <div className="balance-actions">
-          <button
-            className="btn-primary"
-            onClick={handleFaucet}
-            disabled={loading}
-          >
-            {loading ? "Processing..." : "Get Test Coins (Faucet)"}
-          </button>
           <button className="btn-secondary" onClick={fetchBalance}>
             Refresh Balance
           </button>
@@ -846,8 +688,6 @@ const WalletBalance = ({ address, privateKey }) => {
         <TokenCard
           key={token.contract}
           token={token}
-          address={address}
-          privateKey={privateKey}
           onRefresh={refreshSingleToken}
           onRemove={handleRemoveToken}
         />
@@ -864,12 +704,12 @@ const WalletBalance = ({ address, privateKey }) => {
         <div className="info-item">
           <strong>Signing key:</strong>
           <span className="private-key-masked">
-            Encrypted at rest · unlocked in this session only
+            Not present · public address only
           </span>
         </div>
         <div className="warning">
-          Private-key reveal and clipboard export are intentionally disabled. Use the encrypted
-          backup in Security settings and keep your recovery phrase offline.
+          This explorer cannot create or sign transactions. Never paste a private key or recovery
+          phrase into a website.
         </div>
       </div>
     </div>
